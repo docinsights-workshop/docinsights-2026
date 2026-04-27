@@ -124,7 +124,7 @@ body {
 .hero-banner {
   width: 100%;
   line-height: 0;
-  position: relative;
+  background: var(--color-primary);
 }
 
 .hero-banner-img {
@@ -133,17 +133,13 @@ body {
   display: block;
 }
 
-.hero-overlay {
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
+.hero-badges {
   display: flex;
   justify-content: center;
   flex-wrap: wrap;
   gap: 0.5rem;
-  padding: 0.5rem 1rem;
-  background: rgba(26, 54, 93, 0.9);
+  padding: 0.6rem 1rem;
+  background: var(--color-primary);
 }
 
 .hero-meta {
