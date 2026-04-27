@@ -435,6 +435,19 @@ main a:hover {
   background: var(--color-highlight);
 }
 
+.icon {
+  width: 18px;
+  height: 18px;
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+
+.footer-links .icon {
+  width: 16px;
+  height: 16px;
+  margin-right: 0.4rem;
+}
+
 /* Footer */
 .footer {
   background: var(--color-bg-dark);
