@@ -437,16 +437,17 @@ main a:hover {
 }
 
 .icon {
-  width: 18px;
-  height: 18px;
-  vertical-align: middle;
+  width: 14px;
+  height: 14px;
+  vertical-align: -2px;
   flex-shrink: 0;
 }
 
 .footer-links .icon {
-  width: 16px;
-  height: 16px;
-  margin-right: 0.4rem;
+  width: 13px;
+  height: 13px;
+  vertical-align: -1px;
+  margin-right: 0.3rem;
 }
 
 /* Footer */
