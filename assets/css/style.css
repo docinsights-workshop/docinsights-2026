@@ -149,7 +149,8 @@ body {
   align-items: center;
   flex-wrap: wrap;
   gap: 1rem;
-  padding: 4rem 1.5rem;
+  min-height: var(--nav-height);
+  padding: 1rem 1.5rem;
   background: var(--color-primary);
   line-height: 1;
   margin: 0;
