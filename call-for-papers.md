@@ -71,12 +71,19 @@ ARR-committed papers must still satisfy the workshop's formatting, anonymization
 
 ## Important Dates
 
-All deadlines are **11:59 PM UTC-12:00** ("Anywhere on Earth").
+<div class="highlight-box">
+All deadlines are <strong>11:59 PM UTC-12:00</strong> ("Anywhere on Earth").
+</div>
 
-| Event | Date |
-|-------|------|
-| Direct Submission Deadline | August 2, 2026 |
-| ARR Commitment Deadline | August 30, 2026 |
-| Acceptance Notifications | September 13, 2026 |
-| Camera-ready Deadline | September 27, 2026 |
-| Workshop Date | During EMNLP 2026, October 24--29 |
+<table class="dates-table">
+  <thead>
+    <tr><th>Event</th><th>Date</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Direct Submission Deadline</td><td class="date-highlight">August 2, 2026</td></tr>
+    <tr><td>ARR Commitment Deadline</td><td class="date-highlight">August 30, 2026</td></tr>
+    <tr><td>Acceptance Notifications</td><td>September 13, 2026</td></tr>
+    <tr><td>Camera-ready Deadline</td><td>September 27, 2026</td></tr>
+    <tr><td>Workshop Date</td><td class="date-highlight">During EMNLP 2026, October 24&ndash;29</td></tr>
+  </tbody>
+</table>
