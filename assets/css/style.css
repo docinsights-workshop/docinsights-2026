@@ -131,14 +131,16 @@ body {
   background: var(--color-primary);
   margin: 0;
   padding: 0;
+  overflow: hidden;
 }
 
 .hero-banner-img {
   width: 100%;
-  height: auto;
   display: block;
+  vertical-align: bottom;
   margin: 0;
   padding: 0;
+  border: 0;
 }
 
 .hero-badges {
@@ -151,6 +153,7 @@ body {
   background: var(--color-primary);
   line-height: 1;
   margin: 0;
+  border: 0;
 }
 
 .hero-meta {
