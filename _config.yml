@@ -1,0 +1,22 @@
+title: "DocInsights 2026"
+description: "Workshop on Document Intelligence and Understanding — Beyond Plain Text: Bridging NLP and Document AI"
+baseurl: "/docinsights-2026"
+url: ""
+
+markdown: kramdown
+permalink: pretty
+
+collections:
+  pages:
+    output: true
+
+defaults:
+  - scope:
+      path: ""
+    values:
+      layout: default
+
+exclude:
+  - README.md
+  - Gemfile
+  - Gemfile.lock

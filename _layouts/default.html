@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ page.title }} | {{ site.title }}</title>
+  <meta name="description" content="{{ site.description }}">
+  <link rel="stylesheet" href="{{ '/assets/css/style.css' | relative_url }}">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Source+Serif+4:wght@400;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+  <nav class="navbar">
+    <div class="nav-container">
+      <a href="{{ '/' | relative_url }}" class="nav-logo">
+        <img src="{{ '/assets/images/circular_logo.png' | relative_url }}" alt="DocInsights 2026" class="nav-logo-img">
+        DocInsights 2026
+      </a>
+      <button class="nav-toggle" aria-label="Toggle navigation">
+        <span></span><span></span><span></span>
+      </button>
+      <ul class="nav-links">
+        <li><a href="{{ '/' | relative_url }}" {% if page.url == '/' %}class="active"{% endif %}>Welcome</a></li>
+        <li><a href="{{ '/call-for-papers/' | relative_url }}" {% if page.url contains 'call-for-papers' %}class="active"{% endif %}>Call for Papers</a></li>
+        <li><a href="{{ '/program/' | relative_url }}" {% if page.url contains 'program' %}class="active"{% endif %}>Program</a></li>
+        <li><a href="{{ '/organizers/' | relative_url }}" {% if page.url contains 'organizers' %}class="active"{% endif %}>Organizers</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  {% if page.url == '/' %}
+  <header class="hero">
+    <div class="hero-banner">
+      <img src="{{ '/assets/images/banner_cover_photo.png' | relative_url }}" alt="DocInsights 2026 - Workshop on Document Intelligence and Understanding, Co-located with EMNLP 2026, October 24-29, Budapest, Hungary" class="hero-banner-img">
+    </div>
+    <div class="hero-content">
+      <div class="hero-meta">
+        <span class="hero-badge">Full-Day Workshop</span>
+        <span class="hero-badge">Hybrid: Online + In-Person</span>
+        <span class="hero-badge">Submission Deadline: August 2, 2026</span>
+      </div>
+    </div>
+  </header>
+  {% else %}
+  <header class="page-header">
+    <div class="container">
+      <h1>{{ page.title }}</h1>
+    </div>
+  </header>
+  {% endif %}
+
+  <main class="container">
+    {{ content }}
+  </main>
+
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-grid">
+        <div class="footer-col">
+          <h3>DocInsights 2026</h3>
+          <p>Workshop on Document Intelligence and Understanding at EMNLP 2026, Budapest, Hungary.</p>
+        </div>
+        <div class="footer-col">
+          <h3>Connect</h3>
+          <ul class="footer-links">
+            <li><a href="mailto:docinsightsworkshopchairs@gmail.com">Email</a></li>
+            <li><a href="https://x.com/DocInsights_26" target="_blank">X / Twitter</a></li>
+            <li><a href="https://bsky.app/profile/docinsights.bsky.social" target="_blank">Bluesky</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <h3>Quick Links</h3>
+          <ul class="footer-links">
+            <li><a href="{{ '/call-for-papers/' | relative_url }}">Call for Papers</a></li>
+            <li><a href="{{ '/program/' | relative_url }}">Program</a></li>
+            <li><a href="{{ '/organizers/' | relative_url }}">Organizers</a></li>
+          </ul>
+        </div>
+      </div>
+      <div class="footer-bottom">
+        <p>&copy; 2026 DocInsights Workshop. All rights reserved.</p>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    document.querySelector('.nav-toggle').addEventListener('click', function() {
+      document.querySelector('.nav-links').classList.toggle('active');
+      this.classList.toggle('active');
+    });
+  </script>
+</body>
+</html>
