@@ -142,8 +142,8 @@ body {
   justify-content: center;
   flex-wrap: wrap;
   gap: 0.5rem;
-  padding: 0.75rem 1rem;
-  background: linear-gradient(transparent, rgba(26, 54, 93, 0.85));
+  padding: 0.5rem 1rem;
+  background: rgba(26, 54, 93, 0.9);
 }
 
 .hero-meta {
