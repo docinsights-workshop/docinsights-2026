@@ -124,12 +124,15 @@ body {
 .hero-banner {
   width: 100%;
   line-height: 0;
+  max-height: 280px;
+  overflow: hidden;
 }
 
 .hero-banner-img {
   width: 100%;
   height: auto;
   display: block;
+  margin-top: -10%;
 }
 
 .hero-content {
