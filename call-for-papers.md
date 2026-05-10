@@ -66,8 +66,8 @@ ARR-committed papers must still satisfy the workshop's formatting, anonymization
 
 ## Submission Links
 
-- **Direct Submission:** <span class="tbd-badge">TBD</span>
-- **ARR Commitment:** <span class="tbd-badge">TBD</span>
+- **Direct Submission:** [OpenReview](https://openreview.net/group?id=EMNLP/2026/Workshop/DocInsights)
+- **ARR Commitment:** [OpenReview](https://openreview.net/group?id=EMNLP/2026/Workshop/DocInsights_ARR_Commitment)
 
 ## Important Dates
 
