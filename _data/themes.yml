@@ -1,0 +1,13 @@
+items:
+  - title: Structure-aware modeling
+    body: Layout, reading order, hierarchy, and relations across text, tables, forms, figures, charts, and multi-page documents.
+  - title: Reasoning and grounding
+    body: Evidence selection, verification, numerical and temporal reasoning, attribution, and hallucination mitigation for document QA and generation.
+  - title: Multimodal document understanding
+    body: Joint text-layout-vision modeling, OCR-free document models, charts, infographics, forms, and complex visual-textual evidence.
+  - title: Long and cross-document intelligence
+    body: Linking, synthesis, retrieval, and reasoning across long documents, collections, and document-centered workflows.
+  - title: Evaluation and robustness
+    body: Benchmarks, diagnostic analysis, uncertainty, stress tests, OCR/layout noise, and realistic failure modes.
+  - title: Deployment and governance
+    body: Legal, financial, healthcare, scientific, enterprise, and government documents with privacy, auditability, and human-centered review.

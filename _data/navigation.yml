@@ -1,0 +1,62 @@
+primary:
+  - label: Home
+    url: /
+    match: /
+  - label: CFP
+    url: /call-for-papers/
+    match: call-for-papers
+  - label: Dates
+    url: /dates/
+    match: dates
+  - label: Program
+    url: /program/
+    match: program
+  - label: Shared Task
+    url: /shared-task/
+    match: shared-task
+  - label: Speakers
+    url: /speakers/
+    match: speakers
+  - label: Organizers
+    url: /organizers/
+    match: organizers
+  - label: FAQ
+    url: /faq/
+    match: faq
+
+footer_groups:
+  - title: Submit
+    links:
+      - label: Direct OpenReview
+        url: https://openreview.net/group?id=EMNLP/2026/Workshop/DocInsights
+        external: true
+      - label: ARR Commitment
+        url: https://openreview.net/group?id=EMNLP/2026/Workshop/DocInsights_ARR_Commitment
+        external: true
+      - label: Call for Papers
+        url: /call-for-papers/
+  - title: Attend
+    links:
+      - label: EMNLP 2026
+        url: https://2026.emnlp.org/
+        external: true
+      - label: Venue
+        url: https://2026.emnlp.org/venue/
+        external: true
+      - label: Program
+        url: /program/
+      - label: FAQ
+        url: /faq/
+  - title: Policies
+    links:
+      - label: ACL Code of Ethics
+        url: https://www.aclweb.org/adminwiki/index.php/ACL_Code_of_Ethics
+        external: true
+      - label: ACL Anti-Harassment Policy
+        url: https://www.aclweb.org/adminwiki/index.php/Anti-Harassment_Policy
+        external: true
+      - label: ACL Rolling Review
+        url: https://aclrollingreview.org/cfp
+        external: true
+      - label: Contact
+        url: mailto:docinsights-workshop-chairs@googlegroups.com

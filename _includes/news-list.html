@@ -1,0 +1,9 @@
+<div class="news-list">
+  {% for item in site.data.news.items %}
+  <article class="news-item">
+    <time>{{ item.date }}</time>
+    <h3>{{ item.title }}</h3>
+    <p>{{ item.body }}</p>
+  </article>
+  {% endfor %}
+</div>

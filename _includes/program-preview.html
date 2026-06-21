@@ -1,0 +1,8 @@
+<div class="program-grid">
+  {% for item in site.data.program_preview.items %}
+  <article class="program-card">
+    <h3>{{ item.title }}</h3>
+    <p>{{ item.body }}</p>
+  </article>
+  {% endfor %}
+</div>

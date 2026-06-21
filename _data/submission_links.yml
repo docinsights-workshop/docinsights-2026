@@ -1,0 +1,15 @@
+primary:
+  - label: Submit Direct Paper
+    description: Long, short, archival, and non-archival submissions.
+    url: https://openreview.net/group?id=EMNLP/2026/Workshop/DocInsights
+    style: primary
+    external: true
+  - label: Commit ARR Paper
+    description: Commit eligible ARR-reviewed papers to DocInsights.
+    url: https://openreview.net/group?id=EMNLP/2026/Workshop/DocInsights_ARR_Commitment
+    style: secondary
+    external: true
+  - label: Read CFP
+    description: Topics, formats, review process, and policies.
+    url: /call-for-papers/
+    style: ghost

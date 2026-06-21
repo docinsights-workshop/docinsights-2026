@@ -1,0 +1,16 @@
+<div class="date-list">
+  {% for item in site.data.dates.items %}
+  <article class="date-card{% if item.highlight %} date-card-highlight{% endif %}">
+    <div class="date-card-meta">{{ item.type }}</div>
+    <h3>{{ item.label }}</h3>
+    <p class="date-card-date">{{ item.date }}</p>
+    <p class="date-card-time">{{ item.time }}</p>
+    {% if item.note %}
+    <p class="date-card-note">{{ item.note }}</p>
+    {% endif %}
+    {% if item.action_label and item.action_url %}
+    <a class="inline-action" href="{{ item.action_url }}" {% if item.action_url contains 'http' %}target="_blank" rel="noopener"{% endif %}>{{ item.action_label }}</a>
+    {% endif %}
+  </article>
+  {% endfor %}
+</div>

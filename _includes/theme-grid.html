@@ -1,0 +1,8 @@
+<div class="theme-grid">
+  {% for item in site.data.themes.items %}
+  <article class="theme-card">
+    <h3>{{ item.title }}</h3>
+    <p>{{ item.body }}</p>
+  </article>
+  {% endfor %}
+</div>

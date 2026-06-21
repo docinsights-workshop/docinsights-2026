@@ -5,75 +5,76 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{{ page.title }} | {{ site.title }}</title>
   <meta name="description" content="{{ site.description }}">
-  <link rel="stylesheet" href="{{ '/assets/css/style.css' | relative_url }}">
+  <link rel="stylesheet" href="{{ '/assets/css/style.css' | relative_url }}?v={{ site.time | date: '%Y%m%d%H%M%S' }}">
   <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Source+Serif+4:wght@400;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Source+Serif+4:wght@500;600;700&display=swap" rel="stylesheet">
 </head>
 <body>
-  <nav class="navbar">
+  <a href="#main-content" class="skip-link">Skip to content</a>
+
+  <nav class="navbar" aria-label="Primary navigation">
     <div class="nav-container">
       <a href="{{ '/' | relative_url }}" class="nav-logo">
         <img src="{{ '/assets/images/circular_logo.png' | relative_url }}" alt="DocInsights 2026" class="nav-logo-img">
-        DocInsights 2026
+        <span>DocInsights 2026</span>
       </a>
-      <button class="nav-toggle" aria-label="Toggle navigation">
+      <button class="nav-toggle" aria-label="Toggle navigation" aria-controls="primary-navigation" aria-expanded="false">
         <span></span><span></span><span></span>
       </button>
-      <ul class="nav-links">
-        <li><a href="{{ '/' | relative_url }}" {% if page.url == '/' %}class="active"{% endif %}>Welcome</a></li>
-        <li><a href="{{ '/call-for-papers/' | relative_url }}" {% if page.url contains 'call-for-papers' %}class="active"{% endif %}>Call for Papers</a></li>
-        <li><a href="{{ '/program/' | relative_url }}" {% if page.url contains 'program' %}class="active"{% endif %}>Program</a></li>
-        <li><a href="{{ '/organizers/' | relative_url }}" {% if page.url contains 'organizers' %}class="active"{% endif %}>Organizers</a></li>
+      <ul class="nav-links" id="primary-navigation">
+        {% for item in site.data.navigation.primary %}
+        <li>
+          <a
+            href="{{ item.url | relative_url }}"
+            {% if item.match == '/' and page.url == '/' %}class="active"{% elsif item.match != '/' and page.url contains item.match %}class="active"{% endif %}
+          >{{ item.label }}</a>
+        </li>
+        {% endfor %}
       </ul>
     </div>
   </nav>
 
   {% if page.url == '/' %}
-  <header class="hero">
-    <div class="hero-banner">
-      <img src="{{ '/assets/images/banner_cover_photo.png' | relative_url }}" alt="DocInsights 2026 - Workshop on Document Intelligence and Understanding, Co-located with EMNLP 2026, October 24-29, Budapest, Hungary" class="hero-banner-img">
-    </div>
-    <div class="hero-badges">
-      <span class="hero-badge">Full-Day Workshop</span>
-      <span class="hero-badge">Hybrid: Online + In-Person</span>
-      <span class="hero-badge">Submission Deadline: August 2, 2026</span>
-    </div>
-  </header>
+  {% include hero.html %}
   {% else %}
   <header class="page-header">
     <div class="container">
+      <p class="eyebrow">DocInsights 2026</p>
       <h1>{{ page.title }}</h1>
     </div>
   </header>
   {% endif %}
 
-  <main class="container">
+  <main id="main-content" class="container">
     {{ content }}
   </main>
 
   <footer class="footer">
     <div class="container">
       <div class="footer-grid">
-        <div class="footer-col">
+        <div class="footer-col footer-brand">
           <h3>DocInsights 2026</h3>
           <p>Workshop on Document Intelligence and Understanding at EMNLP 2026, Budapest, Hungary.</p>
+          <p class="footer-note">Beyond Plain Text: Bridging NLP and Document AI.</p>
         </div>
+        {% for group in site.data.navigation.footer_groups %}
         <div class="footer-col">
-          <h3>Connect</h3>
+          <h3>{{ group.title }}</h3>
           <ul class="footer-links">
-            <li><a href="mailto:docinsights-workshop-chairs@googlegroups.com"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg> Email</a></li>
-            <li><a href="https://x.com/DocInsights_26" target="_blank"><svg class="icon" viewBox="0 0 24 24" fill="currentColor"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg> X</a></li>
-            <li><a href="https://bsky.app/profile/docinsights.bsky.social" target="_blank"><svg class="icon" viewBox="0 0 24 24" fill="currentColor"><path d="M12 10.8c-1.087-2.114-4.046-6.053-6.798-7.995C2.566.944 1.561 1.266.902 1.565.139 1.908 0 3.08 0 3.768c0 .69.378 5.65.624 6.479.785 2.627 3.6 3.476 6.182 3.13-4.429.664-8.645 2.274-4.461 8.006C6.769 27.017 10.677 21.26 12 18.4c1.323 2.86 4.907 8.167 9.656 3.003 4.184-5.732-.032-7.342-4.461-8.006 2.582.346 5.397-.503 6.182-3.13.246-.828.624-5.79.624-6.479 0-.688-.139-1.86-.902-2.203-.659-.3-1.664-.62-4.3 1.24C16.046 4.748 13.087 8.687 12 10.8z"/></svg> Bluesky</a></li>
+            {% for link in group.links %}
+            <li>
+              {% if link.external %}
+              <a href="{{ link.url }}" target="_blank" rel="noopener">{{ link.label }}</a>
+              {% elsif link.url contains 'mailto:' %}
+              <a href="{{ link.url }}">{{ link.label }}</a>
+              {% else %}
+              <a href="{{ link.url | relative_url }}">{{ link.label }}</a>
+              {% endif %}
+            </li>
+            {% endfor %}
           </ul>
         </div>
-        <div class="footer-col">
-          <h3>Quick Links</h3>
-          <ul class="footer-links">
-            <li><a href="{{ '/call-for-papers/' | relative_url }}">Call for Papers</a></li>
-            <li><a href="{{ '/program/' | relative_url }}">Program</a></li>
-            <li><a href="{{ '/organizers/' | relative_url }}">Organizers</a></li>
-          </ul>
-        </div>
+        {% endfor %}
       </div>
       <div class="footer-bottom">
         <p>&copy; 2026 DocInsights Workshop. All rights reserved.</p>
@@ -82,9 +83,13 @@
   </footer>
 
   <script>
-    document.querySelector('.nav-toggle').addEventListener('click', function() {
-      document.querySelector('.nav-links').classList.toggle('active');
-      this.classList.toggle('active');
+    const navToggle = document.querySelector('.nav-toggle');
+    const navLinks = document.querySelector('.nav-links');
+
+    navToggle.addEventListener('click', function() {
+      const isOpen = navLinks.classList.toggle('active');
+      this.classList.toggle('active', isOpen);
+      this.setAttribute('aria-expanded', String(isOpen));
     });
   </script>
 </body>

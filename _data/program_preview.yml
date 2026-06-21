@@ -1,0 +1,13 @@
+items:
+  - title: Invited talks
+    body: Agenda-setting talks from leaders in document AI, multimodal NLP, retrieval, grounding, and evaluation.
+  - title: Oral presentations
+    body: Selected accepted papers presented as talks, with final timing determined after acceptance decisions.
+  - title: Poster and demo session
+    body: Interactive discussion for accepted papers, systems, demos, diagnostic studies, and work in progress.
+  - title: Shared task spotlight
+    body: Planned RUST-BENCH session on structure-aware tabular reasoning and evidence-grounded systems.
+  - title: Panel
+    body: Discussion on trustworthy document intelligence in science, legal, finance, healthcare, government, and enterprise settings.
+  - title: Early-career spotlights
+    body: Short invited highlights and moderation opportunities for emerging work in document-centered NLP.

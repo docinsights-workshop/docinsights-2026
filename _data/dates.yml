@@ -1,0 +1,35 @@
+timezone_note: All submission deadlines are 11:59 PM UTC-12:00 ("Anywhere on Earth") unless otherwise noted. OpenReview is the submission system of record for exact system timestamps.
+items:
+  - label: Direct Submission Deadline
+    date: August 2, 2026
+    time: 11:59 PM UTC-12:00
+    type: submission
+    action_label: Submit Direct Paper
+    action_url: https://openreview.net/group?id=EMNLP/2026/Workshop/DocInsights
+    note: Direct submissions may be archival or non-archival.
+    highlight: true
+  - label: ARR Commitment Deadline
+    date: August 30, 2026
+    time: 11:59 PM UTC-12:00
+    type: submission
+    action_label: Commit ARR Paper
+    action_url: https://openreview.net/group?id=EMNLP/2026/Workshop/DocInsights_ARR_Commitment
+    note: For eligible papers with completed ACL Rolling Review reviews and meta-review.
+    highlight: true
+  - label: Acceptance Notifications
+    date: September 13, 2026
+    time: Notification date
+    type: decision
+    note: Decisions will be released through OpenReview.
+  - label: Camera-ready Deadline
+    date: September 27, 2026
+    time: Final version deadline
+    type: camera-ready
+    note: Applies to accepted archival papers.
+  - label: Workshop Schedule
+    date: EMNLP 2026, October 24-29, 2026
+    time: Exact workshop schedule pending
+    type: event
+    action_label: EMNLP 2026 Program
+    action_url: https://2026.emnlp.org/program/
+    note: EMNLP central program details for workshops and tutorials are not final yet.
