@@ -31,7 +31,11 @@ permalink: /faq/
   </article>
   <article>
     <h2>What is the shared task?</h2>
+    {% comment %}
+    Hidden until shared task details are public-ready:
     <p>The planned shared task focuses on RUST-BENCH and structure-aware tabular reasoning grounded in tabular evidence. Detailed participation instructions will be announced after organizer confirmation.</p>
+    {% endcomment %}
+    <p>Shared task details will be announced soon. We will update the shared task page with scope, timeline, participation instructions, and evaluation details once they are ready.</p>
   </article>
   <article>
     <h2>Will the workshop support remote participation?</h2>

@@ -29,10 +29,15 @@ title: Home
 
 <section class="split-section">
   <div>
-    <p class="section-kicker">Planned Shared Task</p>
+    {% comment %}
+    Hidden until shared task details are public-ready:
     <h2>RUST-BENCH: structure-aware tabular reasoning</h2>
     <p>The workshop plans a shared task around table-centric question answering and reasoning grounded in tabular evidence. The task highlights real-world challenges such as scale, heterogeneity, domain specificity, and multi-hop inference.</p>
-    <a class="inline-action" href="{{ '/shared-task/' | relative_url }}">Read shared task overview</a>
+    {% endcomment %}
+    <p class="section-kicker">Shared Task</p>
+    <h2>Shared task details will be announced soon</h2>
+    <p>We are finalizing the shared task scope, timeline, participation instructions, and evaluation details. The dedicated page will be updated once the announcement is ready.</p>
+    <a class="inline-action" href="{{ '/shared-task/' | relative_url }}">View shared task announcement</a>
   </div>
   <div class="callout-panel">
     <h3>Submission Tracks</h3>

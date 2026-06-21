@@ -6,7 +6,9 @@ items:
   - title: Poster and demo session
     body: Interactive discussion for accepted papers, systems, demos, diagnostic studies, and work in progress.
   - title: Shared task spotlight
-    body: Planned RUST-BENCH session on structure-aware tabular reasoning and evidence-grounded systems.
+    # Hidden until shared task details are public-ready:
+    # body: Planned RUST-BENCH session on structure-aware tabular reasoning and evidence-grounded systems.
+    body: Shared task details will be announced once the scope, timeline, and participation instructions are final.
   - title: Panel
     body: Discussion on trustworthy document intelligence in science, legal, finance, healthcare, government, and enterprise settings.
   - title: Early-career spotlights

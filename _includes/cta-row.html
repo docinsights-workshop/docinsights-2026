@@ -1,11 +1,15 @@
 <div class="cta-row" aria-label="Submission actions">
   {% for action in site.data.submission_links.primary %}
+  {% assign action_deadline = action.deadline | default: action.date %}
   <a
     class="btn btn-{{ action.style }}"
     href="{% if action.external %}{{ action.url }}{% else %}{{ action.url | relative_url }}{% endif %}"
     {% if action.external %}target="_blank" rel="noopener"{% endif %}
   >
     <span>{{ action.label }}</span>
+    {% if action_deadline %}
+    <span class="btn-date">{{ action_deadline }}</span>
+    {% endif %}
     <small>{{ action.description }}</small>
   </a>
   {% endfor %}

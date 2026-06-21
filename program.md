@@ -12,7 +12,7 @@ permalink: /program/
 
 {% include program-preview.html %}
 
-## Provisional Flow
+## Tentative Program
 
 <div class="schedule-list">
   <article>
@@ -37,8 +37,13 @@ permalink: /program/
   </article>
   <article>
     <span>Shared task spotlight</span>
+    {% comment %}
+    Hidden until shared task details are public-ready:
     <h3>RUST-BENCH structure-aware tabular reasoning</h3>
     <p>Participating teams will share system approaches and findings after task details are finalized.</p>
+    {% endcomment %}
+    <h3>Shared task details to be announced</h3>
+    <p>The final shared task segment will be added after the organizers announce the task details.</p>
   </article>
   <article>
     <span>Panel</span>
