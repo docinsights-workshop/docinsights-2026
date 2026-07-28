@@ -1,0 +1,14 @@
+# macOS and generated Python files
+.DS_Store
+__pycache__/
+*.py[cod]
+
+# Hugging Face release payloads are published directly to their dedicated repos.
+competition/hf-dataset/train/
+competition/hf-dataset/val/
+competition/hf-dataset/examples/
+
+# Never commit organizer-only labels, submissions, or leaderboard state here.
+competition/hf-submissions/private/
+competition/hf-submissions/submissions/
+competition/hf-submissions/leaderboard/

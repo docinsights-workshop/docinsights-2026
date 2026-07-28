@@ -5,51 +5,53 @@ permalink: /shared-task/
 ---
 
 <section class="section-intro">
-  <p class="section-kicker">Shared Task</p>
-  <h2>Shared task details will be announced soon.</h2>
-  <p>We are finalizing the shared task scope, timeline, participation instructions, and evaluation details. This page will be updated once the announcement is ready.</p>
+  <p class="section-kicker">DocInsights 2026 Shared Task</p>
+  <h2>DocSem: document-grounded quantitative reasoning with evidence attribution</h2>
+  <p>Participants receive a PDF document and a paraphrased query. Systems must identify the relevant quantitative passage, derive the answer from the supplied document, and report the visible PDF block IDs that support the prediction.</p>
 </section>
 
 <section class="info-grid">
   <article class="info-card">
-    <h3>Scope</h3>
-    <p>To be announced soon.</p>
+    <h3>Development data</h3>
+    <p>The public dataset provides 908 labelled training tasks, PDFs, answers, and evidence block IDs for system development.</p>
   </article>
   <article class="info-card">
-    <h3>Timeline</h3>
-    <p>To be announced soon.</p>
+    <h3>Validation</h3>
+    <p>Validation provides 217 PDF tasks and queries. Its labels remain organizer-only and are used for the public leaderboard.</p>
   </article>
   <article class="info-card">
-    <h3>Participation</h3>
-    <p>To be announced soon.</p>
+    <h3>Submission</h3>
+    <p>Upload one JSONL prediction file through the submission portal. Each row includes an answer and one or more visible evidence block IDs.</p>
   </article>
 </section>
 
-{% comment %}
-Hidden until shared task details are public-ready.
-
-## Motivation
-
-Tables are central to scientific, financial, legal, healthcare, and enterprise documents, but they often require reasoning across headers, cells, surrounding text, missing values, and domain-specific conventions. The shared task will highlight systems that can reason over tabular evidence while preserving provenance and verifiability.
-
-## Expected Participation Flow
+## Get started
 
 <div class="info-grid">
   <article class="info-card">
-    <h3>Task overview</h3>
-    <p>Participants will receive task instructions and development resources after the organizers finalize release details.</p>
+    <h3>1. Download the data</h3>
+    <p><a href="https://huggingface.co/datasets/amitbcp/docinsights-2026-shared-task-data">Open the public Hugging Face dataset</a> and follow the participant instructions.</p>
   </article>
   <article class="info-card">
-    <h3>Held-out evaluation</h3>
-    <p>Systems will be evaluated on a held-out test set designed for structure-aware tabular reasoning.</p>
+    <h3>2. Build with training data</h3>
+    <p>Use the labelled train split to develop document reading, quantitative reasoning, and evidence-selection methods.</p>
   </article>
   <article class="info-card">
-    <h3>System descriptions</h3>
-    <p>Participating teams will submit short system descriptions and present methods at the workshop.</p>
+    <h3>3. Submit validation predictions</h3>
+    <p><a href="https://amitbcp-docsem-docinsights.hf.space/">Open the submission portal and leaderboard</a> to evaluate a complete validation JSONL file.</p>
   </article>
 </div>
 
-## Status
+## Task format
 
-Task details will be announced after organizer confirmation, including participation instructions, platform links, release dates, and leaderboard information.
-{% endcomment %}
+Each task contains a PDF and a separate `user_query`. PDF content blocks begin with visible identifiers such as `b01:`. Submit one JSON object for every validation instance:
+
+```json
+{"instance_id":"task_000909","answer":"140","evidence":["b14"]}
+```
+
+The primary metric is normalized exact-match accuracy on the final answer. Evidence block-set match and evidence F1 are reported separately.
+
+## Data and evaluation policy
+
+Train answers and evidence labels are public. Validation PDFs and queries are public, while validation labels are kept private by the organizers and used only by the submission portal. Do not infer answers from filenames, metadata, or external source-question lookup; solve each task from its supplied PDF.
