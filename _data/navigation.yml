@@ -11,7 +11,7 @@ primary:
   - label: Program
     url: /program/
     match: program
-  - label: Shared Task
+  - label: Challenges
     url: /shared-task/
     match: shared-task
   - label: Speakers
@@ -45,6 +45,8 @@ footer_groups:
         external: true
       - label: Program
         url: /program/
+      - label: Challenges
+        url: /shared-task/
       - label: FAQ
         url: /faq/
   - title: Policies

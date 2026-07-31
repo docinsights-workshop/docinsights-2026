@@ -1,0 +1,18 @@
+{% if site.data.sponsors.sponsors %}
+<div class="sponsor-lockup sponsor-lockup--{{ include.placement | default: 'page' }}" aria-label="Workshop sponsors">
+  <span class="sponsor-lockup-label">Sponsors</span>
+  <div class="sponsor-lockup-list">
+    {% for sponsor in site.data.sponsors.sponsors %}
+    <a
+      class="sponsor-lockup-link sponsor-lockup-{{ sponsor.name | slugify }}"
+      href="{{ sponsor.url }}"
+      target="_blank"
+      rel="noopener noreferrer"
+      aria-label="{{ sponsor.name }}"
+    >
+      <img src="{{ sponsor.logo | relative_url }}" alt="{{ sponsor.alt | default: sponsor.name }}">
+    </a>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}

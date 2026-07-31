@@ -101,6 +101,61 @@ permalink: /organizers/
   </div>
 </div>
 
+## Workshop Challenge Organizers
+
+<div class="people-grid challenge-organizer-grid">
+  <div class="person-card">
+    <img src="{{ '/assets/images/committee/jyotika_singh.jpg' | relative_url }}" alt="Jyotika Singh" class="person-photo" loading="lazy" decoding="async">
+    <div class="person-card-header">
+      <div class="person-identity">
+        <div class="person-meta-line">
+          <h3>Jyotika Singh</h3>
+          <p class="person-affiliation">Oracle</p>
+        </div>
+      </div>
+      <div class="person-links" aria-label="Jyotika Singh profile links">
+        <a href="https://linkedin.com/in/jyotikasingh" target="_blank" rel="noopener" aria-label="Jyotika Singh on LinkedIn" title="LinkedIn"><span class="person-icon person-icon-linkedin" aria-hidden="true">in</span><span class="person-link-label">LinkedIn</span></a>
+        <a href="https://scholar.google.com/citations?user=hvS68jYAAAAJ&hl=en&oi=ao" target="_blank" rel="noopener" aria-label="Jyotika Singh on Google Scholar" title="Google Scholar"><span class="person-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M3 8l9-4 9 4-9 4-9-4Z"/><path d="M7 10.5V15c0 1.7 2.2 3 5 3s5-1.3 5-3v-4.5"/><path d="M21 8v6"/></svg></span><span class="person-link-label">Scholar</span></a>
+      </div>
+    </div>
+    <p class="person-bio">Challenge design for agentic memory, data quality, and human-in-the-loop evaluation of grounded AI systems.</p>
+  </div>
+
+  <div class="person-card">
+    <img src="{{ '/assets/images/committee/hitesh_patel.jpg' | relative_url }}" alt="Hitesh Patel" class="person-photo" loading="lazy" decoding="async">
+    <div class="person-card-header">
+      <div class="person-identity">
+        <div class="person-meta-line">
+          <h3>Hitesh Patel</h3>
+          <p class="person-affiliation">Oracle</p>
+        </div>
+      </div>
+      <div class="person-links" aria-label="Hitesh Patel profile links">
+        <a href="https://hiteshlpatel.github.io/" target="_blank" rel="noopener" aria-label="Hitesh Patel website" title="Website"><span class="person-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 10v10h5v-6h4v6h5V10"/></svg></span><span class="person-link-label">Website</span></a>
+        <a href="https://www.linkedin.com/in/hitesh-patel-63ba9210a/" target="_blank" rel="noopener" aria-label="Hitesh Patel on LinkedIn" title="LinkedIn"><span class="person-icon person-icon-linkedin" aria-hidden="true">in</span><span class="person-link-label">LinkedIn</span></a>
+        <a href="https://scholar.google.com/citations?hl=en&user=R3X_R9UAAAAJ" target="_blank" rel="noopener" aria-label="Hitesh Patel on Google Scholar" title="Google Scholar"><span class="person-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M3 8l9-4 9 4-9 4-9-4Z"/><path d="M7 10.5V15c0 1.7 2.2 3 5 3s5-1.3 5-3v-4.5"/><path d="M21 8v6"/></svg></span><span class="person-link-label">Scholar</span></a>
+      </div>
+    </div>
+    <p class="person-bio">Challenge design and evaluation for multilingual, multimodal, and responsible AI, including grounded retrieval and safety.</p>
+  </div>
+
+  <div class="person-card">
+    <img src="{{ '/assets/images/challenge-organizers/rahul_suresh.png' | relative_url }}" alt="Rahul Suresh" class="person-photo person-photo-rahul" loading="lazy" decoding="async">
+    <div class="person-card-header">
+      <div class="person-identity">
+        <div class="person-meta-line">
+          <h3>Rahul Suresh</h3>
+          <p class="person-affiliation">Abaka AI</p>
+        </div>
+      </div>
+      <div class="person-links" aria-label="Rahul Suresh profile links">
+        <a href="https://www.linkedin.com/in/rahul-suresh1/" target="_blank" rel="noopener" aria-label="Rahul Suresh on LinkedIn" title="LinkedIn"><span class="person-icon person-icon-linkedin" aria-hidden="true">in</span><span class="person-link-label">LinkedIn</span></a>
+      </div>
+    </div>
+    <p class="person-bio">Challenge operations, expert data curation, model evaluation, and participant engagement for document AI benchmarks.</p>
+  </div>
+</div>
+
 ## Program Committee
 
 <div class="people-grid committee-grid">
@@ -133,39 +188,6 @@ permalink: /organizers/
       </div>
     </div>
     <p class="person-bio">Enterprise RAG, agentic workflows, attribution, and multilingual LLM/VLM evaluation.</p>
-  </div>
-
-  <div class="person-card">
-    <img src="{{ '/assets/images/committee/hitesh_patel.jpg' | relative_url }}" alt="Hitesh Patel" class="person-photo" loading="lazy" decoding="async">
-    <div class="person-card-header">
-      <div class="person-identity">
-        <div class="person-meta-line">
-          <h3>Hitesh Patel</h3>
-        </div>
-      </div>
-      <div class="person-links" aria-label="Hitesh Patel profile links">
-        <a href="https://hiteshlpatel.github.io/" target="_blank" rel="noopener" aria-label="Hitesh Patel website" title="Website"><span class="person-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 10v10h5v-6h4v6h5V10"/></svg></span><span class="person-link-label">Website</span></a>
-        <a href="https://www.linkedin.com/in/hitesh-patel-63ba9210a/" target="_blank" rel="noopener" aria-label="Hitesh Patel on LinkedIn" title="LinkedIn"><span class="person-icon person-icon-linkedin" aria-hidden="true">in</span><span class="person-link-label">LinkedIn</span></a>
-        <a href="https://scholar.google.com/citations?hl=en&user=R3X_R9UAAAAJ" target="_blank" rel="noopener" aria-label="Hitesh Patel on Google Scholar" title="Google Scholar"><span class="person-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M3 8l9-4 9 4-9 4-9-4Z"/><path d="M7 10.5V15c0 1.7 2.2 3 5 3s5-1.3 5-3v-4.5"/><path d="M21 8v6"/></svg></span><span class="person-link-label">Scholar</span></a>
-      </div>
-    </div>
-    <p class="person-bio">Multilingual and multimodal responsible AI with grounded retrieval, safety, and evaluation.</p>
-  </div>
-
-  <div class="person-card">
-    <img src="{{ '/assets/images/committee/jyotika_singh.jpg' | relative_url }}" alt="Jyotika Singh" class="person-photo" loading="lazy" decoding="async">
-    <div class="person-card-header">
-      <div class="person-identity">
-        <div class="person-meta-line">
-          <h3>Jyotika Singh</h3>
-        </div>
-      </div>
-      <div class="person-links" aria-label="Jyotika Singh profile links">
-        <a href="https://linkedin.com/in/jyotikasingh" target="_blank" rel="noopener" aria-label="Jyotika Singh on LinkedIn" title="LinkedIn"><span class="person-icon person-icon-linkedin" aria-hidden="true">in</span><span class="person-link-label">LinkedIn</span></a>
-        <a href="https://scholar.google.com/citations?user=hvS68jYAAAAJ&hl=en&oi=ao" target="_blank" rel="noopener" aria-label="Jyotika Singh on Google Scholar" title="Google Scholar"><span class="person-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M3 8l9-4 9 4-9 4-9-4Z"/><path d="M7 10.5V15c0 1.7 2.2 3 5 3s5-1.3 5-3v-4.5"/><path d="M21 8v6"/></svg></span><span class="person-link-label">Scholar</span></a>
-      </div>
-    </div>
-    <p class="person-bio">Agentic memory, data quality, and human-in-the-loop interaction for grounded systems.</p>
   </div>
 
   <div class="person-card">

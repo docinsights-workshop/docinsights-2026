@@ -40,8 +40,8 @@
   {% else %}
   <header class="page-header">
     <div class="container">
-      <p class="eyebrow">DocInsights 2026</p>
       <h1>{{ page.title }}</h1>
+      {% include sponsor-lockup.html placement="page" %}
     </div>
   </header>
   {% endif %}
@@ -77,6 +77,24 @@
         </div>
         {% endfor %}
       </div>
+      {% if site.data.sponsors.sponsors %}
+      <div class="footer-sponsors" aria-labelledby="footer-sponsors-title">
+        <h3 id="footer-sponsors-title">{{ site.data.sponsors.title }}</h3>
+        <div class="footer-sponsor-list">
+          {% for sponsor in site.data.sponsors.sponsors %}
+          <a
+            class="footer-sponsor footer-sponsor-{{ sponsor.name | slugify }}"
+            href="{{ sponsor.url }}"
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="{{ sponsor.name }}"
+          >
+            <img src="{{ sponsor.logo | relative_url }}" alt="{{ sponsor.alt | default: sponsor.name }}">
+          </a>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
       <div class="footer-bottom">
         <p>&copy; 2026 DocInsights Workshop. All rights reserved.</p>
       </div>

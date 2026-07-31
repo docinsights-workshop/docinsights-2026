@@ -1,4 +1,14 @@
 timezone_note: All submission deadlines are 11:59 PM UTC-12:00 ("Anywhere on Earth") unless otherwise noted. OpenReview is the submission system of record for exact system timestamps.
+challenge_timezone_note: Challenge-specific portal cutoffs and readiness-dependent updates will be confirmed through the official challenge resources.
+challenge_items:
+  - label: Competition Opens
+    date: August 3, 2026
+    type: challenge
+    note: The DocInsights challenge season begins. DocSem resources are live; Dr.DocBench access follows its final participant-readiness review.
+  - label: Final Challenge Submissions
+    date: September 10, 2026
+    type: challenge
+    note: Planned final submission date for challenge rankings. Portal-specific cutoff times will be stated in the official rules.
 items:
   - label: Direct Submission Deadline
     date: August 2, 2026

@@ -84,13 +84,18 @@ def main():
         "August 30, 2026",
         "Research Themes",
         "Program Preview",
-        "Shared Task",
+        "Challenges",
+        "DocSem",
+        "Dr.DocBench",
+        "August 3 through September 10, 2026",
+        "USD 5,000+",
     ]:
         assert_true(text in home.text, f"home page missing text: {text}")
     assert_true("skip-link" in home.classes, "layout must include skip-link class")
     assert_true("main-content" in home.ids, "main content must have id='main-content'")
     assert_true('rel="icon"' in home_html and "circular_logo.png" in home_html, "layout must define a favicon")
     assert_true("hero-facts" not in home.classes, "home hero must not render a right-side facts rail")
+    assert_true("sponsor-lockup--hero" in home.classes, "home hero must expose the workshop sponsors")
     assert_true("budapest_hero_clean.jpg" in home_html, "home hero must use the cleaned Budapest background")
     assert_true("banner_cover_photo.png" not in home_html, "home hero must not use text-bearing banner artwork")
     assert_true(home_html.count('class="btn-date"') >= 2, "home hero CTA buttons must show submission deadlines")
@@ -100,7 +105,7 @@ def main():
         "CFP",
         "Dates",
         "Program",
-        "Shared Task",
+        "Challenges",
         "Speakers",
         "Organizers",
         "FAQ",
@@ -131,13 +136,54 @@ def main():
     assert_true("Tentative Program" in program.text, "program must use Tentative Program wording")
     assert_true("Provisional Flow" not in program.text, "program must not use Provisional Flow wording")
 
+    shared_task_html = REQUIRED_PAGES["shared task"].read_text(encoding="utf-8")
     shared_task = parse(REQUIRED_PAGES["shared task"])
+    shared_task_header = shared_task_html.split('<header class="page-header">', 1)[-1].split("</header>", 1)[0]
+    assert_true(
+        'class="sponsor-lockup sponsor-lockup--page"' in shared_task_header,
+        "challenges page title band must expose sponsors",
+    )
+    assert_true("Sponsors" in shared_task_header, "challenges page title band must label the sponsors")
+    assert_true(
+        "DocInsights 2026" not in shared_task_header,
+        "challenges page title band must not repeat the site name",
+    )
     for text in [
-        "Shared task details will be announced soon",
-        "scope, timeline, participation instructions",
-        "evaluation details",
+        "Two challenges advancing document intelligence beyond plain text",
+        "August 3–September 10, 2026",
+        "USD 5,000+",
+        "DocSem",
+        "Dr.DocBench",
+        "Resources live",
+        "Participant release in preparation",
+        "System papers and presentations",
+        "Selected contributions",
     ]:
         assert_true(text in shared_task.text, f"shared task missing required detail: {text}")
+    shared_task_links = [link.get("href", "") for link in shared_task.links]
+    for href in [
+        "https://huggingface.co/datasets/amitbcp/docinsights-2026-shared-task-data",
+        "https://amitbcp-docsem-docinsights.hf.space/",
+        "https://github.com/oracle-samples/gsm-sem/tree/main/docsem",
+        "https://drdocbench-challenge.abaka-pages.com/",
+    ]:
+        assert_true(href in shared_task_links, f"challenges page missing public resource: {href}")
+    assert_true(
+        not any("eval.ai" in href for href in shared_task_links),
+        "challenges page must not publish private Dr.DocBench EvalAI access",
+    )
+    for stale_domain in [
+        "aaronluo00.github.io/drdocbench-challenge",
+        "abaka-skills.github.io/drdocbench-challenge",
+    ]:
+        assert_true(
+            not any(stale_domain in href for href in shared_task_links),
+            f"challenges page must not publish non-canonical Dr.DocBench URL: {stale_domain}",
+        )
+    assert_true(
+        "Shared task details will be announced soon" not in shared_task.text,
+        "challenges page must not retain the stale shared-task placeholder",
+    )
     for label, parser in [
         ("home", home),
         ("program", program),
@@ -149,6 +195,19 @@ def main():
             "structure-aware tabular reasoning" not in parser.text,
             f"{label} must not visibly expose hidden shared task details",
         )
+
+    dates = parse(REQUIRED_PAGES["dates"])
+    for text in ["Challenge Season", "August 3, 2026", "September 10, 2026"]:
+        assert_true(text in dates.text, f"dates page missing challenge milestone: {text}")
+
+    faq = parse(REQUIRED_PAGES["faq"])
+    for text in [
+        "What challenges are running?",
+        "When does the competition run?",
+        "combined prize pool will exceed USD 5,000",
+        "Is Dr.DocBench open for submissions?",
+    ]:
+        assert_true(text in faq.text, f"FAQ missing challenge detail: {text}")
 
     speakers = parse(REQUIRED_PAGES["speakers"])
     speakers_html = REQUIRED_PAGES["speakers"].read_text(encoding="utf-8")
@@ -240,6 +299,18 @@ def main():
         re.search(r"@media \(max-width: 620px\).*?\.faq-list,\s*\.footer-grid\s*{[^}]*grid-template-columns:\s*1fr", css, re.S) is not None,
         "FAQ list must collapse to one fluid column on mobile",
     )
+    for selector in [
+        ".challenge-season",
+        ".challenge-feature",
+        ".challenge-status",
+        ".challenge-actions",
+        ".challenge-timeline",
+    ]:
+        assert_true(selector in css, f"CSS missing challenge layout selector: {selector}")
+    assert_true(
+        re.search(r"@media \(max-width: 620px\).*?\.challenge-timeline\s*{[^}]*grid-template-columns:\s*1fr", css, re.S) is not None,
+        "challenge timeline must collapse to one column on mobile",
+    )
     assert_true(
         ".speaker-card-header" in css and "grid-template-columns: minmax(0, 1fr) auto" in css,
         "speaker headers must keep identity and social links in one compact row on wide cards",
@@ -273,17 +344,38 @@ def main():
     assert_true("person-link-mark" not in organizers_html, "organizer social buttons must not use text badge markup")
     assert_true("Amazon, Seattle, USA" not in organizers.text, "Santosh affiliation must not include Seattle")
     assert_true("Amazon, USA" in organizers.text, "Santosh affiliation must stay visible without Seattle")
+    assert_true(
+        "Workshop Challenge Organizers" in organizers.text,
+        "organizers page must include the Workshop Challenge Organizers section",
+    )
     assert_true("Program Committee" in organizers.text, "organizers page must include the Program Committee section")
-    committee_html = organizers_html.split("<h2 id=\"program-committee\">Program Committee</h2>", 1)[-1].split("<h2 id=\"contact\">Contact</h2>", 1)[0]
+    challenge_html = organizers_html.split(
+        '<h2 id="workshop-challenge-organizers">Workshop Challenge Organizers</h2>', 1
+    )[-1].split('<h2 id="program-committee">Program Committee</h2>', 1)[0]
+    challenge_names = ["Jyotika Singh", "Hitesh Patel", "Rahul Suresh"]
+    challenge_positions = [challenge_html.find(name) for name in challenge_names]
+    assert_true(
+        all(position >= 0 for position in challenge_positions),
+        "challenge organizer section must include Jyotika Singh, Hitesh Patel, and Rahul Suresh",
+    )
+    assert_true(
+        challenge_positions == sorted(challenge_positions),
+        "challenge organizers must be ordered Jyotika Singh, Hitesh Patel, then Rahul Suresh",
+    )
+    assert_true("Oracle" in challenge_html, "challenge organizers must identify Oracle")
+    assert_true("Abaka AI" in challenge_html, "challenge organizers must identify Abaka AI")
+    assert_true(
+        "challenge-organizer-grid" in organizers.classes,
+        "challenge organizers must use the dedicated compact grid",
+    )
+    committee_html = organizers_html.split(
+        '<h2 id="program-committee">Program Committee</h2>', 1
+    )[-1].split('<h2 id="contact">Contact</h2>', 1)[0]
     assert_true("person-affiliation" not in committee_html, "program committee cards must not show affiliations")
-    for name in [
-        "Tampu Ravi Kumar",
-        "Hansa Meghwani",
-        "Hitesh Patel",
-        "Jyotika Singh",
-        "Karan Dua",
-    ]:
+    for name in ["Tampu Ravi Kumar", "Hansa Meghwani", "Karan Dua"]:
         assert_true(name in organizers.text, f"program committee missing {name}")
+    for name in ["Hitesh Patel", "Jyotika Singh"]:
+        assert_true(name not in committee_html, f"{name} must move out of the program committee")
     assert_true("committee-grid" in organizers.classes, "program committee must use the compact committee-grid layout")
     assert_true("assets/images/committee/" in organizers_html, "program committee must use local committee headshots")
     for filename in [
@@ -295,6 +387,25 @@ def main():
     ]:
         assert_true((BASE / "assets" / "images" / "committee" / filename).exists(), f"missing committee headshot: {filename}")
     assert_true(
+        (BASE / "assets" / "images" / "challenge-organizers" / "rahul_suresh.png").exists(),
+        "missing Rahul Suresh challenge-organizer headshot",
+    )
+    assert_true("footer-sponsors" in organizers.classes, "site footer must include the sponsors block")
+    assert_true("nav-sponsors" not in organizers.classes, "primary navigation must not contain sponsor branding")
+    assert_true("sponsor-lockup--page" in organizers.classes, "inner page title bands must expose sponsors")
+    page_header_html = organizers_html.split('<header class="page-header">', 1)[-1].split("</header>", 1)[0]
+    assert_true("DocInsights 2026" not in page_header_html, "inner page title band must not repeat the site name")
+    assert_true("Sponsors" in page_header_html, "inner page title band must label the sponsor group")
+    assert_true("Oracle logo" in organizers_html, "site footer must show the Oracle sponsor logo")
+    assert_true("Abaka AI logo" in organizers_html, "site footer must show the Abaka AI sponsor logo")
+    for filename in ["oracle.svg", "abaka-ai.png"]:
+        assert_true((BASE / "assets" / "sponsors" / filename).exists(), f"missing sponsor logo: {filename}")
+    oracle_svg = (BASE / "assets" / "sponsors" / "oracle.svg").read_text(encoding="utf-8")
+    assert_true(
+        'width="231"' in oracle_svg and 'height="30"' in oracle_svg,
+        "Oracle sponsor logo must include intrinsic dimensions",
+    )
+    assert_true(
         re.search(r"\.person-card\s*{[^}]*display:\s*flow-root", css, re.S) is not None,
         "organizer cards must let bio text flow around the photo",
     )
@@ -305,6 +416,19 @@ def main():
     assert_true(
         re.search(r"\.committee-grid\s*{[^}]*grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(420px,\s*1fr\)\)", css, re.S) is not None,
         "program committee grid must use denser wide-screen columns",
+    )
+    assert_true(
+        re.search(r"\.people-grid\s*{[^}]*align-items:\s*start", css, re.S) is not None,
+        "people grids must keep cards content-height instead of stretching white boxes",
+    )
+    assert_true(
+        re.search(
+            r"\.challenge-organizer-grid\s*{[^}]*grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\)",
+            css,
+            re.S,
+        )
+        is not None,
+        "challenge organizer grid must use three equal desktop columns",
     )
 
     print("site audit passed")

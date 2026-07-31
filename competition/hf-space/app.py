@@ -1,6 +1,8 @@
 import datetime as dt
+import html
 import json
 import os
+import threading
 from pathlib import Path
 
 import gradio as gr
@@ -9,9 +11,11 @@ from huggingface_hub.utils import EntryNotFoundError, RepositoryNotFoundError
 
 from scoring import (
     SubmissionError,
+    leaderboard_identity,
     leaderboard_row,
     load_jsonl_text,
     parse_submission_text,
+    rank_leaderboard,
     safe_slug,
     score_predictions,
 )
@@ -20,13 +24,19 @@ from scoring import (
 PUBLIC_DATASET_REPO = os.getenv("PUBLIC_DATASET_REPO", "amitbcp/docinsights-2026-shared-task-data")
 WORKSHOP_URL = os.getenv(
     "WORKSHOP_URL",
-    "https://docinsights-workshop.github.io/docinsights-2026/",
+    "https://docinsights-workshop.github.io/docinsights-2026/shared-task/",
+)
+SOURCE_REPO_URL = os.getenv("SOURCE_REPO_URL", "https://github.com/oracle-samples/gsm-sem")
+PARTICIPANT_GUIDE_URL = os.getenv(
+    "PARTICIPANT_GUIDE_URL",
+    "https://github.com/oracle-samples/gsm-sem/blob/main/docsem/PARTICIPANT_INSTRUCTIONS.md",
 )
 GOLD_REPO_ID = os.getenv("GOLD_REPO_ID", "amitbcp/docinsights-2026-shared-task-submissions")
 GOLD_FILE = os.getenv("GOLD_FILE", "private/val_labels.jsonl")
 SUBMISSIONS_REPO_ID = os.getenv("SUBMISSIONS_REPO_ID", GOLD_REPO_ID)
 WRITE_TOKEN = os.getenv("HF_WRITE_TOKEN") or os.getenv("HF_TOKEN")
 GRADIO_MAJOR_VERSION = int(gr.__version__.split(".", maxsplit=1)[0])
+LEADERBOARD_LOCK = threading.Lock()
 
 PORTAL_CSS = """
 :root {
@@ -97,6 +107,8 @@ PORTAL_CSS = """
 #portal-header .portal-links {
     display: flex;
     align-items: center;
+    flex-wrap: nowrap;
+    justify-content: flex-end;
     gap: 10px;
 }
 
@@ -164,6 +176,16 @@ PORTAL_CSS = """
     font-size: 15px;
     line-height: 1.5;
     margin: 0 0 12px;
+}
+
+#submission-panel .submission-note a {
+    color: var(--docsem-teal);
+    font-weight: 700;
+    text-decoration: none;
+}
+
+#submission-panel .submission-note a:hover {
+    text-decoration: underline;
 }
 
 #submission-fields {
@@ -263,14 +285,22 @@ PORTAL_CSS = """
 }
 
 #leaderboard-table {
-    min-height: 460px;
     background: var(--docsem-surface);
     border: 1px solid var(--docsem-line);
     border-radius: 6px;
     overflow: hidden;
 }
 
+#leaderboard-table .leaderboard-table-wrap {
+    width: 100%;
+    overflow-x: auto;
+}
+
 #leaderboard-table table {
+    width: 100%;
+    min-width: 920px;
+    border-collapse: collapse;
+    table-layout: fixed;
     font-size: 15px;
 }
 
@@ -279,17 +309,55 @@ PORTAL_CSS = """
     background: #eef2f6;
     font-size: 14px;
     font-weight: 700;
-}
-
-#leaderboard-table th button {
-    font-size: 14px;
-    font-weight: 700;
+    line-height: 1.25;
+    white-space: normal;
+    text-align: left;
 }
 
 #leaderboard-table td,
 #leaderboard-table th {
     padding: 13px 14px;
+    border-bottom: 1px solid var(--docsem-line);
+    vertical-align: middle;
+}
+
+#leaderboard-table td {
+    color: var(--docsem-ink);
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+}
+
+#leaderboard-table tbody tr:last-child td {
+    border-bottom: 0;
+}
+
+#leaderboard-table tbody tr:hover {
+    background: #f8fafc;
+}
+
+#leaderboard-table .leaderboard-rank,
+#leaderboard-table .leaderboard-attempts,
+#leaderboard-table .leaderboard-metric {
+    text-align: center;
+}
+
+#leaderboard-table .leaderboard-metric {
+    color: var(--docsem-navy);
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
     white-space: nowrap;
+}
+
+#leaderboard-table .leaderboard-date {
+    color: var(--docsem-muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+#leaderboard-table .leaderboard-empty {
+    padding: 34px 20px;
+    color: var(--docsem-muted);
+    text-align: center;
 }
 
 @media (max-width: 760px) {
@@ -316,7 +384,7 @@ PORTAL_CSS = """
     }
 
     #portal-header a {
-        flex: 1;
+        flex: 1 1 140px;
         min-width: 0;
         padding: 0 10px;
     }
@@ -337,8 +405,14 @@ PORTAL_CSS = """
 """
 
 
-def _read_hub_file(repo_id, filename, token=None):
-    path = hf_hub_download(repo_id=repo_id, filename=filename, repo_type="dataset", token=token)
+def _read_hub_file(repo_id, filename, token=None, force_download=False):
+    path = hf_hub_download(
+        repo_id=repo_id,
+        filename=filename,
+        repo_type="dataset",
+        token=token,
+        force_download=force_download,
+    )
     return Path(path).read_text(encoding="utf-8")
 
 
@@ -352,7 +426,6 @@ def _persist_submission(rows, team, contact, submission_name, metrics):
 
     submitted_at = dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
     row = leaderboard_row(team, contact, submission_name, metrics, submitted_at)
-    public_row = {key: value for key, value in row.items() if key != "contact"}
     payload = {
         "leaderboard": row,
         "metrics": metrics,
@@ -373,15 +446,23 @@ def _persist_submission(rows, team, contact, submission_name, metrics):
         token=WRITE_TOKEN,
         commit_message=f"Add submission {team_slug}/{name_slug}",
     )
-    _update_leaderboard(public_row)
-    return f"Score computed and saved to {SUBMISSIONS_REPO_ID}/submissions/{filename}."
+    attempts = _update_leaderboard(row)
+    return (
+        f"Score computed and saved to {SUBMISSIONS_REPO_ID}/submissions/{filename}. "
+        f"This is attempt {attempts} for this team and contact email."
+    )
 
 
 def _load_leaderboard_rows():
     if not SUBMISSIONS_REPO_ID or not WRITE_TOKEN:
         return []
     try:
-        text = _read_hub_file(SUBMISSIONS_REPO_ID, "leaderboard/leaderboard.json", token=WRITE_TOKEN)
+        text = _read_hub_file(
+            SUBMISSIONS_REPO_ID,
+            "leaderboard/leaderboard.json",
+            token=WRITE_TOKEN,
+            force_download=True,
+        )
     except (EntryNotFoundError, RepositoryNotFoundError):
         return []
     rows = json.loads(text)
@@ -389,47 +470,91 @@ def _load_leaderboard_rows():
 
 
 def _sort_leaderboard(rows):
-    return sorted(
-        rows,
-        key=lambda row: (
-            -float(row.get("answer_accuracy", 0.0)),
-            -float(row.get("evidence_exact_match", 0.0)),
-            -float(row.get("evidence_f1", 0.0)),
-            str(row.get("submitted_at", "")),
-        ),
-    )
+    return rank_leaderboard(rows)
 
 
 def _update_leaderboard(row):
-    rows = _load_leaderboard_rows()
-    rows.append(row)
-    rows = _sort_leaderboard(rows)
-    tmp_path = Path("/tmp") / "leaderboard.json"
-    tmp_path.write_text(json.dumps(rows, indent=2, sort_keys=True), encoding="utf-8")
-    upload_file(
-        path_or_fileobj=str(tmp_path),
-        path_in_repo="leaderboard/leaderboard.json",
-        repo_id=SUBMISSIONS_REPO_ID,
-        repo_type="dataset",
-        token=WRITE_TOKEN,
-        commit_message="Update leaderboard",
-    )
+    with LEADERBOARD_LOCK:
+        rows = _load_leaderboard_rows()
+        rows.append(row)
+        rows.sort(key=lambda item: str(item.get("submitted_at", "")))
+        tmp_path = Path("/tmp") / "leaderboard.json"
+        tmp_path.write_text(json.dumps(rows, indent=2, sort_keys=True), encoding="utf-8")
+        upload_file(
+            path_or_fileobj=str(tmp_path),
+            path_in_repo="leaderboard/leaderboard.json",
+            repo_id=SUBMISSIONS_REPO_ID,
+            repo_type="dataset",
+            token=WRITE_TOKEN,
+            commit_message="Update leaderboard",
+        )
+        identity = leaderboard_identity(row)
+        best = next(
+            item for item in rank_leaderboard(rows) if leaderboard_identity(item) == identity
+        )
+        return best["attempts"]
 
 
-def leaderboard_table():
+def _format_metric(value):
+    return f"{float(value) * 100:.2f}%"
+
+
+def _format_timestamp(value):
+    return str(value).replace("T", " ").removesuffix("Z")
+
+
+def leaderboard_html():
     rows = _sort_leaderboard(_load_leaderboard_rows())
-    return [
-        [
-            index + 1,
-            row.get("team", ""),
-            row.get("submission_name", ""),
-            row.get("answer_accuracy", 0.0),
-            row.get("evidence_exact_match", 0.0),
-            row.get("evidence_f1", 0.0),
-            row.get("submitted_at", ""),
-        ]
-        for index, row in enumerate(rows[:100])
-    ]
+    body_rows = []
+    for index, row in enumerate(rows[:100], start=1):
+        body_rows.append(
+            f"""
+            <tr>
+                <td class="leaderboard-rank">{index}</td>
+                <td>{html.escape(str(row.get("team", "")))}</td>
+                <td>{html.escape(str(row.get("submission_name", "")))}</td>
+                <td class="leaderboard-attempts">{int(row.get("attempts", 1))}</td>
+                <td class="leaderboard-metric">{_format_metric(row.get("answer_accuracy", 0.0))}</td>
+                <td class="leaderboard-metric">{_format_metric(row.get("evidence_f1", 0.0))}</td>
+                <td class="leaderboard-date">{html.escape(_format_timestamp(row.get("submitted_at", "")))}</td>
+            </tr>
+            """
+        )
+
+    if not body_rows:
+        body_rows.append(
+            '<tr><td class="leaderboard-empty" colspan="7">No scored submissions yet.</td></tr>'
+        )
+
+    return f"""
+    <div class="leaderboard-table-wrap">
+        <table aria-label="DocSem leaderboard">
+            <colgroup>
+                <col style="width: 6%">
+                <col style="width: 20%">
+                <col style="width: 22%">
+                <col style="width: 10%">
+                <col style="width: 15%">
+                <col style="width: 12%">
+                <col style="width: 15%">
+            </colgroup>
+            <thead>
+                <tr>
+                    <th class="leaderboard-rank" scope="col">Rank</th>
+                    <th scope="col">Team</th>
+                    <th scope="col">Best submission</th>
+                    <th class="leaderboard-attempts" scope="col">Attempts</th>
+                    <th class="leaderboard-metric" scope="col">Answer accuracy</th>
+                    <th class="leaderboard-metric" scope="col">Evidence F1</th>
+                    <th scope="col">Best score (UTC)</th>
+                </tr>
+            </thead>
+            <tbody>
+                {''.join(body_rows)}
+            </tbody>
+        </table>
+    </div>
+    """
 
 
 def evaluate_submission(file_obj, team, contact, submission_name):
@@ -484,11 +609,14 @@ with gr.Blocks(**blocks_options) as demo:
                 <p>Co-located with EMNLP 2026 in Budapest, Hungary. Beyond Plain Text: Bridging NLP and Document AI.</p>
             </div>
             <nav class="portal-links" aria-label="Shared task links">
-                <a class="primary-link" href="{WORKSHOP_URL}" target="_blank" rel="noopener">
-                    Workshop website
+                <a class="primary-link" href="{WORKSHOP_URL}" target="_blank" rel="noopener" aria-label="DocInsights shared task workshop page">
+                    Workshop
                 </a>
-                <a href="https://huggingface.co/datasets/{PUBLIC_DATASET_REPO}" target="_blank" rel="noopener">
-                    Public dataset
+                <a href="https://huggingface.co/datasets/{PUBLIC_DATASET_REPO}" target="_blank" rel="noopener" aria-label="Public DocSem dataset">
+                    Dataset
+                </a>
+                <a href="{SOURCE_REPO_URL}" target="_blank" rel="noopener" aria-label="Canonical GSM-SEM GitHub repository">
+                    GitHub
                 </a>
             </nav>
         </header>
@@ -497,11 +625,13 @@ with gr.Blocks(**blocks_options) as demo:
 
     with gr.Group(elem_id="submission-panel"):
         gr.HTML(
-            """
+            f"""
             <h2>Submit validation predictions</h2>
             <p class="submission-note">
                 Upload one JSON object per instance with <code>instance_id</code>,
                 <code>answer</code>, and <code>evidence</code>.
+                Review the <a href="{PARTICIPANT_GUIDE_URL}" target="_blank" rel="noopener">participant guide</a>
+                for the complete format and evaluation protocol.
             </p>
             """
         )
@@ -546,39 +676,22 @@ with gr.Blocks(**blocks_options) as demo:
                 """
                 <div>
                     <h2>Leaderboard</h2>
-                    <p>Ranked by answer accuracy, then evidence exact match and evidence F1.</p>
+                    <p>Best attempt per team and contact email. Ranked by answer accuracy, then evidence F1. Attempt counts include every valid submission.</p>
                 </div>
                 """
             )
             refresh = gr.Button(
                 "Refresh results",
                 variant="secondary",
-            scale=0,
-            min_width=170,
-            elem_id="refresh-button",
+                scale=0,
+                min_width=170,
+                elem_id="refresh-button",
             )
-        leaderboard = gr.Dataframe(
-            headers=[
-                "Rank",
-                "Team",
-                "Submission",
-                "Answer accuracy",
-                "Evidence exact match",
-                "Evidence F1",
-                "Submitted at",
-            ],
-            value=leaderboard_table,
-            interactive=False,
-            wrap=False,
-            column_widths=["6%", "16%", "23%", "13%", "16%", "11%", "15%"],
+        leaderboard = gr.HTML(
+            value=leaderboard_html,
             elem_id="leaderboard-table",
-            **(
-                {"max_height": 460}
-                if GRADIO_MAJOR_VERSION >= 6
-                else {"height": 460}
-            ),
         )
-        refresh.click(leaderboard_table, inputs=None, outputs=leaderboard)
+        refresh.click(leaderboard_html, inputs=None, outputs=leaderboard)
 
 
 if __name__ == "__main__":

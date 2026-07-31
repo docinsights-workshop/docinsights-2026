@@ -20,11 +20,11 @@ Each JSONL line is one instance:
 
 `document_pdf` is relative to the split directory. Read the PDF as an ordinary document: headings, paragraphs, lists, and tables are visual presentation elements, not a structured input schema. Every content block begins with a visible identifier in the form `b01: <block content>`; use these identifiers when reporting evidence.
 
-Development manifests may include `answer` and `evidence` fields for local development. The workshop test manifest contains only `instance_id`, `user_query`, and `document_pdf`.
+The train split includes a separate `labels.jsonl` for local development. The validation manifest contains only `instance_id`, `user_query`, and `document_pdf`; its labels are organizer-only.
 
 ## Required prediction format
 
-Submit one JSON object per test instance, in any order:
+Submit one JSON object per validation instance, in any order:
 
 ```json
 {
@@ -47,11 +47,10 @@ The primary score is normalized exact-match accuracy on `answer`. Answers are no
 
 ## Data access
 
-The public development package contains labelled training and validation data.
-The workshop test package is distributed separately and contains only task PDFs and
-the unlabelled test manifest. Its answer and evidence key is organizer-only.
+The public package contains labelled train data and unlabelled validation inputs.
+Validation labels remain private and are used only by the official submission portal.
 
-Each test task uses an opaque identifier. Do not infer answers from filenames,
+Each task uses an opaque identifier. Do not infer answers from filenames,
 document metadata, or external source-question lookup; solve from the supplied PDF.
 
 ## Use of external data and systems

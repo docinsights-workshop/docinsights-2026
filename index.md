@@ -29,20 +29,15 @@ title: Home
 
 <section class="split-section">
   <div>
-    {% comment %}
-    Hidden until shared task details are public-ready:
-    <h2>RUST-BENCH: structure-aware tabular reasoning</h2>
-    <p>The workshop plans a shared task around table-centric question answering and reasoning grounded in tabular evidence. The task highlights real-world challenges such as scale, heterogeneity, domain specificity, and multi-hop inference.</p>
-    {% endcomment %}
-    <p class="section-kicker">Shared Task</p>
-    <h2>Shared task details will be announced soon</h2>
-    <p>We are finalizing the shared task scope, timeline, participation instructions, and evaluation details. The dedicated page will be updated once the announcement is ready.</p>
-    <a class="inline-action" href="{{ '/shared-task/' | relative_url }}">View shared task announcement</a>
+    <p class="section-kicker">Challenges</p>
+    <h2>DocSem and Dr.DocBench</h2>
+    <p>Two complementary challenge tracks cover evidence-grounded quantitative reasoning and expert-level document parsing. The competition season runs from <strong>August 3 through September 10, 2026</strong>.</p>
+    <a class="inline-action" href="{{ '/shared-task/' | relative_url }}">Explore both challenges</a>
   </div>
   <div class="callout-panel">
-    <h3>Submission Tracks</h3>
-    <p>DocInsights welcomes direct archival and direct non-archival submissions, plus eligible ARR commitments through a separate OpenReview group.</p>
-    <a class="inline-action" href="{{ '/call-for-papers/' | relative_url }}">View author guidance</a>
+    <h3>USD 5,000+ total prize pool</h3>
+    <p>Challenge participants can submit system papers for workshop consideration, with winning and selected contributions invited to present at DocInsights 2026.</p>
+    <a class="inline-action" href="{{ '/shared-task/' | relative_url }}">View timeline and resources</a>
   </div>
 </section>
 
@@ -67,7 +62,7 @@ title: Home
   <div>
     <p class="section-kicker">Contact</p>
     <h2>Questions about the workshop?</h2>
-    <p>Reach the organizing team by email, or follow DocInsights for updates as speakers, program details, and shared task instructions are announced.</p>
+    <p>Reach the organizing team by email, or follow DocInsights for updates on speakers, program details, and challenge releases.</p>
   </div>
   <div class="social-links">
     <a href="mailto:docinsights-workshop-chairs@googlegroups.com" class="social-link">Email</a>

@@ -1,6 +1,8 @@
 ---
 pretty_name: "DocInsights 2026 Shared Task: DocSem"
-license: cc-by-4.0
+license: other
+license_name: universal-permissive-license-1.0
+license_link: https://github.com/oracle-samples/gsm-sem/blob/main/LICENSE.txt
 language:
 - en
 task_categories:
@@ -30,9 +32,9 @@ configs:
 
 **Document-grounded quantitative reasoning with evidence attribution**
 
-DocSem is the shared task of [DocInsights 2026](https://docinsights-workshop.github.io/docinsights-2026/), the Workshop on Document Intelligence and Understanding co-located with EMNLP 2026 in Budapest, Hungary. The workshop theme is **Beyond Plain Text: Bridging NLP and Document AI**.
+DocSem is the shared task of [DocInsights 2026](https://docinsights-workshop.github.io/docinsights-2026/shared-task/), the Workshop on Document Intelligence and Understanding co-located with EMNLP 2026 in Budapest, Hungary. The workshop theme is **Beyond Plain Text: Bridging NLP and Document AI**.
 
-[Workshop website](https://docinsights-workshop.github.io/docinsights-2026/) | [Submission portal](https://amitbcp-docsem-docinsights.hf.space/) | [Participant instructions](./INSTRUCTIONS.md)
+[Workshop shared task](https://docinsights-workshop.github.io/docinsights-2026/shared-task/) | [Source repository](https://github.com/oracle-samples/gsm-sem) | [Submission portal](https://amitbcp-docsem-docinsights.hf.space/) | [Participant guide](https://github.com/oracle-samples/gsm-sem/blob/main/docsem/PARTICIPANT_INSTRUCTIONS.md)
 
 Participants receive a PDF document and a paraphrased `user_query`. Systems must locate the relevant quantitative passage in the PDF and submit the final numerical answer plus supporting PDF block IDs.
 
@@ -42,9 +44,17 @@ Participants receive a PDF document and a paraphrased `user_query`. Systems must
 - **Output:** a final numerical answer and the supporting PDF block IDs.
 - **Training data:** 908 tasks with labels and PDFs.
 - **Validation data:** 217 tasks with PDFs; labels remain private for leaderboard evaluation.
-- **Evaluation:** normalized answer exact match, evidence exact match, and evidence F1.
+- **Evaluation:** normalized answer exact match and exact evidence block-set match, with evidence F1 reported as a diagnostic.
 
 Submit validation predictions through the [official DocSem submission portal](https://amitbcp-docsem-docinsights.hf.space/).
+
+## Source And Provenance
+
+The canonical participant release is the [`docsem/` directory in `oracle-samples/gsm-sem`](https://github.com/oracle-samples/gsm-sem/tree/main/docsem). It is now part of the default `main` branch following merge commit [`62c53bd`](https://github.com/oracle-samples/gsm-sem/commit/62c53bd37b6eeff81ebb4e16b1dac81747760d77).
+
+This Hugging Face package mirrors the source release's 908 training tasks, 908 training labels, 217 validation tasks, and all 1,125 PDFs. The PDF files are byte-identical. The Hugging Face task manifests only prefix `document_pdf` with `train/` or `val/` so files resolve directly from this repository's root.
+
+Copyright (c) 2026 Oracle and/or its affiliates. The participant release and this mirror are provided under the [Universal Permissive License v1.0](./LICENSE.txt).
 
 ## Splits
 
@@ -68,6 +78,7 @@ Validation labels are not included in this public dataset. They are stored in th
 - `val/documents/*.pdf`: validation PDFs.
 - `examples/sample_val_submission.jsonl`: example validation submission shape.
 - `INSTRUCTIONS.md`: participant instructions copied from the source release.
+- `LICENSE.txt`: Universal Permissive License v1.0.
 
 Each task row has:
 
@@ -132,10 +143,27 @@ See `examples/sample_val_submission.jsonl`.
 
 The primary metric is normalized exact-match accuracy on `answer`. Evidence is evaluated separately with exact block-set match and evidence F1 diagnostics.
 
+## Citation
+
+If you use this shared-task release, cite the originating GSM-SEM paper:
+
+```bibtex
+@article{singh2026gsmsem,
+  title={GSM-SEM: Benchmark and Framework for Generating Semantically Variant Augmentations},
+  author={Jyotika Singh and Fang Tu and Aziza Mirsaidova and Amit Agarwal and Hitesh Laxmichand Patel and Sandip Ghoshal and Miguel Ballesteros and Karan Dua and Yassine Benajiba and Weiyi Sun and Tao Sheng and Graham Horwood and Sujith Ravi and Dan Roth},
+  year={2026},
+  eprint={2605.07053},
+  archivePrefix={arXiv},
+  primaryClass={cs.CL},
+  url={https://arxiv.org/abs/2605.07053}
+}
+```
+
+Citation source: [GSM-SEM on arXiv](https://arxiv.org/abs/2605.07053) and the [canonical DocSem release](https://github.com/oracle-samples/gsm-sem/tree/main/docsem#citation).
+
 ## Workshop
 
 DocInsights 2026 brings together researchers and practitioners working across NLP, Document AI, multimodal learning, information retrieval, knowledge representation, and human-centered systems.
 
-- [DocInsights 2026 workshop website](https://docinsights-workshop.github.io/docinsights-2026/)
+- [DocInsights 2026 shared task page](https://docinsights-workshop.github.io/docinsights-2026/shared-task/)
 - [DocSem submission portal and leaderboard](https://amitbcp-docsem-docinsights.hf.space/)
-- [EMNLP 2026 workshop listing](https://2026.emnlp.org/calls/workshops/)

@@ -87,10 +87,11 @@ def main():
     ]
     write_jsonl(TARGET_ROOT / "examples" / "sample_val_submission.jsonl", sample_submission)
 
-    (TARGET_ROOT / "INSTRUCTIONS.md").write_text(
-        (SOURCE_ROOT / "INSTRUCTIONS.md").read_text(encoding="utf-8"),
-        encoding="utf-8",
-    )
+    if not (TARGET_ROOT / "INSTRUCTIONS.md").is_file():
+        raise FileNotFoundError(
+            "Keep competition/hf-dataset/INSTRUCTIONS.md synced with the canonical "
+            "oracle-samples/gsm-sem main/docsem release."
+        )
 
     write_jsonl(PRIVATE_ROOT / "private" / "val_labels.jsonl", val_labels)
     (PRIVATE_ROOT / "submissions").mkdir(parents=True, exist_ok=True)

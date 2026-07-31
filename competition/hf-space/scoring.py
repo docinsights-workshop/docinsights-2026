@@ -188,6 +188,59 @@ def leaderboard_row(team, contact, submission_name, metrics, submitted_at):
     }
 
 
+def normalize_identity(value):
+    return re.sub(r"\s+", " ", str(value).strip()).casefold()
+
+
+def leaderboard_identity(row):
+    return (
+        normalize_identity(row.get("team", "")),
+        normalize_identity(row.get("contact", "")),
+    )
+
+
+def best_leaderboard_rows(rows):
+    grouped = {}
+    attempts = collections.Counter()
+
+    for row in rows:
+        identity = leaderboard_identity(row)
+        attempts[identity] += max(int(row.get("attempts", 1)), 1)
+        current = grouped.get(identity)
+        candidate_score = (
+            float(row.get("answer_accuracy", 0.0)),
+            float(row.get("evidence_f1", 0.0)),
+            str(row.get("submitted_at", "")),
+        )
+        current_score = None
+        if current is not None:
+            current_score = (
+                float(current.get("answer_accuracy", 0.0)),
+                float(current.get("evidence_f1", 0.0)),
+                str(current.get("submitted_at", "")),
+            )
+        if current_score is None or candidate_score > current_score:
+            grouped[identity] = dict(row)
+
+    best_rows = []
+    for identity, row in grouped.items():
+        row["attempts"] = attempts[identity]
+        best_rows.append(row)
+    return best_rows
+
+
+def rank_leaderboard(rows):
+    return sorted(
+        best_leaderboard_rows(rows),
+        key=lambda row: (
+            -float(row.get("answer_accuracy", 0.0)),
+            -float(row.get("evidence_f1", 0.0)),
+            str(row.get("submitted_at", "")),
+            normalize_identity(row.get("team", "")),
+        ),
+    )
+
+
 def safe_slug(value):
     slug = re.sub(r"[^a-zA-Z0-9._-]+", "-", str(value).strip()).strip("-")
     return slug[:80] or "submission"

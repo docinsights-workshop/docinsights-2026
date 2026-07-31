@@ -1,0 +1,10 @@
+title: Sponsors
+sponsors:
+  - name: Oracle
+    url: https://www.oracle.com/
+    logo: /assets/sponsors/oracle.svg
+    alt: Oracle logo
+  - name: Abaka AI
+    url: https://www.abaka.ai/
+    logo: /assets/sponsors/abaka-ai.png
+    alt: Abaka AI logo

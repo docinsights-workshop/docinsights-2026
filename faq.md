@@ -30,12 +30,28 @@ permalink: /faq/
     <p>Long papers may include up to 8 pages of content. Short papers may include up to 4 pages of content. References and appendices are unlimited.</p>
   </article>
   <article>
-    <h2>What is the shared task?</h2>
-    {% comment %}
-    Hidden until shared task details are public-ready:
-    <p>The planned shared task focuses on RUST-BENCH and structure-aware tabular reasoning grounded in tabular evidence. Detailed participation instructions will be announced after organizer confirmation.</p>
-    {% endcomment %}
-    <p>Shared task details will be announced soon. We will update the shared task page with scope, timeline, participation instructions, and evaluation details once they are ready.</p>
+    <h2>What challenges are running?</h2>
+    <p>DocInsights hosts <a href="{{ '/shared-task/' | relative_url }}">two distinct challenges</a>: DocSem for document-grounded quantitative reasoning with evidence attribution, and Dr.DocBench for expert-level parsing of complex documents.</p>
+  </article>
+  <article>
+    <h2>When does the competition run?</h2>
+    <p>The planned competition window is August 3 through September 10, 2026. Exact portal cutoff times and challenge-specific updates will be published in the official challenge resources.</p>
+  </article>
+  <article>
+    <h2>What is the challenge prize pool?</h2>
+    <p>The combined prize pool will exceed USD 5,000. Track allocations, eligibility requirements, team limits, and award conditions will be announced with the final rules.</p>
+  </article>
+  <article>
+    <h2>Can challenge participants present their work?</h2>
+    <p>Yes. Participants can submit concise system papers for workshop consideration. Selected contributions, including winning solutions, will be invited to present at DocInsights 2026.</p>
+  </article>
+  <article>
+    <h2>How do I participate in DocSem?</h2>
+    <p>Use the <a href="https://huggingface.co/datasets/amitbcp/docinsights-2026-shared-task-data" target="_blank" rel="noopener">public dataset and participant guide</a>, then submit a complete validation JSONL file through the <a href="https://amitbcp-docsem-docinsights.hf.space/" target="_blank" rel="noopener">DocSem portal</a>.</p>
+  </article>
+  <article>
+    <h2>Is Dr.DocBench open for submissions?</h2>
+    <p>Not yet. Its organizer-side evaluator has completed testing, while the participant package, public evaluation access, final submission specification, and integrity review are being finalized. Follow the <a href="https://drdocbench-challenge.abaka-pages.com/" target="_blank" rel="noopener">canonical challenge website</a> for release updates.</p>
   </article>
   <article>
     <h2>Will the workshop support remote participation?</h2>
