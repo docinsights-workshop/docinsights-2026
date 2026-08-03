@@ -7,8 +7,11 @@
     {% if action.external %}target="_blank" rel="noopener"{% endif %}
   >
     <span>{{ action.label }}</span>
+    {% if action.previous_deadline %}
+    <span class="btn-date btn-date-previous"><del>{{ action.previous_deadline }}</del></span>
+    {% endif %}
     {% if action_deadline %}
-    <span class="btn-date">{{ action_deadline }}</span>
+    <span class="btn-date btn-date-current">{% if action.previous_deadline %}Extended: {% endif %}{{ action_deadline }}</span>
     {% endif %}
     <small>{{ action.description }}</small>
   </a>

@@ -11,12 +11,13 @@ challenge_items:
     note: Planned final submission date for challenge rankings. Portal-specific cutoff times will be stated in the official rules.
 items:
   - label: Direct Submission Deadline
-    date: August 2, 2026
-    time: 11:59 PM UTC-12:00
+    previous_date: August 2, 2026
+    date: August 10, 2026
+    time: 12:59 PM UTC (UTC+00:00)
     type: submission
     action_label: Submit Direct Paper
     action_url: https://openreview.net/group?id=EMNLP/2026/Workshop/DocInsights
-    note: Direct submissions may be archival or non-archival.
+    note: The direct submission deadline has been extended. Submissions may be archival or non-archival.
     highlight: true
   - label: ARR Commitment Deadline
     date: August 30, 2026

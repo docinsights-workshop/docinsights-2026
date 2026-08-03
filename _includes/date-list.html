@@ -3,6 +3,9 @@
   <article class="date-card{% if item.highlight %} date-card-highlight{% endif %}">
     <div class="date-card-meta">{{ item.type }}</div>
     <h3>{{ item.label }}</h3>
+    {% if item.previous_date %}
+    <p class="date-card-previous"><del>{{ item.previous_date }}</del> <span>Original deadline</span></p>
+    {% endif %}
     <p class="date-card-date">{{ item.date }}</p>
     <p class="date-card-time">{{ item.time }}</p>
     {% if item.note %}

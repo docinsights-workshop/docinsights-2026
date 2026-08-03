@@ -81,6 +81,9 @@ def main():
         "Submit Direct Paper",
         "Commit ARR Paper",
         "August 2, 2026",
+        "August 10, 2026 at 12:59 PM UTC",
+        "Direct submission deadline extended to August 10",
+        "The previous August 2 deadline has been superseded",
         "August 30, 2026",
         "Research Themes",
         "Program Preview",
@@ -98,7 +101,12 @@ def main():
     assert_true("sponsor-lockup--hero" in home.classes, "home hero must expose the workshop sponsors")
     assert_true("budapest_hero_clean.jpg" in home_html, "home hero must use the cleaned Budapest background")
     assert_true("banner_cover_photo.png" not in home_html, "home hero must not use text-bearing banner artwork")
-    assert_true(home_html.count('class="btn-date"') >= 2, "home hero CTA buttons must show submission deadlines")
+    assert_true(home_html.count('class="btn-date ') >= 2, "home hero CTA buttons must show submission deadlines")
+    assert_true(
+        "<del>August 2, 2026</del>" in home_html,
+        "home hero must show the superseded direct-submission deadline",
+    )
+    assert_true("Extended:" in home.text, "home hero must label the extended direct-submission deadline")
 
     for label in [
         "Home",
@@ -196,9 +204,21 @@ def main():
             f"{label} must not visibly expose hidden shared task details",
         )
 
+    dates_html = REQUIRED_PAGES["dates"].read_text(encoding="utf-8")
     dates = parse(REQUIRED_PAGES["dates"])
-    for text in ["Challenge Season", "August 3, 2026", "September 10, 2026"]:
+    for text in [
+        "August 2, 2026",
+        "August 10, 2026",
+        "12:59 PM UTC (UTC+00:00)",
+        "Challenge Season",
+        "August 3, 2026",
+        "September 10, 2026",
+    ]:
         assert_true(text in dates.text, f"dates page missing challenge milestone: {text}")
+    assert_true(
+        "<del>August 2, 2026</del>" in dates_html,
+        "dates page must strike through the superseded direct-submission deadline",
+    )
 
     faq = parse(REQUIRED_PAGES["faq"])
     for text in [

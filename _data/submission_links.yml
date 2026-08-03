@@ -1,7 +1,8 @@
 primary:
   - label: Submit Direct Paper
     description: Long, short, archival, and non-archival submissions.
-    deadline: August 2, 2026
+    previous_deadline: August 2, 2026
+    deadline: August 10, 2026 at 12:59 PM UTC
     url: https://openreview.net/group?id=EMNLP/2026/Workshop/DocInsights
     style: primary
     external: true
