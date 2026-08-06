@@ -118,7 +118,6 @@ permalink: /organizers/
         <a href="https://scholar.google.com/citations?user=hvS68jYAAAAJ&hl=en&oi=ao" target="_blank" rel="noopener" aria-label="Jyotika Singh on Google Scholar" title="Google Scholar"><span class="person-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M3 8l9-4 9 4-9 4-9-4Z"/><path d="M7 10.5V15c0 1.7 2.2 3 5 3s5-1.3 5-3v-4.5"/><path d="M21 8v6"/></svg></span><span class="person-link-label">Scholar</span></a>
       </div>
     </div>
-    <p class="person-bio">Challenge design for agentic memory, data quality, and human-in-the-loop evaluation of grounded AI systems.</p>
   </div>
 
   <div class="person-card">
@@ -136,7 +135,6 @@ permalink: /organizers/
         <a href="https://scholar.google.com/citations?hl=en&user=R3X_R9UAAAAJ" target="_blank" rel="noopener" aria-label="Hitesh Patel on Google Scholar" title="Google Scholar"><span class="person-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M3 8l9-4 9 4-9 4-9-4Z"/><path d="M7 10.5V15c0 1.7 2.2 3 5 3s5-1.3 5-3v-4.5"/><path d="M21 8v6"/></svg></span><span class="person-link-label">Scholar</span></a>
       </div>
     </div>
-    <p class="person-bio">Challenge design and evaluation for multilingual, multimodal, and responsible AI, including grounded retrieval and safety.</p>
   </div>
 
   <div class="person-card">
@@ -152,7 +150,54 @@ permalink: /organizers/
         <a href="https://www.linkedin.com/in/rahul-suresh1/" target="_blank" rel="noopener" aria-label="Rahul Suresh on LinkedIn" title="LinkedIn"><span class="person-icon person-icon-linkedin" aria-hidden="true">in</span><span class="person-link-label">LinkedIn</span></a>
       </div>
     </div>
-    <p class="person-bio">Challenge operations, expert data curation, model evaluation, and participant engagement for document AI benchmarks.</p>
+  </div>
+
+  <div class="person-card">
+    <img src="{{ '/assets/images/challenge-organizers/xiaolong_luo.jpg' | relative_url }}" alt="Xiaolong Luo" class="person-photo person-photo-xiaolong" loading="lazy" decoding="async">
+    <div class="person-card-header">
+      <div class="person-identity">
+        <div class="person-meta-line">
+          <h3>Xiaolong Luo</h3>
+          <p class="person-affiliation">Harvard University</p>
+        </div>
+      </div>
+      <div class="person-links" aria-label="Xiaolong Luo profile links">
+        <a href="https://aaronluo00.github.io/" target="_blank" rel="noopener" aria-label="Xiaolong Luo website" title="Website"><span class="person-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 10v10h5v-6h4v6h5V10"/></svg></span><span class="person-link-label">Website</span></a>
+        <a href="https://www.linkedin.com/in/xiaolong-luo-4a8281236/" target="_blank" rel="noopener" aria-label="Xiaolong Luo on LinkedIn" title="LinkedIn"><span class="person-icon person-icon-linkedin" aria-hidden="true">in</span><span class="person-link-label">LinkedIn</span></a>
+      </div>
+    </div>
+  </div>
+
+  <div class="person-card">
+    <img src="{{ '/assets/images/challenge-organizers/alexandra_bezea_tudor.jpg' | relative_url }}" alt="Alexandra Bezea-Tudor" class="person-photo" loading="lazy" decoding="async">
+    <div class="person-card-header">
+      <div class="person-identity">
+        <div class="person-meta-line">
+          <h3>Alexandra Bezea-Tudor</h3>
+          <p class="person-affiliation">Abaka AI</p>
+        </div>
+      </div>
+      <div class="person-links" aria-label="Alexandra Bezea-Tudor profile links">
+        <a href="https://www.linkedin.com/in/alexandra-b-tudor/" target="_blank" rel="noopener" aria-label="Alexandra Bezea-Tudor on LinkedIn" title="LinkedIn"><span class="person-icon person-icon-linkedin" aria-hidden="true">in</span><span class="person-link-label">LinkedIn</span></a>
+      </div>
+    </div>
+  </div>
+
+  <div class="person-card">
+    <img src="{{ '/assets/images/challenge-organizers/ruby_zhang.jpg' | relative_url }}" alt="Ruby Zhang" class="person-photo" loading="lazy" decoding="async">
+    <div class="person-card-header">
+      <div class="person-identity">
+        <div class="person-meta-line">
+          <h3>Ruby Zhang</h3>
+          <p class="person-affiliation">Abaka AI</p>
+        </div>
+      </div>
+      <div class="person-links" aria-label="Ruby Zhang profile links">
+        <a href="https://rubyzx67.github.io/" target="_blank" rel="noopener" aria-label="Ruby Zhang website" title="Website"><span class="person-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 10v10h5v-6h4v6h5V10"/></svg></span><span class="person-link-label">Website</span></a>
+        <a href="https://scholar.google.com/citations?user=6B1w0FEAAAAJ&amp;hl=en" target="_blank" rel="noopener" aria-label="Ruby Zhang on Google Scholar" title="Google Scholar"><span class="person-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M3 8l9-4 9 4-9 4-9-4Z"/><path d="M7 10.5V15c0 1.7 2.2 3 5 3s5-1.3 5-3v-4.5"/><path d="M21 8v6"/></svg></span><span class="person-link-label">Scholar</span></a>
+        <a href="https://www.linkedin.com/in/rubyzx/" target="_blank" rel="noopener" aria-label="Ruby Zhang on LinkedIn" title="LinkedIn"><span class="person-icon person-icon-linkedin" aria-hidden="true">in</span><span class="person-link-label">LinkedIn</span></a>
+      </div>
+    </div>
   </div>
 </div>
 

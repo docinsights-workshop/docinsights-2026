@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
+import argparse
 import json
 import shutil
 from pathlib import Path
 
 
-SOURCE_ROOT = Path("/Users/aamita/Oracle/amitbcp/docsem-workshop-final-public")
-TARGET_ROOT = Path("competition/hf-dataset")
-PRIVATE_ROOT = Path("competition/hf-submissions")
+REPO_ROOT = Path(__file__).resolve().parents[1]
+PUBLIC_SOURCE_ROOT = Path("/Users/aamita/Oracle/amitbcp/gsm-sem/docsem")
+PUBLIC_LICENSE = PUBLIC_SOURCE_ROOT.parent / "LICENSE.txt"
+ORGANIZER_SOURCE_ROOT = Path(
+    "/Users/aamita/Oracle/amitbcp/docsem-workshop-final-public"
+)
+TARGET_ROOT = REPO_ROOT / "competition/hf-dataset"
+PRIVATE_ROOT = REPO_ROOT / "competition/hf-submissions"
 
 
 def read_jsonl(path):
@@ -22,8 +28,10 @@ def write_jsonl(path, rows):
 
 
 def copy_pdfs(split):
-    source_dir = SOURCE_ROOT / split / "documents"
+    source_dir = PUBLIC_SOURCE_ROOT / split / "documents"
     target_dir = TARGET_ROOT / split / "documents"
+    if target_dir.exists():
+        shutil.rmtree(target_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
     for pdf in sorted(source_dir.glob("*.pdf")):
         shutil.copy2(pdf, target_dir / pdf.name)
@@ -31,7 +39,7 @@ def copy_pdfs(split):
 
 def public_tasks(split):
     rows = []
-    for row in read_jsonl(SOURCE_ROOT / split / "tasks.jsonl"):
+    for row in read_jsonl(PUBLIC_SOURCE_ROOT / split / "tasks.jsonl"):
         rows.append(
             {
                 "instance_id": row["instance_id"],
@@ -42,33 +50,51 @@ def public_tasks(split):
     return rows
 
 
-def labels(split):
+def labels(source_root, split):
     return [
         {
             "instance_id": row["instance_id"],
             "answer": str(row["answer"]),
             "evidence": [str(value) for value in row["evidence"]],
         }
-        for row in read_jsonl(SOURCE_ROOT / split / "labels.jsonl")
+        for row in read_jsonl(source_root / split / "labels.jsonl")
     ]
 
 
-def validate_split(split):
+def validate_public_split(split, label_rows=None):
     tasks = public_tasks(split)
-    label_rows = labels(split)
     task_ids = {row["instance_id"] for row in tasks}
-    label_ids = {row["instance_id"] for row in label_rows}
-    pdf_ids = {path.stem for path in (SOURCE_ROOT / split / "documents").glob("*.pdf")}
-    if task_ids != label_ids:
-        raise ValueError(f"{split} task ids and label ids differ")
+    pdf_ids = {
+        path.stem
+        for path in (PUBLIC_SOURCE_ROOT / split / "documents").glob("*.pdf")
+    }
     if task_ids != pdf_ids:
         raise ValueError(f"{split} task ids and PDF ids differ")
-    return tasks, label_rows
+    if label_rows is not None:
+        label_ids = {row["instance_id"] for row in label_rows}
+        if task_ids != label_ids:
+            raise ValueError(f"{split} task ids and label ids differ")
+    return tasks
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Build the public DocSem HF dataset and private validation labels."
+    )
+    parser.add_argument(
+        "--reset-leaderboard",
+        action="store_true",
+        help="Reset the local generated leaderboard payload to an empty list.",
+    )
+    return parser.parse_args()
 
 
 def main():
-    train_tasks, train_labels = validate_split("train")
-    val_tasks, val_labels = validate_split("val")
+    args = parse_args()
+    train_labels = labels(PUBLIC_SOURCE_ROOT, "train")
+    train_tasks = validate_public_split("train", train_labels)
+    val_labels = labels(ORGANIZER_SOURCE_ROOT, "val")
+    val_tasks = validate_public_split("val", val_labels)
 
     write_jsonl(TARGET_ROOT / "train" / "tasks.jsonl", train_tasks)
     write_jsonl(TARGET_ROOT / "train" / "labels.jsonl", train_labels)
@@ -87,17 +113,20 @@ def main():
     ]
     write_jsonl(TARGET_ROOT / "examples" / "sample_val_submission.jsonl", sample_submission)
 
-    if not (TARGET_ROOT / "INSTRUCTIONS.md").is_file():
-        raise FileNotFoundError(
-            "Keep competition/hf-dataset/INSTRUCTIONS.md synced with the canonical "
-            "oracle-samples/gsm-sem main/docsem release."
-        )
+    shutil.copy2(
+        PUBLIC_SOURCE_ROOT / "PARTICIPANT_INSTRUCTIONS.md",
+        TARGET_ROOT / "INSTRUCTIONS.md",
+    )
+    shutil.copy2(PUBLIC_LICENSE, TARGET_ROOT / "LICENSE.txt")
 
     write_jsonl(PRIVATE_ROOT / "private" / "val_labels.jsonl", val_labels)
     (PRIVATE_ROOT / "submissions").mkdir(parents=True, exist_ok=True)
     (PRIVATE_ROOT / "submissions" / ".gitkeep").write_text("", encoding="utf-8")
-    (PRIVATE_ROOT / "leaderboard").mkdir(parents=True, exist_ok=True)
-    (PRIVATE_ROOT / "leaderboard" / "leaderboard.json").write_text("[]\n", encoding="utf-8")
+    if args.reset_leaderboard:
+        (PRIVATE_ROOT / "leaderboard").mkdir(parents=True, exist_ok=True)
+        (PRIVATE_ROOT / "leaderboard" / "leaderboard.json").write_text(
+            "[]\n", encoding="utf-8"
+        )
 
     print(
         json.dumps(
@@ -106,6 +135,7 @@ def main():
                 "train_labels": len(train_labels),
                 "val_tasks_public": len(val_tasks),
                 "val_labels_private": len(val_labels),
+                "leaderboard_reset": args.reset_leaderboard,
             },
             indent=2,
         )

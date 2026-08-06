@@ -50,7 +50,7 @@ Submit validation predictions through the [official DocSem submission portal](ht
 
 ## Source And Provenance
 
-The canonical participant release is the [`docsem/` directory in `oracle-samples/gsm-sem`](https://github.com/oracle-samples/gsm-sem/tree/main/docsem). It is now part of the default `main` branch following merge commit [`62c53bd`](https://github.com/oracle-samples/gsm-sem/commit/62c53bd37b6eeff81ebb4e16b1dac81747760d77).
+The canonical participant release is the [`docsem/` directory in `oracle-samples/gsm-sem`](https://github.com/oracle-samples/gsm-sem/tree/main/docsem). This mirror tracks revision [`332158b`](https://github.com/oracle-samples/gsm-sem/commit/332158b2549e7e8a1186e2ae3a922669e9018808), including the refreshed task PDFs merged into the default `main` branch.
 
 This Hugging Face package mirrors the source release's 908 training tasks, 908 training labels, 217 validation tasks, and all 1,125 PDFs. The PDF files are byte-identical. The Hugging Face task manifests only prefix `document_pdf` with `train/` or `val/` so files resolve directly from this repository's root.
 

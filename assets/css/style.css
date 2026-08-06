@@ -1266,6 +1266,10 @@ main li {
   object-position: 50% 28%;
 }
 
+.person-photo-xiaolong {
+  object-position: 50% 32%;
+}
+
 .committee-grid .person-card {
   padding: 0.82rem;
 }

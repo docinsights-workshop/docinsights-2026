@@ -12,16 +12,27 @@ The current deployment targets:
 
 ## Source Data
 
-The package is generated from:
+Participant-visible tasks, labels, instructions, and PDFs are generated from the
+canonical public release:
 
 ```text
-/Users/aamita/Oracle/amitbcp/docsem-workshop-final-public
+/Users/aamita/Oracle/amitbcp/gsm-sem/docsem
 ```
 
-Regenerate local HF payloads with:
+Hidden validation labels are read separately from the organizer-only source at
+`/Users/aamita/Oracle/amitbcp/docsem-workshop-final-public`. They are written
+only to the ignored private HF payload.
+
+Regenerate local HF payloads without changing leaderboard state:
 
 ```bash
 /Users/aamita/miniconda3/bin/python scripts/prepare_docsem_hf_dataset.py
+```
+
+To prepare an intentional leaderboard reset as part of a refreshed release:
+
+```bash
+/Users/aamita/miniconda3/bin/python scripts/prepare_docsem_hf_dataset.py --reset-leaderboard
 ```
 
 The published dataset includes:
@@ -68,14 +79,25 @@ Participants submit JSONL for validation, one object per instance:
 
 ## Publishing
 
-Upload the public dataset and private evaluation store:
+Upload the public dataset. Use the resumable large-folder uploader because the
+release contains 1,125 PDFs:
 
 ```bash
-/Users/aamita/miniconda3/bin/huggingface-cli upload amitbcp/docinsights-2026-shared-task-data competition/hf-dataset . --repo-type dataset --commit-message "Upload DocSem public data"
-/Users/aamita/miniconda3/bin/huggingface-cli upload amitbcp/docinsights-2026-shared-task-submissions competition/hf-submissions . --repo-type dataset --private --commit-message "Upload DocSem private validation labels"
+/Users/aamita/miniconda3/bin/huggingface-cli upload-large-folder amitbcp/docinsights-2026-shared-task-data competition/hf-dataset --repo-type dataset --num-workers 4
 ```
 
-The dynamic Gradio Space currently requires HF Pro or an organization with dynamic Space support for this account. Once enabled, publish `competition/hf-space` and configure:
+Reset prior submissions and leaderboard state only when the public release has
+changed and prior scores are no longer comparable. The command is a dry run
+unless `--yes` is provided, and it preserves hidden validation labels:
+
+```bash
+/Users/aamita/miniconda3/bin/python scripts/reset_docsem_hf_leaderboard.py
+/Users/aamita/miniconda3/bin/python scripts/reset_docsem_hf_leaderboard.py --yes
+```
+
+The deployed Gradio Space reads public tasks from the dataset repo and stores
+scored submissions in the private repo. When republishing
+`competition/hf-space`, configure:
 
 ```text
 PUBLIC_DATASET_REPO=amitbcp/docinsights-2026-shared-task-data

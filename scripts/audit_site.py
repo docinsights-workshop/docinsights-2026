@@ -372,18 +372,29 @@ def main():
     challenge_html = organizers_html.split(
         '<h2 id="workshop-challenge-organizers">Workshop Challenge Organizers</h2>', 1
     )[-1].split('<h2 id="program-committee">Program Committee</h2>', 1)[0]
-    challenge_names = ["Jyotika Singh", "Hitesh Patel", "Rahul Suresh"]
+    challenge_names = [
+        "Jyotika Singh",
+        "Hitesh Patel",
+        "Rahul Suresh",
+        "Xiaolong Luo",
+        "Alexandra Bezea-Tudor",
+        "Ruby Zhang",
+    ]
     challenge_positions = [challenge_html.find(name) for name in challenge_names]
     assert_true(
         all(position >= 0 for position in challenge_positions),
-        "challenge organizer section must include Jyotika Singh, Hitesh Patel, and Rahul Suresh",
+        "challenge organizer section must include all six confirmed organizers",
     )
     assert_true(
         challenge_positions == sorted(challenge_positions),
-        "challenge organizers must be ordered Jyotika Singh, Hitesh Patel, then Rahul Suresh",
+        "challenge organizers must preserve the confirmed display order",
     )
     assert_true("Oracle" in challenge_html, "challenge organizers must identify Oracle")
     assert_true("Abaka AI" in challenge_html, "challenge organizers must identify Abaka AI")
+    assert_true(
+        "person-bio" not in challenge_html,
+        "challenge organizer cards must not include unsourced bios",
+    )
     assert_true(
         "challenge-organizer-grid" in organizers.classes,
         "challenge organizers must use the dedicated compact grid",
@@ -410,6 +421,15 @@ def main():
         (BASE / "assets" / "images" / "challenge-organizers" / "rahul_suresh.png").exists(),
         "missing Rahul Suresh challenge-organizer headshot",
     )
+    for filename in [
+        "xiaolong_luo.jpg",
+        "alexandra_bezea_tudor.jpg",
+        "ruby_zhang.jpg",
+    ]:
+        assert_true(
+            (BASE / "assets" / "images" / "challenge-organizers" / filename).exists(),
+            f"missing challenge-organizer headshot: {filename}",
+        )
     assert_true("footer-sponsors" in organizers.classes, "site footer must include the sponsors block")
     assert_true("nav-sponsors" not in organizers.classes, "primary navigation must not contain sponsor branding")
     assert_true("sponsor-lockup--page" in organizers.classes, "inner page title bands must expose sponsors")
