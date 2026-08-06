@@ -392,9 +392,23 @@ def main():
     assert_true("Oracle" in challenge_html, "challenge organizers must identify Oracle")
     assert_true("Abaka AI" in challenge_html, "challenge organizers must identify Abaka AI")
     assert_true(
-        "person-bio" not in challenge_html,
-        "challenge organizer cards must not include unsourced bios",
+        challenge_html.count('<p class="person-bio">') == len(challenge_names),
+        "each challenge organizer card must include one concise profile-based bio",
     )
+    for phrase in [
+        "agentic memory",
+        "agentic routing",
+        "DrDocBench challenge",
+        "multimodal and multi-task AI for healthcare",
+        "multimodal systems",
+        "spatial intelligence",
+    ]:
+        assert_true(phrase in challenge_html, f"challenge organizer bios missing: {phrase}")
+    for name in challenge_names:
+        assert_true(
+            f'<p class="person-bio">{name}' not in challenge_html,
+            f"challenge organizer bio must not repeat the card name: {name}",
+        )
     assert_true(
         "challenge-organizer-grid" in organizers.classes,
         "challenge organizers must use the dedicated compact grid",

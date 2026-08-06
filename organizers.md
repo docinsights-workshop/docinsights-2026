@@ -118,6 +118,7 @@ permalink: /organizers/
         <a href="https://scholar.google.com/citations?user=hvS68jYAAAAJ&hl=en&oi=ao" target="_blank" rel="noopener" aria-label="Jyotika Singh on Google Scholar" title="Google Scholar"><span class="person-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M3 8l9-4 9 4-9 4-9-4Z"/><path d="M7 10.5V15c0 1.7 2.2 3 5 3s5-1.3 5-3v-4.5"/><path d="M21 8v6"/></svg></span><span class="person-link-label">Scholar</span></a>
       </div>
     </div>
+    <p class="person-bio">Works on agentic memory, tool use, and reliable reasoning for LLM and agent systems, with additional research on structured information and exact algorithmic tasks.</p>
   </div>
 
   <div class="person-card">
@@ -135,6 +136,7 @@ permalink: /organizers/
         <a href="https://scholar.google.com/citations?hl=en&user=R3X_R9UAAAAJ" target="_blank" rel="noopener" aria-label="Hitesh Patel on Google Scholar" title="Google Scholar"><span class="person-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M3 8l9-4 9 4-9 4-9-4Z"/><path d="M7 10.5V15c0 1.7 2.2 3 5 3s5-1.3 5-3v-4.5"/><path d="M21 8v6"/></svg></span><span class="person-link-label">Scholar</span></a>
       </div>
     </div>
+    <p class="person-bio">Leads applied research on multilingual and multimodal enterprise AI, including evaluation, agentic routing, and guardrails for languages and domains underserved by frontier models.</p>
   </div>
 
   <div class="person-card">
@@ -150,6 +152,7 @@ permalink: /organizers/
         <a href="https://www.linkedin.com/in/rahul-suresh1/" target="_blank" rel="noopener" aria-label="Rahul Suresh on LinkedIn" title="LinkedIn"><span class="person-icon person-icon-linkedin" aria-hidden="true">in</span><span class="person-link-label">LinkedIn</span></a>
       </div>
     </div>
+    <p class="person-bio">Provides technical and organizational leadership across Abaka AI and the DrDocBench challenge, spanning benchmark design, model evaluation, data quality, and participant systems.</p>
   </div>
 
   <div class="person-card">
@@ -166,6 +169,7 @@ permalink: /organizers/
         <a href="https://www.linkedin.com/in/xiaolong-luo-4a8281236/" target="_blank" rel="noopener" aria-label="Xiaolong Luo on LinkedIn" title="LinkedIn"><span class="person-icon person-icon-linkedin" aria-hidden="true">in</span><span class="person-link-label">LinkedIn</span></a>
       </div>
     </div>
+    <p class="person-bio">Develops multimodal and multi-task AI for healthcare, while evaluating the fidelity, calibration, and robustness of language-model reasoning over complex clinical data.</p>
   </div>
 
   <div class="person-card">
@@ -181,6 +185,7 @@ permalink: /organizers/
         <a href="https://www.linkedin.com/in/alexandra-b-tudor/" target="_blank" rel="noopener" aria-label="Alexandra Bezea-Tudor on LinkedIn" title="LinkedIn"><span class="person-icon person-icon-linkedin" aria-hidden="true">in</span><span class="person-link-label">LinkedIn</span></a>
       </div>
     </div>
+    <p class="person-bio">Contributes to Abaka AI research and challenge initiatives across multimodal systems, evaluation data quality, and human-in-the-loop AI workflows.</p>
   </div>
 
   <div class="person-card">
@@ -198,6 +203,7 @@ permalink: /organizers/
         <a href="https://www.linkedin.com/in/rubyzx/" target="_blank" rel="noopener" aria-label="Ruby Zhang on LinkedIn" title="LinkedIn"><span class="person-icon person-icon-linkedin" aria-hidden="true">in</span><span class="person-link-label">LinkedIn</span></a>
       </div>
     </div>
+    <p class="person-bio">Researches spatial intelligence, embodied AI, and multimodal agents, with emphasis on open-source systems, human-aligned reward modeling, and human-centric evaluation.</p>
   </div>
 </div>
 
