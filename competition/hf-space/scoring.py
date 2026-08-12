@@ -10,12 +10,24 @@ class SubmissionError(ValueError):
 
 
 FINAL_MARKER = re.compile(r"^\s*(final\s*answer\s*:|answer\s*:)\s*", re.IGNORECASE)
+MAX_PARTICIPANT_NAMES_LENGTH = 500
 
 
 def normalize_answer(value):
     text = FINAL_MARKER.sub("", str(value)).strip().lower()
     text = re.sub(r"\s+", " ", text)
     return text
+
+
+def normalize_participant_names(value):
+    names = re.sub(r"\s+", " ", str(value or "").strip())
+    if not names:
+        raise SubmissionError("Enter participant name(s).")
+    if len(names) > MAX_PARTICIPANT_NAMES_LENGTH:
+        raise SubmissionError(
+            f"Participant name(s) must be {MAX_PARTICIPANT_NAMES_LENGTH} characters or fewer."
+        )
+    return names
 
 
 def _decimal(value):
@@ -175,8 +187,15 @@ def score_predictions(rows, labels):
     }
 
 
-def leaderboard_row(team, contact, submission_name, metrics, submitted_at):
-    return {
+def leaderboard_row(
+    team,
+    contact,
+    submission_name,
+    metrics,
+    submitted_at,
+    participant_names=None,
+):
+    row = {
         "team": team,
         "contact": contact,
         "submission_name": submission_name,
@@ -186,6 +205,9 @@ def leaderboard_row(team, contact, submission_name, metrics, submitted_at):
         "evidence_f1": metrics["evidence_f1"],
         "examples": metrics["examples"],
     }
+    if participant_names is not None:
+        row["participant_names"] = normalize_participant_names(participant_names)
+    return row
 
 
 def normalize_identity(value):
@@ -199,39 +221,43 @@ def leaderboard_identity(row):
     )
 
 
-def best_leaderboard_rows(rows):
+def latest_leaderboard_rows(rows):
     grouped = {}
     attempts = collections.Counter()
+    latest_names = {}
 
-    for row in rows:
+    for index, row in enumerate(rows):
         identity = leaderboard_identity(row)
         attempts[identity] += max(int(row.get("attempts", 1)), 1)
+        candidate_recency = (str(row.get("submitted_at", "")), index)
+        participant_names = str(row.get("participant_names", "")).strip()
+        if participant_names:
+            current_metadata = latest_names.get(identity)
+            if current_metadata is None or candidate_recency >= current_metadata[0]:
+                latest_names[identity] = (candidate_recency, participant_names)
         current = grouped.get(identity)
-        candidate_score = (
-            float(row.get("answer_accuracy", 0.0)),
-            float(row.get("evidence_f1", 0.0)),
-            str(row.get("submitted_at", "")),
-        )
-        current_score = None
+        current_recency = None
         if current is not None:
-            current_score = (
-                float(current.get("answer_accuracy", 0.0)),
-                float(current.get("evidence_f1", 0.0)),
+            current_recency = (
                 str(current.get("submitted_at", "")),
+                int(current.get("_source_index", -1)),
             )
-        if current_score is None or candidate_score > current_score:
-            grouped[identity] = dict(row)
+        if current_recency is None or candidate_recency >= current_recency:
+            grouped[identity] = {**row, "_source_index": index}
 
-    best_rows = []
+    latest_rows = []
     for identity, row in grouped.items():
+        row.pop("_source_index", None)
         row["attempts"] = attempts[identity]
-        best_rows.append(row)
-    return best_rows
+        if identity in latest_names:
+            row["participant_names"] = latest_names[identity][1]
+        latest_rows.append(row)
+    return latest_rows
 
 
 def rank_leaderboard(rows):
     return sorted(
-        best_leaderboard_rows(rows),
+        latest_leaderboard_rows(rows),
         key=lambda row: (
             -float(row.get("answer_accuracy", 0.0)),
             -float(row.get("evidence_f1", 0.0)),

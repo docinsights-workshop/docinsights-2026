@@ -15,7 +15,15 @@ Upload a validation `submission.jsonl` file to validate the submission schema, c
 
 The canonical release is maintained under [`docsem/` in `oracle-samples/gsm-sem`](https://github.com/oracle-samples/gsm-sem/tree/main/docsem). It provides 908 labelled training tasks and 217 unlabelled validation tasks.
 
-The public leaderboard shows the best submission for each normalized team and contact-email identity, together with its total attempt count. Contact emails remain private. Rankings use answer accuracy first and evidence F1 as the tie-breaker. If two attempts have identical public scores, the more recent attempt is shown. Evidence exact match is retained in the detailed submission result as a strict diagnostic, but it is not a separate public leaderboard column.
+## Dataset freeze and final evaluation
+
+If you downloaded the problem set before **August 5, 2026**, pull the latest version. The development data was updated on August 5 and is now frozen; there will be no further updates to it.
+
+The current leaderboard contains provisional validation results. A held-out test set will be released five days before the September 10, 2026 final submission deadline. Participants will be notified when it is available and asked to submit their test-set results. Performance on that held-out test set will determine the final leaderboard.
+
+The submission form requires participant name(s), team name, contact email, and submission name. Participant names and contact emails are stored only in the private submission repository and are never rendered on the public leaderboard.
+
+The public leaderboard shows the latest submission for each normalized team and contact-email identity, together with its total attempt count. Rankings use the latest attempt's answer accuracy first and evidence F1 as the tie-breaker. A new valid attempt replaces that identity's previously displayed result even when its score is lower. Legacy submissions without participant names remain valid. Evidence exact match is retained in the detailed submission result as a strict diagnostic, but it is not a separate public leaderboard column.
 
 For live competition use, configure the Space secrets:
 

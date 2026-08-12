@@ -24,6 +24,9 @@ permalink: /dates/
       <div class="date-card-meta">{{ item.type }}</div>
       <h3>{{ item.label }}</h3>
       <p class="date-card-date">{{ item.date }}</p>
+      {% if item.time %}
+      <p class="date-card-time">{{ item.time }}</p>
+      {% endif %}
       <p class="date-card-note">{{ item.note }}</p>
       <a class="inline-action" href="{{ '/shared-task/' | relative_url }}">View challenges</a>
     </article>

@@ -31,7 +31,7 @@ title: Home
   <div>
     <p class="section-kicker">Challenges</p>
     <h2>DocSem and Dr.DocBench</h2>
-    <p>Two complementary challenge tracks cover evidence-grounded quantitative reasoning and expert-level document parsing. The competition season runs from <strong>August 3 through September 10, 2026</strong>.</p>
+    <p>Two complementary challenge tracks cover evidence-grounded quantitative reasoning and expert-level document parsing. <strong>DocSem runs August 3–September 10</strong>; <strong>Dr.DocBench runs August 10–October 10, 2026</strong>.</p>
     <a class="inline-action" href="{{ '/shared-task/' | relative_url }}">Explore both challenges</a>
   </div>
   <div class="callout-panel">

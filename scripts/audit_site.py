@@ -90,8 +90,11 @@ def main():
         "Challenges",
         "DocSem",
         "Dr.DocBench",
-        "August 3 through September 10, 2026",
+        "DocSem runs August 3–September 10",
+        "Dr.DocBench runs August 10–October 10, 2026",
         "USD 5,000+",
+        "Dr.DocBench is live on EvalAI",
+        "up to USD 3,000 in prizes",
     ]:
         assert_true(text in home.text, f"home page missing text: {text}")
     assert_true("skip-link" in home.classes, "layout must include skip-link class")
@@ -158,12 +161,27 @@ def main():
     )
     for text in [
         "Two challenges advancing document intelligence beyond plain text",
-        "August 3–September 10, 2026",
+        "August 3–October 10, 2026",
         "USD 5,000+",
         "DocSem",
         "Dr.DocBench",
-        "Resources live",
-        "Participant release in preparation",
+        "Dataset frozen Aug 5",
+        "Use the August 5 dataset release",
+        "there will be no further updates to it",
+        "A held-out test set will be released five days before the September 10, 2026 final submission deadline",
+        "Performance on the held-out test set will determine the final leaderboard",
+        "Submissions open",
+        "Submit through EvalAI by October 10",
+        "October 10 at 12:59 PM UTC",
+        "final evaluation runs October 11–23",
+        "up to USD 3,000",
+        "Private Test phase",
+        "Text Edit Distance",
+        "Table TEDS",
+        "Formula CDM",
+        "Reading Order",
+        "predictions.jsonl",
+        "up to 3 times per day",
         "System papers and presentations",
         "Selected contributions",
     ]:
@@ -174,11 +192,14 @@ def main():
         "https://amitbcp-docsem-docinsights.hf.space/",
         "https://github.com/oracle-samples/gsm-sem/tree/main/docsem",
         "https://drdocbench-challenge.abaka-pages.com/",
+        "https://eval.ai/web/challenges/challenge-page/2717/overview",
+        "https://huggingface.co/datasets/2077AIDataFoundation/DrDocBench",
+        "https://arxiv.org/abs/2606.01393",
     ]:
         assert_true(href in shared_task_links, f"challenges page missing public resource: {href}")
     assert_true(
-        not any("eval.ai" in href for href in shared_task_links),
-        "challenges page must not publish private Dr.DocBench EvalAI access",
+        "Participant release in preparation" not in shared_task.text,
+        "challenges page must not retain the stale Dr.DocBench preparation status",
     )
     for stale_domain in [
         "aaronluo00.github.io/drdocbench-challenge",
@@ -211,8 +232,10 @@ def main():
         "August 10, 2026",
         "12:59 PM UTC (UTC+00:00)",
         "Challenge Season",
-        "August 3, 2026",
-        "September 10, 2026",
+        "August 3–September 10, 2026",
+        "August 10–October 10, 2026",
+        "12:59 PM UTC deadline",
+        "Final evaluation runs October 11–23",
     ]:
         assert_true(text in dates.text, f"dates page missing challenge milestone: {text}")
     assert_true(
@@ -226,8 +249,19 @@ def main():
         "When does the competition run?",
         "combined prize pool will exceed USD 5,000",
         "Is Dr.DocBench open for submissions?",
+        "Yes. Review the challenge website",
+        "Dr.DocBench EvalAI challenge",
+        "up to 3 times per day",
     ]:
         assert_true(text in faq.text, f"FAQ missing challenge detail: {text}")
+    faq_links = [link.get("href", "") for link in faq.links]
+    for href in [
+        "https://drdocbench-challenge.abaka-pages.com/",
+        "https://huggingface.co/datasets/2077AIDataFoundation/DrDocBench",
+        "https://eval.ai/web/challenges/challenge-page/2717/overview",
+    ]:
+        assert_true(href in faq_links, f"FAQ missing Dr.DocBench public resource: {href}")
+    assert_true("Not yet" not in faq.text, "FAQ must not retain the stale Dr.DocBench closed status")
 
     speakers = parse(REQUIRED_PAGES["speakers"])
     speakers_html = REQUIRED_PAGES["speakers"].read_text(encoding="utf-8")
@@ -323,6 +357,7 @@ def main():
         ".challenge-season",
         ".challenge-feature",
         ".challenge-status",
+        ".challenge-update",
         ".challenge-actions",
         ".challenge-timeline",
     ]:

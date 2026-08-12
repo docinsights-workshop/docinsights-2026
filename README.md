@@ -4,7 +4,7 @@ Source for the [DocInsights 2026 workshop website](https://docinsights-workshop.
 
 ## DocInsights Challenges
 
-The workshop hosts two distinct challenge tracks from August 3 through September 10, 2026, with a combined prize pool exceeding USD 5,000. Challenge participants can submit system papers for workshop consideration, and selected contributions will be invited to present.
+The workshop hosts two distinct challenge tracks from August 3 through October 10, 2026, with a combined prize pool exceeding USD 5,000. Challenge participants can submit system papers for workshop consideration, and selected contributions will be invited to present.
 
 ### DocSem
 
@@ -19,9 +19,13 @@ Document-grounded quantitative reasoning with evidence attribution.
 Expert-level parsing of difficult text, tables, formulas, reading order, document structure, chemistry notation, and musical notation.
 
 - [Canonical challenge website](https://drdocbench-challenge.abaka-pages.com/)
-- Status: participant release in preparation
+- [EvalAI submission portal](https://eval.ai/web/challenges/challenge-page/2717/overview)
+- [Public dataset and guide](https://huggingface.co/datasets/2077AIDataFoundation/DrDocBench)
+- [Benchmark paper](https://arxiv.org/abs/2606.01393)
+- Competition: August 10–October 10, 2026; submissions close at 12:59 PM UTC
+- Prize pool: up to USD 3,000
 
-See the [DocInsights challenges page](https://docinsights-workshop.github.io/docinsights-2026/shared-task/) for the combined timeline, readiness status, participation pathway, and resources.
+See the [DocInsights challenges page](https://docinsights-workshop.github.io/docinsights-2026/shared-task/) for track timelines, participation pathways, and resources.
 
 ## Repository scope
 

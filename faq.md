@@ -35,7 +35,7 @@ permalink: /faq/
   </article>
   <article>
     <h2>When does the competition run?</h2>
-    <p>The planned competition window is August 3 through September 10, 2026. Exact portal cutoff times and challenge-specific updates will be published in the official challenge resources.</p>
+    <p>DocSem runs from August 3 through September 10, 2026. Dr.DocBench runs from August 10 through October 10, 2026, with submissions closing at 12:59 PM UTC. Each official portal is the system of record for exact submission status.</p>
   </article>
   <article>
     <h2>What is the challenge prize pool?</h2>
@@ -51,7 +51,7 @@ permalink: /faq/
   </article>
   <article>
     <h2>Is Dr.DocBench open for submissions?</h2>
-    <p>Not yet. Its organizer-side evaluator has completed testing, while the participant package, public evaluation access, final submission specification, and integrity review are being finalized. Follow the <a href="https://drdocbench-challenge.abaka-pages.com/" target="_blank" rel="noopener">canonical challenge website</a> for release updates.</p>
+    <p>Yes. Review the <a href="https://drdocbench-challenge.abaka-pages.com/" target="_blank" rel="noopener">challenge website</a> and <a href="https://huggingface.co/datasets/2077AIDataFoundation/DrDocBench" target="_blank" rel="noopener">public dataset</a>, then submit through the <a href="https://eval.ai/web/challenges/challenge-page/2717/overview" target="_blank" rel="noopener">Dr.DocBench EvalAI challenge</a>. Teams may submit up to 3 times per day and select up to 2 submissions for final evaluation.</p>
   </article>
   <article>
     <h2>Will the workshop support remote participation?</h2>

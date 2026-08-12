@@ -14,6 +14,7 @@ from scoring import (
     leaderboard_identity,
     leaderboard_row,
     load_jsonl_text,
+    normalize_participant_names,
     parse_submission_text,
     rank_leaderboard,
     safe_slug,
@@ -142,6 +143,44 @@ PORTAL_CSS = """
 #portal-header a.primary-link:hover {
     color: #ffffff;
     background: var(--docsem-teal);
+}
+
+#evaluation-notice {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0 24px;
+    margin: 0 0 20px;
+    padding: 17px 20px;
+    background: #edf7f5;
+    border: 1px solid #bdddd8;
+    border-left: 4px solid var(--docsem-teal);
+    border-radius: 6px;
+}
+
+#evaluation-notice h2 {
+    grid-column: 1 / -1;
+    color: var(--docsem-navy);
+    font-size: 20px;
+    line-height: 1.25;
+    letter-spacing: 0;
+    margin: 0 0 9px;
+}
+
+#evaluation-notice p {
+    color: #34475a;
+    font-size: 15px;
+    line-height: 1.5;
+    margin: 0;
+}
+
+#evaluation-notice p + p {
+    border-left: 1px solid #bdddd8;
+    padding-left: 24px;
+}
+
+#evaluation-notice a {
+    color: var(--docsem-teal);
+    font-weight: 700;
 }
 
 .column > #submission-panel {
@@ -389,6 +428,19 @@ PORTAL_CSS = """
         padding: 0 10px;
     }
 
+    #evaluation-notice {
+        grid-template-columns: 1fr;
+        gap: 12px;
+        padding: 15px 14px;
+    }
+
+    #evaluation-notice p + p {
+        border-top: 1px solid #bdddd8;
+        border-left: 0;
+        padding-top: 12px;
+        padding-left: 0;
+    }
+
     .column > #submission-panel {
         padding: 16px 14px;
     }
@@ -420,12 +472,19 @@ def _load_gold_rows():
     return load_jsonl_text(_read_hub_file(GOLD_REPO_ID, GOLD_FILE, token=WRITE_TOKEN))
 
 
-def _persist_submission(rows, team, contact, submission_name, metrics):
+def _persist_submission(rows, team, contact, submission_name, metrics, participant_names=None):
     if not SUBMISSIONS_REPO_ID or not WRITE_TOKEN:
         return "Score computed. Persistence is disabled until SUBMISSIONS_REPO_ID and HF_WRITE_TOKEN are configured."
 
     submitted_at = dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
-    row = leaderboard_row(team, contact, submission_name, metrics, submitted_at)
+    row = leaderboard_row(
+        team,
+        contact,
+        submission_name,
+        metrics,
+        submitted_at,
+        participant_names=participant_names,
+    )
     payload = {
         "leaderboard": row,
         "metrics": metrics,
@@ -489,10 +548,10 @@ def _update_leaderboard(row):
             commit_message="Update leaderboard",
         )
         identity = leaderboard_identity(row)
-        best = next(
+        latest = next(
             item for item in rank_leaderboard(rows) if leaderboard_identity(item) == identity
         )
-        return best["attempts"]
+        return latest["attempts"]
 
 
 def _format_metric(value):
@@ -528,7 +587,7 @@ def leaderboard_html():
 
     return f"""
     <div class="leaderboard-table-wrap">
-        <table aria-label="DocSem leaderboard">
+        <table aria-label="DocSem validation leaderboard">
             <colgroup>
                 <col style="width: 6%">
                 <col style="width: 20%">
@@ -542,11 +601,11 @@ def leaderboard_html():
                 <tr>
                     <th class="leaderboard-rank" scope="col">Rank</th>
                     <th scope="col">Team</th>
-                    <th scope="col">Best submission</th>
+                    <th scope="col">Latest submission</th>
                     <th class="leaderboard-attempts" scope="col">Attempts</th>
                     <th class="leaderboard-metric" scope="col">Answer accuracy</th>
                     <th class="leaderboard-metric" scope="col">Evidence F1</th>
-                    <th scope="col">Best score (UTC)</th>
+                    <th scope="col">Submitted (UTC)</th>
                 </tr>
             </thead>
             <tbody>
@@ -557,7 +616,7 @@ def leaderboard_html():
     """
 
 
-def evaluate_submission(file_obj, team, contact, submission_name):
+def evaluate_submission(file_obj, team, contact, submission_name, participant_names=None):
     if file_obj is None:
         raise gr.Error("Upload a JSONL submission file.")
     if not team.strip():
@@ -568,11 +627,19 @@ def evaluate_submission(file_obj, team, contact, submission_name):
         raise gr.Error("Enter a submission name.")
 
     try:
+        participant_names = normalize_participant_names(participant_names)
         text = Path(file_obj.name).read_text(encoding="utf-8")
         rows = parse_submission_text(text)
         labels = _load_gold_rows()
         metrics = score_predictions(rows, labels)
-        message = _persist_submission(rows, team.strip(), contact.strip(), submission_name.strip(), metrics)
+        message = _persist_submission(
+            rows,
+            team.strip(),
+            contact.strip(),
+            submission_name.strip(),
+            metrics,
+            participant_names=participant_names,
+        )
     except SubmissionError as exc:
         raise gr.Error(str(exc)) from exc
     except Exception as exc:
@@ -623,6 +690,26 @@ with gr.Blocks(**blocks_options) as demo:
         """
     )
 
+    gr.HTML(
+        f"""
+        <section id="evaluation-notice" aria-labelledby="evaluation-notice-title">
+            <h2 id="evaluation-notice-title">Dataset freeze and final evaluation</h2>
+            <p>
+                <strong>Use the August 5, 2026 dataset release.</strong>
+                If you downloaded the problem set before August 5, pull the
+                <a href="https://huggingface.co/datasets/{PUBLIC_DATASET_REPO}" target="_blank" rel="noopener">latest version</a>.
+                The development data is now frozen and will not receive further updates.
+            </p>
+            <p>
+                <strong>Final rankings will use a held-out test set.</strong>
+                It will be released five days before the September 10, 2026 final submission deadline.
+                Participants will be notified when it is available and asked to submit test-set results;
+                those results will determine the final leaderboard.
+            </p>
+        </section>
+        """
+    )
+
     with gr.Group(elem_id="submission-panel"):
         gr.HTML(
             f"""
@@ -637,6 +724,10 @@ with gr.Blocks(**blocks_options) as demo:
         )
         with gr.Row(elem_id="submission-fields"):
             team = gr.Textbox(label="Team", placeholder="example-team")
+            participant_names = gr.Textbox(
+                label="Participant name(s)",
+                placeholder="A. Researcher, B. Researcher",
+            )
             contact = gr.Textbox(label="Contact email", placeholder="lead@example.org")
             submission_name = gr.Textbox(label="Submission name", placeholder="baseline-v1")
         with gr.Row(elem_id="submission-actions"):
@@ -650,7 +741,7 @@ with gr.Blocks(**blocks_options) as demo:
             with gr.Column(scale=1, min_width=210, elem_id="submission-side"):
                 gr.Markdown(
                     "Accepted: `.jsonl` or `.json`  \n"
-                    "Validation labels remain organizer-only."
+                    "Participant details and validation labels remain organizer-only."
                 )
                 submit = gr.Button(
                     "Validate and score",
@@ -666,7 +757,7 @@ with gr.Blocks(**blocks_options) as demo:
 
     submit.click(
         evaluate_submission,
-        inputs=[file_input, team, contact, submission_name],
+        inputs=[file_input, team, contact, submission_name, participant_names],
         outputs=result,
     )
 
@@ -675,8 +766,8 @@ with gr.Blocks(**blocks_options) as demo:
             gr.HTML(
                 """
                 <div>
-                    <h2>Leaderboard</h2>
-                    <p>Best attempt per team and contact email. Ranked by answer accuracy, then evidence F1. Attempt counts include every valid submission.</p>
+                    <h2>Validation leaderboard</h2>
+                    <p>Provisional validation results from each team's latest attempt. Ranked by answer accuracy, then evidence F1. Final standings will use the held-out test set.</p>
                 </div>
                 """
             )

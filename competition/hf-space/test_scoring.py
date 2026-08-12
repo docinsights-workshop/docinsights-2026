@@ -1,6 +1,6 @@
 import unittest
 
-from scoring import rank_leaderboard
+from scoring import SubmissionError, normalize_participant_names, rank_leaderboard
 
 
 def leaderboard_entry(
@@ -12,8 +12,9 @@ def leaderboard_entry(
     answer_accuracy,
     evidence_exact_match,
     evidence_f1,
+    participant_names=None,
 ):
-    return {
+    row = {
         "team": team,
         "contact": contact,
         "submission_name": submission,
@@ -23,10 +24,13 @@ def leaderboard_entry(
         "evidence_f1": evidence_f1,
         "examples": 217,
     }
+    if participant_names is not None:
+        row["participant_names"] = participant_names
+    return row
 
 
 class LeaderboardRankingTests(unittest.TestCase):
-    def test_same_team_and_email_show_best_attempt(self):
+    def test_same_team_and_email_show_latest_attempt(self):
         rows = [
             leaderboard_entry(
                 team="Example Team",
@@ -51,8 +55,64 @@ class LeaderboardRankingTests(unittest.TestCase):
         ranked = rank_leaderboard(rows)
 
         self.assertEqual(len(ranked), 1)
-        self.assertEqual(ranked[0]["submission_name"], "best")
+        self.assertEqual(ranked[0]["submission_name"], "latest-regression")
+        self.assertEqual(ranked[0]["answer_accuracy"], 0.0)
+        self.assertEqual(ranked[0]["evidence_f1"], 1.0)
         self.assertEqual(ranked[0]["attempts"], 2)
+
+    def test_same_identity_uses_latest_attempt_and_participant_names(self):
+        rows = [
+            leaderboard_entry(
+                team="Example Team",
+                contact="lead@example.org",
+                participant_names="Alice Example",
+                submission="best",
+                submitted_at="2026-07-30T01:00:00Z",
+                answer_accuracy=0.8,
+                evidence_exact_match=1.0,
+                evidence_f1=1.0,
+            ),
+            leaderboard_entry(
+                team="Example Team",
+                contact="lead@example.org",
+                participant_names="Alice Example, Bob Example",
+                submission="latest-regression",
+                submitted_at="2026-07-30T02:00:00Z",
+                answer_accuracy=0.7,
+                evidence_exact_match=1.0,
+                evidence_f1=1.0,
+            ),
+        ]
+
+        ranked = rank_leaderboard(rows)
+
+        self.assertEqual(ranked[0]["submission_name"], "latest-regression")
+        self.assertEqual(ranked[0]["participant_names"], "Alice Example, Bob Example")
+        self.assertEqual(ranked[0]["attempts"], 2)
+
+    def test_legacy_rows_without_participant_names_still_rank(self):
+        row = leaderboard_entry(
+            team="Legacy Team",
+            contact="legacy@example.org",
+            submission="legacy",
+            submitted_at="2026-07-30T01:00:00Z",
+            answer_accuracy=0.8,
+            evidence_exact_match=1.0,
+            evidence_f1=1.0,
+        )
+
+        ranked = rank_leaderboard([row])
+
+        self.assertNotIn("participant_names", ranked[0])
+        self.assertEqual(ranked[0]["attempts"], 1)
+
+    def test_participant_names_are_required_and_normalized(self):
+        self.assertEqual(
+            normalize_participant_names("  Alice Example,\n Bob Example  "),
+            "Alice Example, Bob Example",
+        )
+        with self.assertRaises(SubmissionError):
+            normalize_participant_names("   ")
 
     def test_equal_scores_show_most_recent_attempt(self):
         rows = [
