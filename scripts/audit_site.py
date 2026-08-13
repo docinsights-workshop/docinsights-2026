@@ -433,9 +433,9 @@ def main():
     for phrase in [
         "agentic memory",
         "agentic routing",
-        "DrDocBench challenge",
+        "Provides technical and organizational leadership across Abaka AI and the DrDocBench challenge, spanning benchmark design, model evaluation, and data quality.",
         "multimodal and multi-task AI for healthcare",
-        "multimodal systems",
+        "Works on Abaka AI's research and challenge initiatives in multimodal AI, with a focus on data curation, model evaluation, human-in-the-loop workflows, and challenge operations.",
         "spatial intelligence",
     ]:
         assert_true(phrase in challenge_html, f"challenge organizer bios missing: {phrase}")

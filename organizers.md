@@ -152,7 +152,7 @@ permalink: /organizers/
         <a href="https://www.linkedin.com/in/rahul-suresh1/" target="_blank" rel="noopener" aria-label="Rahul Suresh on LinkedIn" title="LinkedIn"><span class="person-icon person-icon-linkedin" aria-hidden="true">in</span><span class="person-link-label">LinkedIn</span></a>
       </div>
     </div>
-    <p class="person-bio">Provides technical and organizational leadership across Abaka AI and the DrDocBench challenge, spanning benchmark design, model evaluation, data quality, and participant systems.</p>
+    <p class="person-bio">Provides technical and organizational leadership across Abaka AI and the DrDocBench challenge, spanning benchmark design, model evaluation, and data quality.</p>
   </div>
 
   <div class="person-card">
@@ -185,7 +185,7 @@ permalink: /organizers/
         <a href="https://www.linkedin.com/in/alexandra-b-tudor/" target="_blank" rel="noopener" aria-label="Alexandra Bezea-Tudor on LinkedIn" title="LinkedIn"><span class="person-icon person-icon-linkedin" aria-hidden="true">in</span><span class="person-link-label">LinkedIn</span></a>
       </div>
     </div>
-    <p class="person-bio">Contributes to Abaka AI research and challenge initiatives across multimodal systems, evaluation data quality, and human-in-the-loop AI workflows.</p>
+    <p class="person-bio">Works on Abaka AI's research and challenge initiatives in multimodal AI, with a focus on data curation, model evaluation, human-in-the-loop workflows, and challenge operations.</p>
   </div>
 
   <div class="person-card">
