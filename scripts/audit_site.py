@@ -413,12 +413,11 @@ def main():
         "Rahul Suresh",
         "Xiaolong Luo",
         "Alexandra Bezea-Tudor",
-        "Ruby Zhang",
     ]
     challenge_positions = [challenge_html.find(name) for name in challenge_names]
     assert_true(
         all(position >= 0 for position in challenge_positions),
-        "challenge organizer section must include all six confirmed organizers",
+        "challenge organizer section must include all five confirmed organizers",
     )
     assert_true(
         challenge_positions == sorted(challenge_positions),
@@ -436,9 +435,9 @@ def main():
         "Provides technical and organizational leadership across Abaka AI and the DrDocBench challenge, spanning benchmark design, model evaluation, and data quality.",
         "multimodal and multi-task AI for healthcare",
         "Works on Abaka AI's research and challenge initiatives in multimodal AI, with a focus on data curation, model evaluation, human-in-the-loop workflows, and challenge operations.",
-        "spatial intelligence",
     ]:
         assert_true(phrase in challenge_html, f"challenge organizer bios missing: {phrase}")
+    assert_true("Ruby Zhang" not in challenge_html, "Ruby Zhang must not appear among challenge organizers")
     for name in challenge_names:
         assert_true(
             f'<p class="person-bio">{name}' not in challenge_html,
@@ -473,7 +472,6 @@ def main():
     for filename in [
         "xiaolong_luo.jpg",
         "alexandra_bezea_tudor.jpg",
-        "ruby_zhang.jpg",
     ]:
         assert_true(
             (BASE / "assets" / "images" / "challenge-organizers" / filename).exists(),

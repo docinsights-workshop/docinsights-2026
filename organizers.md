@@ -188,23 +188,6 @@ permalink: /organizers/
     <p class="person-bio">Works on Abaka AI's research and challenge initiatives in multimodal AI, with a focus on data curation, model evaluation, human-in-the-loop workflows, and challenge operations.</p>
   </div>
 
-  <div class="person-card">
-    <img src="{{ '/assets/images/challenge-organizers/ruby_zhang.jpg' | relative_url }}" alt="Ruby Zhang" class="person-photo" loading="lazy" decoding="async">
-    <div class="person-card-header">
-      <div class="person-identity">
-        <div class="person-meta-line">
-          <h3>Ruby Zhang</h3>
-          <p class="person-affiliation">Abaka AI</p>
-        </div>
-      </div>
-      <div class="person-links" aria-label="Ruby Zhang profile links">
-        <a href="https://rubyzx67.github.io/" target="_blank" rel="noopener" aria-label="Ruby Zhang website" title="Website"><span class="person-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 10v10h5v-6h4v6h5V10"/></svg></span><span class="person-link-label">Website</span></a>
-        <a href="https://scholar.google.com/citations?user=6B1w0FEAAAAJ&amp;hl=en" target="_blank" rel="noopener" aria-label="Ruby Zhang on Google Scholar" title="Google Scholar"><span class="person-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M3 8l9-4 9 4-9 4-9-4Z"/><path d="M7 10.5V15c0 1.7 2.2 3 5 3s5-1.3 5-3v-4.5"/><path d="M21 8v6"/></svg></span><span class="person-link-label">Scholar</span></a>
-        <a href="https://www.linkedin.com/in/rubyzx/" target="_blank" rel="noopener" aria-label="Ruby Zhang on LinkedIn" title="LinkedIn"><span class="person-icon person-icon-linkedin" aria-hidden="true">in</span><span class="person-link-label">LinkedIn</span></a>
-      </div>
-    </div>
-    <p class="person-bio">Researches spatial intelligence, embodied AI, and multimodal agents, with emphasis on open-source systems, human-aligned reward modeling, and human-centric evaluation.</p>
-  </div>
 </div>
 
 ## Program Committee
