@@ -1,5 +1,6 @@
 enabled: true
 label: Latest update
-text: Shared-task paper submissions are open. Submit an archival or non-archival DocSem or Dr.DocBench system paper by September 15, 2026 at 11:59 PM UTC.
-action: Submit on OpenReview
+text: Shared-task papers open · Sep 15, 11:59 PM UTC
+aria_text: Shared-task paper submissions are open. Submit an archival or non-archival DocSem or Dr.DocBench system paper by September 15, 2026 at 11:59 PM UTC.
+action: Submit
 url: https://openreview.net/group?id=EMNLP/2026/Workshop/DocInsights_Shared_Task

@@ -96,7 +96,7 @@ def main():
         "Dr.DocBench is live on EvalAI",
         "up to USD 3,000 in prizes",
         "Latest update",
-        "Shared-task paper submissions are open",
+        "Shared-task papers open",
         "September 15, 2026 at 11:59 PM UTC",
     ]:
         assert_true(text in home.text, f"home page missing text: {text}")
@@ -110,6 +110,15 @@ def main():
     )
     assert_true("site-announcement" in home.classes, "home must expose the latest-update announcement")
     assert_true("marquee" not in home_html.lower(), "announcement must not use a moving marquee")
+    home_nav_html = home_html.split('<nav class="navbar"', 1)[-1].split("</nav>", 1)[0]
+    assert_true(
+        "site-announcement" in home_nav_html,
+        "latest-update announcement must render inside the navy navigation",
+    )
+    assert_true(
+        "site-announcement" not in home_html.split('<nav class="navbar"', 1)[0],
+        "latest-update announcement must not render as a separate strip above navigation",
+    )
     assert_true("skip-link" in home.classes, "layout must include skip-link class")
     assert_true("main-content" in home.ids, "main content must have id='main-content'")
     assert_true('rel="icon"' in home_html and "circular_logo.png" in home_html, "layout must define a favicon")
@@ -138,6 +147,10 @@ def main():
 
     for label, path in REQUIRED_PAGES.items():
         parser = parse(path)
+        assert_true(
+            "site-announcement" in parser.classes,
+            f"{label} must include the global navigation announcement",
+        )
         for link in parser.links:
             if link.get("target") == "_blank":
                 rel = link.get("rel", "")
@@ -216,9 +229,10 @@ def main():
         shared_task_openreview_url,
     ]:
         assert_true(href in shared_task_links, f"challenges page missing public resource: {href}")
+    shared_task_nav_html = shared_task_html.split('<nav class="navbar"', 1)[-1].split("</nav>", 1)[0]
     assert_true(
-        "site-announcement" not in shared_task.classes,
-        "latest-update announcement must remain homepage-only",
+        "site-announcement" in shared_task_nav_html,
+        "challenges page must carry the announcement inside navigation",
     )
     assert_true(
         "Participant release in preparation" not in shared_task.text,
@@ -402,9 +416,14 @@ def main():
     ]:
         assert_true(selector in css, f"CSS missing challenge layout selector: {selector}")
     assert_true(
-        re.search(r"@media \(max-width: 620px\).*?\.site-announcement-inner\s*{[^}]*grid-template-columns:\s*1fr", css, re.S)
+        re.search(r"\.nav-container\s*{[^}]*grid-template-areas:\s*\"logo announcement links\"", css, re.S)
         is not None,
-        "homepage announcement must stack cleanly on mobile",
+        "desktop navigation must place the announcement between logo and links",
+    )
+    assert_true(
+        re.search(r"@media \(max-width: 1400px\).*?grid-template-areas:\s*\"logo toggle\"\s*\"announcement announcement\"", css, re.S)
+        is not None,
+        "tablet and mobile navigation must keep the announcement inside the blue header",
     )
     assert_true(
         re.search(r"@media \(max-width: 620px\).*?\.challenge-timeline\s*{[^}]*grid-template-columns:\s*1fr", css, re.S) is not None,

@@ -13,16 +13,15 @@
 <body>
   <a href="#main-content" class="skip-link">Skip to content</a>
 
-  {% if page.url == '/' and site.data.announcement.enabled %}
-  {% include announcement.html %}
-  {% endif %}
-
   <nav class="navbar" aria-label="Primary navigation">
     <div class="nav-container">
       <a href="{{ '/' | relative_url }}" class="nav-logo">
         <img src="{{ '/assets/images/circular_logo.png' | relative_url }}" alt="DocInsights 2026" class="nav-logo-img">
         <span>DocInsights 2026</span>
       </a>
+      {% if site.data.announcement.enabled %}
+      {% include announcement.html %}
+      {% endif %}
       <button class="nav-toggle" aria-label="Toggle navigation" aria-controls="primary-navigation" aria-expanded="false">
         <span></span><span></span><span></span>
       </button>

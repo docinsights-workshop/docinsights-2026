@@ -4,7 +4,7 @@
   href="{{ announcement.url }}"
   target="_blank"
   rel="noopener"
-  aria-label="{{ announcement.label }}: {{ announcement.text }} {{ announcement.action }}"
+  aria-label="{{ announcement.label }}: {{ announcement.aria_text | default: announcement.text }} {{ announcement.action }}"
 >
   <span class="site-announcement-inner">
     <span class="site-announcement-label">{{ announcement.label }}</span>
