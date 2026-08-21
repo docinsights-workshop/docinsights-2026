@@ -40,6 +40,12 @@ GRADIO_MAJOR_VERSION = int(gr.__version__.split(".", maxsplit=1)[0])
 LEADERBOARD_LOCK = threading.Lock()
 
 PORTAL_CSS = """
+html,
+body {
+    height: 100%;
+    overflow: hidden !important;
+}
+
 :root {
     --docsem-navy: #17365f;
     --docsem-teal: #177f78;
@@ -57,6 +63,7 @@ PORTAL_CSS = """
     max-width: 1540px !important;
     height: 100vh !important;
     height: 100dvh !important;
+    max-height: 100% !important;
     margin: 0 auto !important;
     padding: 24px 30px 36px !important;
     overflow-y: auto !important;
