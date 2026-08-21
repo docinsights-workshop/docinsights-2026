@@ -55,8 +55,13 @@ PORTAL_CSS = """
 .gradio-container {
     width: 100% !important;
     max-width: 1540px !important;
+    height: 100vh !important;
+    height: 100dvh !important;
     margin: 0 auto !important;
     padding: 24px 30px 36px !important;
+    overflow-y: auto !important;
+    overscroll-behavior-y: contain;
+    -webkit-overflow-scrolling: touch;
     background: var(--docsem-page);
     color: var(--docsem-ink);
     font-size: 16px;
