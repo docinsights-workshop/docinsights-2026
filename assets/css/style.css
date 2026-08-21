@@ -45,6 +45,66 @@ img {
   max-width: 100%;
 }
 
+.site-announcement {
+  display: block;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.22);
+  background: #12675f;
+  color: #fff;
+  text-decoration: none;
+  transition: background 0.18s ease;
+}
+
+.site-announcement:visited,
+.site-announcement:hover,
+.site-announcement:active {
+  color: #fff;
+}
+
+.site-announcement:hover {
+  background: #0d5953;
+}
+
+.site-announcement:focus-visible {
+  outline: 3px solid #f2c14e;
+  outline-offset: -3px;
+}
+
+.site-announcement-inner {
+  width: min(calc(100% - (var(--content-gutter) * 2)), var(--max-width));
+  min-height: 46px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.85rem;
+  margin: 0 auto;
+  padding: 0.55rem 0;
+}
+
+.site-announcement-label {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  background: #f2c14e;
+  color: var(--color-navy);
+  padding: 0.3rem 0.65rem;
+  font-size: 0.7rem;
+  font-weight: 800;
+  line-height: 1.1;
+  text-transform: uppercase;
+}
+
+.site-announcement-text {
+  font-size: 0.86rem;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.site-announcement-action {
+  font-size: 0.8rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
 a {
   color: var(--color-blue);
   text-underline-offset: 0.18em;
@@ -694,6 +754,41 @@ main li {
   gap: 1.5rem;
 }
 
+.paper-submission-callout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 2rem;
+  border-top: 1px solid var(--color-line);
+  border-bottom: 1px solid var(--color-line);
+  border-left: 5px solid var(--color-rust);
+  background: #fffaf2;
+  padding: 1.5rem 1.65rem;
+}
+
+.paper-submission-callout h2 {
+  margin-bottom: 0.55rem;
+}
+
+.paper-submission-callout p:last-child {
+  margin-bottom: 0;
+}
+
+.paper-submission-action {
+  min-width: 270px;
+  display: grid;
+  justify-items: stretch;
+  gap: 0.75rem;
+}
+
+.paper-submission-deadline {
+  color: var(--color-navy);
+  font-size: 0.86rem;
+  font-weight: 800;
+  line-height: 1.35;
+  text-align: center;
+}
+
 .challenge-feature {
   overflow: hidden;
   background: var(--color-surface);
@@ -918,10 +1013,6 @@ main li {
   margin-bottom: 0;
 }
 
-.challenge-date-list {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
 .challenge-date-list .date-card {
   min-height: 210px;
 }
@@ -932,6 +1023,10 @@ main li {
 
 .date-list {
   grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.date-list.challenge-date-list {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .date-card {
@@ -1552,6 +1647,10 @@ main li {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
+  .date-list.challenge-date-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .challenge-organizer-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -1590,6 +1689,19 @@ main li {
     display: grid;
   }
 
+  .paper-submission-callout {
+    grid-template-columns: 1fr;
+  }
+
+  .paper-submission-action {
+    min-width: 0;
+    justify-items: start;
+  }
+
+  .paper-submission-deadline {
+    text-align: left;
+  }
+
   .challenge-feature-body {
     grid-template-columns: 1fr;
   }
@@ -1607,6 +1719,20 @@ main li {
 }
 
 @media (max-width: 620px) {
+  .site-announcement-inner {
+    grid-template-columns: 1fr;
+    gap: 0.35rem;
+    padding: 0.7rem 0;
+  }
+
+  .site-announcement-label {
+    justify-self: start;
+  }
+
+  .site-announcement-action {
+    display: none;
+  }
+
   .container {
     padding: 2.2rem 0;
   }
@@ -1662,6 +1788,10 @@ main li {
   .speaker-grid,
   .faq-list,
   .footer-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .date-list.challenge-date-list {
     grid-template-columns: 1fr;
   }
 

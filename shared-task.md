@@ -32,6 +32,19 @@ permalink: /shared-task/
   </div>
 </section>
 
+<section class="paper-submission-callout" aria-labelledby="shared-task-paper-title">
+  <div>
+    <p class="section-kicker">System Paper Submissions</p>
+    <h2 id="shared-task-paper-title">Shared-task paper submissions are open</h2>
+    <p><strong>Archival or non-archival</strong> system papers are welcome for <strong>DocSem or Dr.DocBench</strong>. Describe the system, data, models, prompts, tools, evaluation choices, and lessons learned from your challenge participation.</p>
+    <p>Selected contributions, including winning solutions, will be invited to present at DocInsights 2026.</p>
+  </div>
+  <div class="paper-submission-action">
+    <span class="paper-submission-deadline">September 15, 2026 at 11:59 PM UTC</span>
+    <a class="challenge-action challenge-action-primary" href="https://openreview.net/group?id=EMNLP/2026/Workshop/DocInsights_Shared_Task" target="_blank" rel="noopener">Submit on OpenReview</a>
+  </div>
+</section>
+
 <section class="challenge-list" aria-label="DocInsights challenge tracks">
   <article class="challenge-feature challenge-feature-docsem">
     <header class="challenge-feature-header">

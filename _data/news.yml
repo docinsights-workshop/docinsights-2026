@@ -1,4 +1,7 @@
 items:
+  - date: August 21, 2026
+    title: Shared-task paper submissions are open
+    body: Submit an archival or non-archival DocSem or Dr.DocBench system paper through OpenReview by September 15, 2026 at 11:59 PM UTC.
   - date: August 10, 2026
     title: Dr.DocBench is live on EvalAI
     body: The expert-level document parsing challenge is open through October 10, 2026 at 12:59 PM UTC, with up to USD 3,000 in prizes.

@@ -46,6 +46,10 @@ permalink: /faq/
     <p>Yes. Participants can submit concise system papers for workshop consideration. Selected contributions, including winning solutions, will be invited to present at DocInsights 2026.</p>
   </article>
   <article>
+    <h2>How do I submit a shared-task system paper?</h2>
+    <p>Submit an <strong>archival or non-archival</strong> system paper for <strong>DocSem or Dr.DocBench</strong> through the <a href="https://openreview.net/group?id=EMNLP/2026/Workshop/DocInsights_Shared_Task" target="_blank" rel="noopener">shared-task OpenReview venue</a>. The deadline is September 15, 2026 at 11:59 PM UTC.</p>
+  </article>
+  <article>
     <h2>How do I participate in DocSem?</h2>
     <p>Use the <a href="https://huggingface.co/datasets/amitbcp/docinsights-2026-shared-task-data" target="_blank" rel="noopener">public dataset and participant guide</a>, then submit a complete validation JSONL file through the <a href="https://amitbcp-docsem-docinsights.hf.space/" target="_blank" rel="noopener">DocSem portal</a>.</p>
   </article>

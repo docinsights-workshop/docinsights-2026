@@ -95,8 +95,21 @@ def main():
         "USD 5,000+",
         "Dr.DocBench is live on EvalAI",
         "up to USD 3,000 in prizes",
+        "Latest update",
+        "Shared-task paper submissions are open",
+        "September 15, 2026 at 11:59 PM UTC",
     ]:
         assert_true(text in home.text, f"home page missing text: {text}")
+    home_links = [link.get("href", "") for link in home.links]
+    shared_task_openreview_url = (
+        "https://openreview.net/group?id=EMNLP/2026/Workshop/DocInsights_Shared_Task"
+    )
+    assert_true(
+        shared_task_openreview_url in home_links,
+        "home announcement must link to the shared-task OpenReview venue",
+    )
+    assert_true("site-announcement" in home.classes, "home must expose the latest-update announcement")
+    assert_true("marquee" not in home_html.lower(), "announcement must not use a moving marquee")
     assert_true("skip-link" in home.classes, "layout must include skip-link class")
     assert_true("main-content" in home.ids, "main content must have id='main-content'")
     assert_true('rel="icon"' in home_html and "circular_logo.png" in home_html, "layout must define a favicon")
@@ -184,6 +197,11 @@ def main():
         "up to 3 times per day",
         "System papers and presentations",
         "Selected contributions",
+        "Shared-task paper submissions are open",
+        "September 15, 2026 at 11:59 PM UTC",
+        "Archival or non-archival",
+        "DocSem or Dr.DocBench",
+        "Submit on OpenReview",
     ]:
         assert_true(text in shared_task.text, f"shared task missing required detail: {text}")
     shared_task_links = [link.get("href", "") for link in shared_task.links]
@@ -195,8 +213,13 @@ def main():
         "https://eval.ai/web/challenges/challenge-page/2717/overview",
         "https://huggingface.co/datasets/2077AIDataFoundation/DrDocBench",
         "https://arxiv.org/abs/2606.01393",
+        shared_task_openreview_url,
     ]:
         assert_true(href in shared_task_links, f"challenges page missing public resource: {href}")
+    assert_true(
+        "site-announcement" not in shared_task.classes,
+        "latest-update announcement must remain homepage-only",
+    )
     assert_true(
         "Participant release in preparation" not in shared_task.text,
         "challenges page must not retain the stale Dr.DocBench preparation status",
@@ -236,8 +259,16 @@ def main():
         "August 10–October 10, 2026",
         "12:59 PM UTC deadline",
         "Final evaluation runs October 11–23",
+        "Shared-task Paper Submission Deadline",
+        "September 15, 2026",
+        "11:59 PM UTC",
     ]:
         assert_true(text in dates.text, f"dates page missing challenge milestone: {text}")
+    dates_links = [link.get("href", "") for link in dates.links]
+    assert_true(
+        shared_task_openreview_url in dates_links,
+        "dates page must link the shared-task paper deadline to OpenReview",
+    )
     assert_true(
         "<del>August 2, 2026</del>" in dates_html,
         "dates page must strike through the superseded direct-submission deadline",
@@ -252,6 +283,10 @@ def main():
         "Yes. Review the challenge website",
         "Dr.DocBench EvalAI challenge",
         "up to 3 times per day",
+        "How do I submit a shared-task system paper?",
+        "archival or non-archival",
+        "DocSem or Dr.DocBench",
+        "September 15, 2026 at 11:59 PM UTC",
     ]:
         assert_true(text in faq.text, f"FAQ missing challenge detail: {text}")
     faq_links = [link.get("href", "") for link in faq.links]
@@ -259,6 +294,7 @@ def main():
         "https://drdocbench-challenge.abaka-pages.com/",
         "https://huggingface.co/datasets/2077AIDataFoundation/DrDocBench",
         "https://eval.ai/web/challenges/challenge-page/2717/overview",
+        shared_task_openreview_url,
     ]:
         assert_true(href in faq_links, f"FAQ missing Dr.DocBench public resource: {href}")
     assert_true("Not yet" not in faq.text, "FAQ must not retain the stale Dr.DocBench closed status")
@@ -354,6 +390,9 @@ def main():
         "FAQ list must collapse to one fluid column on mobile",
     )
     for selector in [
+        ".site-announcement",
+        ".site-announcement-label",
+        ".paper-submission-callout",
         ".challenge-season",
         ".challenge-feature",
         ".challenge-status",
@@ -362,6 +401,11 @@ def main():
         ".challenge-timeline",
     ]:
         assert_true(selector in css, f"CSS missing challenge layout selector: {selector}")
+    assert_true(
+        re.search(r"@media \(max-width: 620px\).*?\.site-announcement-inner\s*{[^}]*grid-template-columns:\s*1fr", css, re.S)
+        is not None,
+        "homepage announcement must stack cleanly on mobile",
+    )
     assert_true(
         re.search(r"@media \(max-width: 620px\).*?\.challenge-timeline\s*{[^}]*grid-template-columns:\s*1fr", css, re.S) is not None,
         "challenge timeline must collapse to one column on mobile",

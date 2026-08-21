@@ -1,0 +1,14 @@
+{% assign announcement = site.data.announcement %}
+<a
+  class="site-announcement"
+  href="{{ announcement.url }}"
+  target="_blank"
+  rel="noopener"
+  aria-label="{{ announcement.label }}: {{ announcement.text }} {{ announcement.action }}"
+>
+  <span class="site-announcement-inner">
+    <span class="site-announcement-label">{{ announcement.label }}</span>
+    <span class="site-announcement-text">{{ announcement.text }}</span>
+    <span class="site-announcement-action">{{ announcement.action }} <span aria-hidden="true">&rarr;</span></span>
+  </span>
+</a>

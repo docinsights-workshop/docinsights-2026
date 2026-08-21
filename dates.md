@@ -28,7 +28,11 @@ permalink: /dates/
       <p class="date-card-time">{{ item.time }}</p>
       {% endif %}
       <p class="date-card-note">{{ item.note }}</p>
+      {% if item.action_url %}
+      <a class="inline-action" href="{{ item.action_url }}" target="_blank" rel="noopener">{{ item.action_label }}</a>
+      {% else %}
       <a class="inline-action" href="{{ '/shared-task/' | relative_url }}">View challenges</a>
+      {% endif %}
     </article>
     {% endfor %}
   </div>

@@ -10,6 +10,13 @@ challenge_items:
     time: 12:59 PM UTC deadline
     type: challenge
     note: Submit through EvalAI. Final evaluation runs October 11–23, with winners announced at DocInsights 2026.
+  - label: Shared-task Paper Submission Deadline
+    date: September 15, 2026
+    time: 11:59 PM UTC
+    type: system paper
+    action_label: Submit on OpenReview
+    action_url: https://openreview.net/group?id=EMNLP/2026/Workshop/DocInsights_Shared_Task
+    note: Submit an archival or non-archival system paper for DocSem or Dr.DocBench.
 items:
   - label: Direct Submission Deadline
     previous_date: August 2, 2026
