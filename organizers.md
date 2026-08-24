@@ -110,7 +110,7 @@ permalink: /organizers/
       <div class="person-identity">
         <div class="person-meta-line">
           <h3>Jyotika Singh</h3>
-          <p class="person-affiliation">Oracle</p>
+          <p class="person-affiliation">Oracle AI</p>
         </div>
       </div>
       <div class="person-links" aria-label="Jyotika Singh profile links">
@@ -127,6 +127,7 @@ permalink: /organizers/
       <div class="person-identity">
         <div class="person-meta-line">
           <h3>Karan Dua</h3>
+          <p class="person-affiliation">Oracle AI</p>
         </div>
       </div>
       <div class="person-links" aria-label="Karan Dua profile links">
@@ -143,7 +144,7 @@ permalink: /organizers/
       <div class="person-identity">
         <div class="person-meta-line">
           <h3>Hitesh Patel</h3>
-          <p class="person-affiliation">Oracle</p>
+          <p class="person-affiliation">Oracle AI</p>
         </div>
       </div>
       <div class="person-links" aria-label="Hitesh Patel profile links">

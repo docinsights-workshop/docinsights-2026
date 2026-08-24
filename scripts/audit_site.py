@@ -490,6 +490,10 @@ def main():
     assert_true("Oracle" in challenge_html, "challenge organizers must identify Oracle")
     assert_true("Abaka AI" in challenge_html, "challenge organizers must identify Abaka AI")
     assert_true(
+        challenge_html.count('<p class="person-affiliation">Oracle AI</p>') == 3,
+        "Jyotika, Karan, and Hitesh must show Oracle AI affiliation",
+    )
+    assert_true(
         challenge_html.count('<p class="person-bio">') == len(challenge_names),
         "each challenge organizer card must include one concise profile-based bio",
     )
