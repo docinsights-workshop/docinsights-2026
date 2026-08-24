@@ -472,6 +472,7 @@ def main():
     )[-1].split('<h2 id="program-committee">Program Committee</h2>', 1)[0]
     challenge_names = [
         "Jyotika Singh",
+        "Karan Dua",
         "Hitesh Patel",
         "Rahul Suresh",
         "Xiaolong Luo",
@@ -480,7 +481,7 @@ def main():
     challenge_positions = [challenge_html.find(name) for name in challenge_names]
     assert_true(
         all(position >= 0 for position in challenge_positions),
-        "challenge organizer section must include all five confirmed organizers",
+        "challenge organizer section must include all six confirmed organizers",
     )
     assert_true(
         challenge_positions == sorted(challenge_positions),
@@ -498,6 +499,7 @@ def main():
         "Provides technical and organizational leadership across Abaka AI and the DrDocBench challenge, spanning benchmark design, model evaluation, and data quality.",
         "multimodal and multi-task AI for healthcare",
         "Works on Abaka AI's research and challenge initiatives in multimodal AI, with a focus on data curation, model evaluation, human-in-the-loop workflows, and challenge operations.",
+        "Large-scale multimodal data pipelines, synthetic generation workflows, and evaluation benchmarks.",
     ]:
         assert_true(phrase in challenge_html, f"challenge organizer bios missing: {phrase}")
     assert_true("Ruby Zhang" not in challenge_html, "Ruby Zhang must not appear among challenge organizers")
@@ -514,9 +516,9 @@ def main():
         '<h2 id="program-committee">Program Committee</h2>', 1
     )[-1].split('<h2 id="contact">Contact</h2>', 1)[0]
     assert_true("person-affiliation" not in committee_html, "program committee cards must not show affiliations")
-    for name in ["Tampu Ravi Kumar", "Hansa Meghwani", "Karan Dua"]:
+    for name in ["Tampu Ravi Kumar", "Hansa Meghwani"]:
         assert_true(name in organizers.text, f"program committee missing {name}")
-    for name in ["Hitesh Patel", "Jyotika Singh"]:
+    for name in ["Hitesh Patel", "Jyotika Singh", "Karan Dua"]:
         assert_true(name not in committee_html, f"{name} must move out of the program committee")
     assert_true("committee-grid" in organizers.classes, "program committee must use the compact committee-grid layout")
     assert_true("assets/images/committee/" in organizers_html, "program committee must use local committee headshots")

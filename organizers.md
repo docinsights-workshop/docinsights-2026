@@ -122,6 +122,22 @@ permalink: /organizers/
   </div>
 
   <div class="person-card">
+    <img src="{{ '/assets/images/committee/karan_dua.jpeg' | relative_url }}" alt="Karan Dua" class="person-photo" loading="lazy" decoding="async">
+    <div class="person-card-header">
+      <div class="person-identity">
+        <div class="person-meta-line">
+          <h3>Karan Dua</h3>
+        </div>
+      </div>
+      <div class="person-links" aria-label="Karan Dua profile links">
+        <a href="https://www.linkedin.com/in/karandua93/" target="_blank" rel="noopener" aria-label="Karan Dua on LinkedIn" title="LinkedIn"><span class="person-icon person-icon-linkedin" aria-hidden="true">in</span><span class="person-link-label">LinkedIn</span></a>
+        <a href="https://scholar.google.com/citations?user=vy1UejMAAAAJ&hl=en&oi=ao" target="_blank" rel="noopener" aria-label="Karan Dua on Google Scholar" title="Google Scholar"><span class="person-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M3 8l9-4 9 4-9 4-9-4Z"/><path d="M7 10.5V15c0 1.7 2.2 3 5 3s5-1.3 5-3v-4.5"/><path d="M21 8v6"/></svg></span><span class="person-link-label">Scholar</span></a>
+      </div>
+    </div>
+    <p class="person-bio">Large-scale multimodal data pipelines, synthetic generation workflows, and evaluation benchmarks.</p>
+  </div>
+
+  <div class="person-card">
     <img src="{{ '/assets/images/committee/hitesh_patel.jpg' | relative_url }}" alt="Hitesh Patel" class="person-photo" loading="lazy" decoding="async">
     <div class="person-card-header">
       <div class="person-identity">
@@ -224,21 +240,6 @@ permalink: /organizers/
     <p class="person-bio">Enterprise RAG, agentic workflows, attribution, and multilingual LLM/VLM evaluation.</p>
   </div>
 
-  <div class="person-card">
-    <img src="{{ '/assets/images/committee/karan_dua.jpeg' | relative_url }}" alt="Karan Dua" class="person-photo" loading="lazy" decoding="async">
-    <div class="person-card-header">
-      <div class="person-identity">
-        <div class="person-meta-line">
-          <h3>Karan Dua</h3>
-        </div>
-      </div>
-      <div class="person-links" aria-label="Karan Dua profile links">
-        <a href="https://www.linkedin.com/in/karandua93/" target="_blank" rel="noopener" aria-label="Karan Dua on LinkedIn" title="LinkedIn"><span class="person-icon person-icon-linkedin" aria-hidden="true">in</span><span class="person-link-label">LinkedIn</span></a>
-        <a href="https://scholar.google.com/citations?user=vy1UejMAAAAJ&hl=en&oi=ao" target="_blank" rel="noopener" aria-label="Karan Dua on Google Scholar" title="Google Scholar"><span class="person-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M3 8l9-4 9 4-9 4-9-4Z"/><path d="M7 10.5V15c0 1.7 2.2 3 5 3s5-1.3 5-3v-4.5"/><path d="M21 8v6"/></svg></span><span class="person-link-label">Scholar</span></a>
-      </div>
-    </div>
-    <p class="person-bio">Large-scale multimodal data pipelines, synthetic generation workflows, and evaluation benchmarks.</p>
-  </div>
 </div>
 
 ## Contact
