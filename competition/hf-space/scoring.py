@@ -196,7 +196,7 @@ def leaderboard_row(
     participant_names=None,
 ):
     row = {
-        "team": team,
+        "team": canonical_team(team),
         "contact": contact,
         "submission_name": submission_name,
         "submitted_at": submitted_at,
@@ -214,9 +214,19 @@ def normalize_identity(value):
     return re.sub(r"\s+", " ", str(value).strip()).casefold()
 
 
+TEAM_ALIASES = {
+    "tum-tse": "Tzachristas team",
+}
+
+
+def canonical_team(value):
+    team = re.sub(r"\s+", " ", str(value or "").strip())
+    return TEAM_ALIASES.get(normalize_identity(team), team)
+
+
 def leaderboard_identity(row):
     return (
-        normalize_identity(row.get("team", "")),
+        normalize_identity(canonical_team(row.get("team", ""))),
         normalize_identity(row.get("contact", "")),
     )
 
@@ -248,6 +258,7 @@ def latest_leaderboard_rows(rows):
     latest_rows = []
     for identity, row in grouped.items():
         row.pop("_source_index", None)
+        row["team"] = canonical_team(row.get("team", ""))
         row["attempts"] = attempts[identity]
         if identity in latest_names:
             row["participant_names"] = latest_names[identity][1]

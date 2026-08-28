@@ -194,6 +194,40 @@ class LeaderboardRankingTests(unittest.TestCase):
 
         self.assertEqual(ranked[0]["team"], "F1 Team")
 
+    def test_tum_tse_alias_merges_into_tzachristas_team(self):
+        rows = [
+            leaderboard_entry(
+                team="TUM-TSE",
+                contact="jtzach@gmail.com",
+                participant_names="Ioannis Tzachristas",
+                submission="baseline-27-Aug-dummy",
+                submitted_at="2026-08-27T14:19:13Z",
+                answer_accuracy=1.0,
+                evidence_exact_match=1.0,
+                evidence_f1=1.0,
+            ),
+            leaderboard_entry(
+                team="Tzachristas team",
+                contact="jtzach@gmail.com",
+                participant_names="Ioannis Tzachristas, Georgios Tzachristas, Theofanis Tzachristas, Constantinos Antoniou",
+                submission="baseline-27-Aug-dummy",
+                submitted_at="2026-08-28T14:27:21Z",
+                answer_accuracy=1.0,
+                evidence_exact_match=1.0,
+                evidence_f1=1.0,
+            ),
+        ]
+
+        ranked = rank_leaderboard(rows)
+
+        self.assertEqual(len(ranked), 1)
+        self.assertEqual(ranked[0]["team"], "Tzachristas team")
+        self.assertEqual(ranked[0]["attempts"], 2)
+        self.assertEqual(
+            ranked[0]["participant_names"],
+            "Ioannis Tzachristas, Georgios Tzachristas, Theofanis Tzachristas, Constantinos Antoniou",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
