@@ -15,9 +15,11 @@ Upload a validation `submission.jsonl` file to validate the submission schema, c
 
 The canonical release is maintained under [`docsem/` in `oracle-samples/gsm-sem`](https://github.com/oracle-samples/gsm-sem/tree/main/docsem). It provides 908 labelled training tasks and 217 unlabelled validation tasks.
 
-## Dataset freeze and final evaluation
+## Dataset update and final evaluation
 
-If you downloaded the problem set before **August 5, 2026**, pull the latest version. The development data was updated on August 5 and is now frozen; there will be no further updates to it.
+The training split was updated on **August 31, 2026** to correct seven annotation inconsistencies identified through community feedback. These changes affect only the training data; the task definition and data format are unchanged. Pull the latest version before training or comparing results.
+
+Two organizer-only validation ground-truth labels were corrected on **August 31, 2026** following data review. Existing submissions were rescored against the corrected labels, and the leaderboard now reflects the updated results. Public validation inputs, the task definition, and the data format are unchanged.
 
 The current leaderboard contains provisional validation results. A held-out test set will be released five days before the September 10, 2026 final submission deadline. Participants will be notified when it is available and asked to submit their test-set results. Performance on that held-out test set will determine the final leaderboard.
 

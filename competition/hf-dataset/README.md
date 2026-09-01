@@ -50,9 +50,16 @@ Submit validation predictions through the [official DocSem submission portal](ht
 
 ## Source And Provenance
 
-The canonical participant release is the [`docsem/` directory in `oracle-samples/gsm-sem`](https://github.com/oracle-samples/gsm-sem/tree/main/docsem). This mirror tracks revision [`332158b`](https://github.com/oracle-samples/gsm-sem/commit/332158b2549e7e8a1186e2ae3a922669e9018808), including the refreshed task PDFs merged into the default `main` branch.
+The canonical participant release is the [`docsem/` directory in `oracle-samples/gsm-sem`](https://github.com/oracle-samples/gsm-sem/tree/main/docsem). This mirror tracks revision [`feb256e`](https://github.com/oracle-samples/gsm-sem/commit/feb256e108afca98f24d58b5f9019b6c36ca31ea), including the seven training annotation corrections published on August 31, 2026 following community feedback. The task definition, split sizes, and data format are unchanged; see the [source changelog](https://github.com/oracle-samples/gsm-sem/blob/main/docsem/CHANGELOG.md).
 
 This Hugging Face package mirrors the source release's 908 training tasks, 908 training labels, 217 validation tasks, and all 1,125 PDFs. The PDF files are byte-identical. The Hugging Face task manifests only prefix `document_pdf` with `train/` or `val/` so files resolve directly from this repository's root.
+
+## Changelog
+
+### 2026-08-31
+
+- Corrected seven annotation inconsistencies in the training split following community feedback.
+- Corrected two organizer-only validation ground-truth labels following data review. The public validation tasks and PDFs, task definition, and data format are unchanged; existing submissions were rescored in the private evaluation repository.
 
 Copyright (c) 2026 Oracle and/or its affiliates. The participant release and this mirror are provided under the [Universal Permissive License v1.0](./LICENSE.txt).
 

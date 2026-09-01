@@ -96,8 +96,8 @@ def main():
         "Dr.DocBench is live on EvalAI",
         "up to USD 3,000 in prizes",
         "Latest update",
-        "Shared-task papers open",
-        "September 15, 2026 at 11:59 PM UTC",
+        "DocSem validation GT corrected",
+        "Aug 31",
     ]:
         assert_true(text in home.text, f"home page missing text: {text}")
     home_links = [link.get("href", "") for link in home.links]
@@ -105,8 +105,8 @@ def main():
         "https://openreview.net/group?id=EMNLP/2026/Workshop/DocInsights_Shared_Task"
     )
     assert_true(
-        shared_task_openreview_url in home_links,
-        "home announcement must link to the shared-task OpenReview venue",
+        "https://docinsights-workshop.github.io/docinsights-2026/shared-task/" in home_links,
+        "home announcement must link to the DocSem correction details",
     )
     assert_true("site-announcement" in home.classes, "home must expose the latest-update announcement")
     assert_true("marquee" not in home_html.lower(), "announcement must not use a moving marquee")
@@ -191,9 +191,13 @@ def main():
         "USD 5,000+",
         "DocSem",
         "Dr.DocBench",
-        "Dataset frozen Aug 5",
-        "Use the August 5 dataset release",
-        "there will be no further updates to it",
+        "Training data updated Aug 31",
+        "Use the August 31 release",
+        "seven annotation inconsistencies",
+        "task definition and data format are unchanged",
+        "Validation ground truth corrected Aug 31",
+        "Existing submissions were rescored against the corrected labels",
+        "leaderboard now reflects the updated results",
         "A held-out test set will be released five days before the September 10, 2026 final submission deadline",
         "Performance on the held-out test set will determine the final leaderboard",
         "Submissions open",
@@ -217,6 +221,14 @@ def main():
         "Submit on OpenReview",
     ]:
         assert_true(text in shared_task.text, f"shared task missing required detail: {text}")
+    assert_true(
+        "Dataset frozen Aug 5" not in shared_task.text,
+        "challenges page must not retain the superseded dataset-freeze status",
+    )
+    assert_true(
+        "Use the August 5 dataset release" not in shared_task.text,
+        "challenges page must not retain the superseded dataset notice",
+    )
     shared_task_links = [link.get("href", "") for link in shared_task.links]
     for href in [
         "https://huggingface.co/datasets/amitbcp/docinsights-2026-shared-task-data",
@@ -229,6 +241,26 @@ def main():
         shared_task_openreview_url,
     ]:
         assert_true(href in shared_task_links, f"challenges page missing public resource: {href}")
+
+    dates = parse(REQUIRED_PAGES["dates"])
+    for text in [
+        "DocSem Training Data Update",
+        "August 31, 2026",
+        "Seven annotation inconsistencies",
+        "DocSem Validation GT Correction",
+        "Two organizer-only validation ground-truth labels",
+    ]:
+        assert_true(text in dates.text, f"dates page missing required detail: {text}")
+
+    faq = parse(REQUIRED_PAGES["faq"])
+    for text in [
+        "Was the DocSem dataset updated?",
+        "seven annotation inconsistencies",
+        "task definition and data format are unchanged",
+        "Were DocSem validation labels corrected?",
+        "Existing submissions were rescored",
+    ]:
+        assert_true(text in faq.text, f"FAQ missing required detail: {text}")
     shared_task_nav_html = shared_task_html.split('<nav class="navbar"', 1)[-1].split("</nav>", 1)[0]
     assert_true(
         "site-announcement" in shared_task_nav_html,

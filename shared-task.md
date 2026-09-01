@@ -53,7 +53,7 @@ permalink: /shared-task/
         <h2>DocSem</h2>
         <p class="challenge-tagline">Document-grounded quantitative reasoning with evidence attribution</p>
       </div>
-      <span class="challenge-status challenge-status-ready">Dataset frozen Aug 5</span>
+      <span class="challenge-status challenge-status-ready">Training data updated Aug 31</span>
     </header>
 
     <div class="challenge-feature-body">
@@ -61,8 +61,13 @@ permalink: /shared-task/
         <p>Participants receive a PDF document and a paraphrased query. Systems must identify the relevant quantitative passage, derive the requested answer from the supplied document, and return the visible PDF block IDs that support the prediction.</p>
         <aside class="challenge-update" aria-labelledby="docsem-evaluation-update">
           <p class="challenge-update-kicker">Participant notice</p>
-          <h3 id="docsem-evaluation-update">Use the August 5 dataset release</h3>
-          <p>If you downloaded the problem set before August 5, pull the latest version. The development data was updated on <strong>August 5, 2026</strong>, and is now frozen; there will be no further updates to it.</p>
+          <h3 id="docsem-evaluation-update">Use the August 31 release</h3>
+          <p>The training split was updated on <strong>August 31, 2026</strong> to correct seven annotation inconsistencies identified through community feedback. These changes affect only the training data; the task definition and data format are unchanged. Pull the latest release before training or comparing results.</p>
+          <aside class="challenge-update" aria-labelledby="docsem-validation-update">
+            <p class="challenge-update-kicker">Leaderboard update</p>
+            <h3 id="docsem-validation-update">Validation ground truth corrected Aug 31</h3>
+            <p>Two organizer-only validation ground-truth labels were corrected on <strong>August 31, 2026</strong> following data review. Existing submissions were rescored against the corrected labels, and the leaderboard now reflects the updated results. Public validation inputs, task definition, and data format are unchanged.</p>
+          </aside>
           <p><strong>Final evaluation:</strong> A held-out test set will be released five days before the September 10, 2026 final submission deadline. Participants will be notified when it becomes available and asked to submit their test-set results. Performance on the held-out test set will determine the final leaderboard.</p>
         </aside>
         <div class="challenge-actions">

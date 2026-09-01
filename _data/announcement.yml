@@ -1,6 +1,6 @@
 enabled: true
 label: Latest update
-text: Shared-task papers open · Sep 15, 11:59 PM UTC
-aria_text: Shared-task paper submissions are open. Submit an archival or non-archival DocSem or Dr.DocBench system paper by September 15, 2026 at 11:59 PM UTC.
-action: Submit
-url: https://openreview.net/group?id=EMNLP/2026/Workshop/DocInsights_Shared_Task
+text: DocSem validation GT corrected · Aug 31
+aria_text: Two organizer-only DocSem validation ground-truth labels were corrected on August 31, 2026, and existing submissions were rescored against the corrected labels.
+action: Details
+url: https://docinsights-workshop.github.io/docinsights-2026/shared-task/

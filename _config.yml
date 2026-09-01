@@ -20,3 +20,8 @@ exclude:
   - README.md
   - Gemfile
   - Gemfile.lock
+  - competition/hf-dataset/
+  - competition/glee_agent/
+  - competition/glee_handoff/
+  - competition/*.tar.gz
+  - output/

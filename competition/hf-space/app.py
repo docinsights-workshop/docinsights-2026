@@ -705,12 +705,15 @@ with gr.Blocks(**blocks_options) as demo:
     gr.HTML(
         f"""
         <section id="evaluation-notice" aria-labelledby="evaluation-notice-title">
-            <h2 id="evaluation-notice-title">Dataset freeze and final evaluation</h2>
+            <h2 id="evaluation-notice-title">Dataset update and final evaluation</h2>
             <p>
-                <strong>Use the August 5, 2026 dataset release.</strong>
-                If you downloaded the problem set before August 5, pull the
+                <strong>Use the August 31, 2026 training-data release.</strong>
+                The training split was updated to correct seven annotation inconsistencies identified through community feedback. These changes affect only the training data; the task definition and data format are unchanged. Pull the
                 <a href="https://huggingface.co/datasets/{PUBLIC_DATASET_REPO}" target="_blank" rel="noopener">latest version</a>.
-                The development data is now frozen and will not receive further updates.
+            </p>
+            <p>
+                <strong>Validation ground truth corrected on August 31, 2026.</strong>
+                Two organizer-only validation labels were corrected following data review. Existing submissions were rescored against the corrected labels, and the leaderboard now reflects the updated results. Public validation inputs, the task definition, and the data format are unchanged.
             </p>
             <p>
                 <strong>Final rankings will use a held-out test set.</strong>
