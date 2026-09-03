@@ -59,7 +59,10 @@ This Hugging Face package mirrors the source release's 908 training tasks, 908 t
 ### 2026-08-31
 
 - Corrected seven annotation inconsistencies in the training split following community feedback.
-- Corrected two organizer-only validation ground-truth labels following data review. The public validation tasks and PDFs, task definition, and data format are unchanged; existing submissions were rescored in the private evaluation repository.
+
+### 2026-09-03
+
+- Three organizer-only validation ground-truth labels have now been corrected following additional data review. The public validation tasks and PDFs, task definition, and data format are unchanged; all existing submissions were rescored in the private evaluation repository.
 
 Copyright (c) 2026 Oracle and/or its affiliates. The participant release and this mirror are provided under the [Universal Permissive License v1.0](./LICENSE.txt).
 

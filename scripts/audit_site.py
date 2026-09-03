@@ -96,8 +96,8 @@ def main():
         "Dr.DocBench is live on EvalAI",
         "up to USD 3,000 in prizes",
         "Latest update",
-        "DocSem validation GT corrected",
-        "Aug 31",
+        "DocSem validation GT refreshed",
+        "Sep 3",
     ]:
         assert_true(text in home.text, f"home page missing text: {text}")
     home_links = [link.get("href", "") for link in home.links]
@@ -195,8 +195,9 @@ def main():
         "Use the August 31 release",
         "seven annotation inconsistencies",
         "task definition and data format are unchanged",
-        "Validation ground truth corrected Aug 31",
-        "Existing submissions were rescored against the corrected labels",
+        "Validation ground truth refreshed Sep 3",
+        "Three organizer-only validation ground-truth labels",
+        "All existing submissions were rescored",
         "leaderboard now reflects the updated results",
         "A held-out test set will be released five days before the September 10, 2026 final submission deadline",
         "Performance on the held-out test set will determine the final leaderboard",
@@ -247,8 +248,9 @@ def main():
         "DocSem Training Data Update",
         "August 31, 2026",
         "Seven annotation inconsistencies",
-        "DocSem Validation GT Correction",
-        "Two organizer-only validation ground-truth labels",
+        "DocSem Validation GT Refresh",
+        "September 3, 2026",
+        "Three organizer-only validation ground-truth labels",
     ]:
         assert_true(text in dates.text, f"dates page missing required detail: {text}")
 
@@ -258,9 +260,17 @@ def main():
         "seven annotation inconsistencies",
         "task definition and data format are unchanged",
         "Were DocSem validation labels corrected?",
-        "Existing submissions were rescored",
+        "Three organizer-only validation ground-truth labels",
+        "September 3, 2026",
+        "All existing submissions were rescored",
     ]:
         assert_true(text in faq.text, f"FAQ missing required detail: {text}")
+    assert_true(
+        "Two organizer-only validation" not in shared_task.text
+        and "Two organizer-only validation" not in dates.text
+        and "Two organizer-only validation" not in faq.text,
+        "public correction notices must not retain the stale two-label count",
+    )
     shared_task_nav_html = shared_task_html.split('<nav class="navbar"', 1)[-1].split("</nav>", 1)[0]
     assert_true(
         "site-announcement" in shared_task_nav_html,

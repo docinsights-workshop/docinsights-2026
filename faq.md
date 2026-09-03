@@ -59,7 +59,7 @@ permalink: /faq/
   </article>
   <article>
     <h2>Were DocSem validation labels corrected?</h2>
-    <p>Yes. Two organizer-only validation ground-truth labels were corrected on <strong>August 31, 2026</strong> following data review. Existing submissions were rescored against the corrected labels, and the leaderboard now reflects the updated results. Public validation inputs, task definition, and data format are unchanged.</p>
+    <p>Yes. Three organizer-only validation ground-truth labels have now been corrected, most recently on <strong>September 3, 2026</strong>, following additional data review. All existing submissions were rescored, and the leaderboard now reflects the updated results. Public validation inputs, task definition, and data format are unchanged.</p>
   </article>
   <article>
     <h2>Is Dr.DocBench open for submissions?</h2>

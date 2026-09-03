@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import tempfile
+from collections import Counter
 from pathlib import Path
 
 from huggingface_hub import CommitOperationAdd, HfApi, get_token, hf_hub_download
@@ -24,17 +25,34 @@ DEFAULT_LEADERBOARD_FILE = "leaderboard/leaderboard.json"
 
 def apply_label_corrections(labels, corrections):
     """Return labels with corrections applied to existing instance IDs only."""
-    labels_by_id = {row["instance_id"]: row for row in labels}
+    label_ids = [str(row["instance_id"]) for row in labels]
+    duplicate_ids = sorted(
+        instance_id
+        for instance_id, count in Counter(label_ids).items()
+        if count > 1
+    )
+    if duplicate_ids:
+        raise ValueError("Duplicate validation label IDs found")
+
+    labels_by_id = {str(row["instance_id"]): row for row in labels}
     unknown_ids = sorted(set(corrections) - set(labels_by_id))
     if unknown_ids:
-        raise ValueError(f"Correction references unknown instance IDs: {', '.join(unknown_ids)}")
+        raise ValueError("Correction references unknown validation instance IDs")
+
+    for instance_id, correction in corrections.items():
+        current = str(labels_by_id[instance_id]["answer"])
+        expected = correction["expected"]
+        if current != expected:
+            raise ValueError(
+                "A validation answer does not match the expected value; refusing correction"
+            )
 
     updated = []
     for row in labels:
         replacement = dict(row)
-        instance_id = row["instance_id"]
+        instance_id = str(row["instance_id"])
         if instance_id in corrections:
-            replacement["answer"] = str(corrections[instance_id])
+            replacement["answer"] = corrections[instance_id]["replacement"]
         updated.append(replacement)
     return updated
 
@@ -63,11 +81,13 @@ def _write_jsonl(path, rows):
     )
 
 
-def _read_remote_text(repo_id, filename, token):
+def _read_remote_text(repo_id, filename, token, *, revision, cache_dir):
     path = hf_hub_download(
         repo_id=repo_id,
         filename=filename,
         repo_type="dataset",
+        revision=revision,
+        cache_dir=cache_dir,
         token=token,
         force_download=True,
     )
@@ -78,7 +98,21 @@ def _parse_corrections(path):
     corrections = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(corrections, dict) or not corrections:
         raise ValueError("Corrections file must contain a non-empty JSON object")
-    return {str(instance_id): str(answer) for instance_id, answer in corrections.items()}
+
+    normalized = {}
+    for instance_id, correction in corrections.items():
+        if not isinstance(correction, dict) or set(correction) != {
+            "expected",
+            "replacement",
+        }:
+            raise ValueError(
+                "Each correction must contain exactly expected and replacement values"
+            )
+        normalized[str(instance_id)] = {
+            "expected": str(correction["expected"]),
+            "replacement": str(correction["replacement"]),
+        }
+    return normalized
 
 
 def _parser():
@@ -94,32 +128,71 @@ def _parser():
         action="store_true",
         help="Create the Hugging Face commit. Without this flag, print a dry-run plan.",
     )
+    parser.add_argument(
+        "--maintenance-confirmed",
+        action="store_true",
+        help=(
+            "Confirm that the Space submission gate is live and in-flight scoring has "
+            "drained before creating the commit. Required with --yes."
+        ),
+    )
     return parser
 
 
 def main():
     args = _parser().parse_args()
+    if args.yes and not args.maintenance_confirmed:
+        raise RuntimeError(
+            "Refusing to write until the Space submission maintenance gate is confirmed"
+        )
+
     token = os.getenv("HF_WRITE_TOKEN") or os.getenv("HF_TOKEN") or get_token()
     if not token:
         raise RuntimeError("Set HF_WRITE_TOKEN or HF_TOKEN before accessing the private repository")
 
     api = HfApi(token=token)
     corrections = _parse_corrections(args.corrections_file)
-    labels = apply_label_corrections(
-        load_jsonl_text(_read_remote_text(args.repo_id, args.gold_file, token)),
-        corrections,
+    source_info = api.repo_info(
+        args.repo_id,
+        repo_type="dataset",
+        revision="main",
+        token=token,
     )
-    repo_files = api.list_repo_files(args.repo_id, repo_type="dataset", token=token)
-    submission_files = sorted(
-        path for path in repo_files if path.startswith("submissions/") and path.endswith(".json")
-    )
-    if not submission_files:
-        raise RuntimeError("No stored JSON submissions found")
+    source_revision = source_info.sha
+    if not source_revision:
+        raise RuntimeError("Could not resolve the private repository main revision")
 
     changed = 0
     rows = []
     with tempfile.TemporaryDirectory(prefix="docsem-recompute-") as temp_dir:
         temp_root = Path(temp_dir)
+        cache_dir = temp_root / "hf-cache"
+        labels = apply_label_corrections(
+            load_jsonl_text(
+                _read_remote_text(
+                    args.repo_id,
+                    args.gold_file,
+                    token,
+                    revision=source_revision,
+                    cache_dir=cache_dir,
+                )
+            ),
+            corrections,
+        )
+        repo_files = api.list_repo_files(
+            args.repo_id,
+            repo_type="dataset",
+            revision=source_revision,
+            token=token,
+        )
+        submission_files = sorted(
+            path
+            for path in repo_files
+            if path.startswith("submissions/") and path.endswith(".json")
+        )
+        if not submission_files:
+            raise RuntimeError("No stored JSON submissions found")
+
         gold_path = temp_root / "val_labels.jsonl"
         _write_jsonl(gold_path, labels)
         operations = [
@@ -127,7 +200,15 @@ def main():
         ]
 
         for repo_path in submission_files:
-            old_payload = json.loads(_read_remote_text(args.repo_id, repo_path, token))
+            old_payload = json.loads(
+                _read_remote_text(
+                    args.repo_id,
+                    repo_path,
+                    token,
+                    revision=source_revision,
+                    cache_dir=cache_dir,
+                )
+            )
             new_payload = recompute_submission_payload(old_payload, labels)
             if old_payload.get("metrics") != new_payload["metrics"]:
                 changed += 1
@@ -148,12 +229,12 @@ def main():
         print(
             json.dumps(
                 {
+                    "source_revision": source_revision,
                     "repo_id": args.repo_id,
-                    "corrections": corrections,
+                    "correction_count": len(corrections),
                     "submissions_scanned": len(submission_files),
                     "submissions_with_changed_metrics": changed,
                     "leaderboard_rows": len(ranked),
-                    "leaderboard_top": ranked[:3],
                     "commit": "pending" if not args.yes else "will be created",
                 },
                 indent=2,
@@ -170,9 +251,12 @@ def main():
             operations=operations,
             commit_message="Correct DocSem validation ground truth and refresh leaderboard",
             commit_description=(
-                "Correct two organizer-only validation labels and recompute every stored "
-                "submission against the corrected ground truth. Public validation inputs remain unchanged."
+                f"Correct {len(corrections)} organizer-only validation labels and recompute "
+                "every stored submission against the corrected ground truth. Public "
+                "validation inputs remain unchanged."
             ),
+            revision="main",
+            parent_commit=source_revision,
         )
         print(f"Commit complete: {commit.commit_url}")
 

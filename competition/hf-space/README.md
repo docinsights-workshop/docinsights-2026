@@ -19,7 +19,7 @@ The canonical release is maintained under [`docsem/` in `oracle-samples/gsm-sem`
 
 The training split was updated on **August 31, 2026** to correct seven annotation inconsistencies identified through community feedback. These changes affect only the training data; the task definition and data format are unchanged. Pull the latest version before training or comparing results.
 
-Two organizer-only validation ground-truth labels were corrected on **August 31, 2026** following data review. Existing submissions were rescored against the corrected labels, and the leaderboard now reflects the updated results. Public validation inputs, the task definition, and the data format are unchanged.
+Three organizer-only validation ground-truth labels have now been corrected, most recently on **September 3, 2026**, following additional data review. All existing submissions were rescored, and the leaderboard now reflects the updated results. Public validation inputs, the task definition, and the data format are unchanged.
 
 The current leaderboard contains provisional validation results. A held-out test set will be released five days before the September 10, 2026 final submission deadline. Participants will be notified when it is available and asked to submit their test-set results. Performance on that held-out test set will determine the final leaderboard.
 

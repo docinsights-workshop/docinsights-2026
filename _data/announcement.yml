@@ -1,6 +1,6 @@
 enabled: true
 label: Latest update
-text: DocSem validation GT corrected · Aug 31
-aria_text: Two organizer-only DocSem validation ground-truth labels were corrected on August 31, 2026, and existing submissions were rescored against the corrected labels.
+text: DocSem validation GT refreshed · Sep 3
+aria_text: Three organizer-only DocSem validation ground-truth labels have now been corrected, most recently on September 3, 2026, and all existing submissions were rescored.
 action: Details
 url: https://docinsights-workshop.github.io/docinsights-2026/shared-task/

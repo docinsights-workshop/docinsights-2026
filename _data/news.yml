@@ -1,7 +1,7 @@
 items:
-  - date: August 31, 2026
-    title: Two DocSem validation labels corrected
-    body: Two organizer-only validation ground-truth labels were corrected following data review. Existing submissions were rescored, and the leaderboard now reflects the updated results.
+  - date: September 3, 2026
+    title: Three DocSem validation labels corrected
+    body: Three organizer-only validation ground-truth labels have now been corrected, most recently on September 3, following additional data review. All existing submissions were rescored, and the leaderboard now reflects the updated results.
   - date: August 31, 2026
     title: Seven training annotations corrected in DocSem
     body: The training split was updated following community feedback. The task definition and data format are unchanged; participants should use the latest release.

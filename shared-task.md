@@ -65,8 +65,8 @@ permalink: /shared-task/
           <p>The training split was updated on <strong>August 31, 2026</strong> to correct seven annotation inconsistencies identified through community feedback. These changes affect only the training data; the task definition and data format are unchanged. Pull the latest release before training or comparing results.</p>
           <aside class="challenge-update" aria-labelledby="docsem-validation-update">
             <p class="challenge-update-kicker">Leaderboard update</p>
-            <h3 id="docsem-validation-update">Validation ground truth corrected Aug 31</h3>
-            <p>Two organizer-only validation ground-truth labels were corrected on <strong>August 31, 2026</strong> following data review. Existing submissions were rescored against the corrected labels, and the leaderboard now reflects the updated results. Public validation inputs, task definition, and data format are unchanged.</p>
+            <h3 id="docsem-validation-update">Validation ground truth refreshed Sep 3</h3>
+            <p>Three organizer-only validation ground-truth labels have now been corrected, most recently on <strong>September 3, 2026</strong>, following additional data review. All existing submissions were rescored, and the leaderboard now reflects the updated results. Public validation inputs, task definition, and data format are unchanged.</p>
           </aside>
           <p><strong>Final evaluation:</strong> A held-out test set will be released five days before the September 10, 2026 final submission deadline. Participants will be notified when it becomes available and asked to submit their test-set results. Performance on the held-out test set will determine the final leaderboard.</p>
         </aside>

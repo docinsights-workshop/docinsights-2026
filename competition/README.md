@@ -95,6 +95,25 @@ unless `--yes` is provided, and it preserves hidden validation labels:
 /Users/aamita/miniconda3/bin/python scripts/reset_docsem_hf_leaderboard.py --yes
 ```
 
+For an organizer-only validation-label correction, preserve the stored
+submissions and recompute them instead of resetting the leaderboard. The
+corrections file maps each private instance ID to `expected` and `replacement`
+answers. Run the script once without `--yes`, then briefly deploy and verify the
+Space submission-maintenance gate before committing the pinned snapshot:
+
+```bash
+/Users/aamita/miniconda3/bin/python scripts/recompute_docsem_hf_leaderboard.py \
+  --corrections-file /secure/path/corrections.json
+/Users/aamita/miniconda3/bin/python scripts/recompute_docsem_hf_leaderboard.py \
+  --corrections-file /secure/path/corrections.json \
+  --maintenance-confirmed --yes
+```
+
+The write is compare-and-swap protected against the audited private-repository
+revision. If that revision moves, keep submissions paused, take a new snapshot,
+and rerun rather than overwriting concurrent work. Verify the corrected gold,
+every stored submission, and the rebuilt leaderboard before reopening scoring.
+
 The deployed Gradio Space reads public tasks from the dataset repo and stores
 scored submissions in the private repo. When republishing
 `competition/hf-space`, configure:

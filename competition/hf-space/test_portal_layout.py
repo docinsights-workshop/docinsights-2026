@@ -1,7 +1,8 @@
+import json
 import re
 import unittest
 
-from app import PORTAL_CSS
+from app import PORTAL_CSS, demo
 
 
 class PortalLayoutTests(unittest.TestCase):
@@ -20,6 +21,16 @@ class PortalLayoutTests(unittest.TestCase):
         self.assertIn("max-height: 100% !important", declarations)
         self.assertIn("overflow-y: auto !important", declarations)
         self.assertIn("-webkit-overflow-scrolling: touch", declarations)
+
+    def test_portal_reports_the_latest_private_rescore_without_leaking_details(self):
+        config = json.dumps(demo.get_config_file())
+
+        self.assertIn("Three organizer-only validation labels", config)
+        self.assertIn("most recently on September 3, 2026", config)
+        self.assertIn("All existing submissions were rescored", config)
+        self.assertIn("Leaderboard refreshed September 3, 2026", config)
+        self.assertNotIn("Two organizer-only validation labels", config)
+        self.assertNotRegex(config, r"task_\d{6}")
 
 
 if __name__ == "__main__":

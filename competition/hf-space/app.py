@@ -712,8 +712,8 @@ with gr.Blocks(**blocks_options) as demo:
                 <a href="https://huggingface.co/datasets/{PUBLIC_DATASET_REPO}" target="_blank" rel="noopener">latest version</a>.
             </p>
             <p>
-                <strong>Validation ground truth corrected on August 31, 2026.</strong>
-                Two organizer-only validation labels were corrected following data review. Existing submissions were rescored against the corrected labels, and the leaderboard now reflects the updated results. Public validation inputs, the task definition, and the data format are unchanged.
+                <strong>Validation ground truth refreshed September 3, 2026.</strong>
+                Three organizer-only validation labels have now been corrected, most recently on September 3, 2026, following additional data review. All existing submissions were rescored, and the leaderboard now reflects the updated results. Public validation inputs, the task definition, and the data format are unchanged.
             </p>
             <p>
                 <strong>Final rankings will use a held-out test set.</strong>
@@ -782,7 +782,7 @@ with gr.Blocks(**blocks_options) as demo:
                 """
                 <div>
                     <h2>Validation leaderboard</h2>
-                    <p>Provisional validation results from each team's latest attempt. Ranked by answer accuracy, then evidence F1. Final standings will use the held-out test set.</p>
+                    <p>Provisional validation results from each team's latest attempt. Ranked by answer accuracy, then evidence F1. Leaderboard refreshed September 3, 2026 after the organizer-only ground-truth correction; all existing submissions were rescored. Final standings will use the held-out test set.</p>
                 </div>
                 """
             )
