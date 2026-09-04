@@ -71,7 +71,7 @@ class HubTestStore:
 
     def submit(self, identity, metadata, predictions, metrics, now) -> TestReceipt:
         try:
-            key = account_key(identity)
+            key = _complete_identity_key(identity)
             normalized_metadata = _submission_metadata(metadata)
             normalized_predictions = _json_copy(predictions)
             normalized_metrics = _json_copy(metrics)
@@ -112,13 +112,11 @@ class HubTestStore:
                 )
                 attempts = [*snapshot.attempts, record]
                 best = select_best_attempt(attempts)
-                account_projection = _account_projection(
-                    key, snapshot.policy.release_id, attempts, best
-                )
+                account_projection = _account_projection(key, snapshot.policy, attempts, best)
                 organizer_projection = _organizer_projection(
                     snapshot.organizer,
                     key,
-                    snapshot.policy.release_id,
+                    snapshot.policy,
                     attempts,
                     best,
                 )
@@ -159,12 +157,16 @@ class HubTestStore:
 
     def account_history(self, identity) -> list[dict]:
         try:
-            key = account_key(identity)
+            key = _complete_identity_key(identity)
         except Exception:
             raise TestStoreError("Test submission history is temporarily unavailable.") from None
         try:
             sha = self._head_sha()
-            return [dict(attempt) for attempt in self._load_account_attempts(key, sha)]
+            policy = _release_policy(self._read_required(RELEASE_PATH, sha))
+            return [
+                dict(attempt)
+                for attempt in self._load_account_attempts(key, sha, policy)
+            ]
         except Exception:
             raise TestStoreError("Test submission history is temporarily unavailable.") from None
 
@@ -174,14 +176,13 @@ class HubTestStore:
         gold = self._read_required(GOLD_PATH, sha)
         policy = _release_policy(release_raw)
         _validate_gold(gold)
-        attempts = self._load_account_attempts(key, sha)
+        attempts = self._load_account_attempts(key, sha, policy)
         organizer = self._read_json_optional(
             ORGANIZER_PATH,
             sha,
-            {"schema_version": 2, "release_id": policy.release_id, "accounts": []},
+            {**_release_state(policy), "accounts": []},
         )
-        if not isinstance(organizer, dict) or not isinstance(organizer.get("accounts"), list):
-            raise _Unavailable()
+        _validate_organizer_projection(organizer, policy)
         return _Snapshot(sha, policy, gold, tuple(attempts), organizer)
 
     def _head_sha(self) -> str:
@@ -195,12 +196,18 @@ class HubTestStore:
             raise _Unavailable()
         return sha
 
-    def _load_account_attempts(self, key: str, sha: str) -> list[dict]:
+    def _load_account_attempts(
+        self,
+        key: str,
+        sha: str,
+        policy: TestReleasePolicy,
+    ) -> list[dict]:
         account_path = f"projections/test/accounts/{key}.json"
         projection = self._read_json_optional(account_path, sha, None)
         if projection is None:
             return []
-        if not isinstance(projection, dict) or projection.get("account_key") != key:
+        _validate_release_state(projection, policy)
+        if projection.get("account_key") != key:
             raise _Unavailable()
         references = projection.get("attempts")
         if not isinstance(references, list):
@@ -209,11 +216,13 @@ class HubTestStore:
         for expected_number, reference in enumerate(references, start=1):
             if not isinstance(reference, Mapping):
                 raise _Unavailable()
+            _validate_release_state(reference, policy)
             submission_id = reference.get("submission_id")
             if not isinstance(submission_id, str) or not submission_id:
                 raise _Unavailable()
             path = f"attempts/test/{key}/{submission_id}.json"
             record = self._read_json_required(path, sha)
+            _validate_release_state(record, policy)
             if (
                 not isinstance(record, dict)
                 or record.get("account_key") != key
@@ -251,6 +260,17 @@ class HubTestStore:
             return _decode_json(Path(local_path).read_bytes())
         except EntryNotFoundError:
             return default
+
+
+def _complete_identity_key(identity) -> str:
+    if not isinstance(identity, OAuthIdentity):
+        raise _InvalidSubmission()
+    if any(
+        not isinstance(value, str) or not value.strip()
+        for value in (identity.sub, identity.username, identity.email)
+    ):
+        raise _InvalidSubmission()
+    return account_key(identity)
 
 
 def _submission_metadata(metadata) -> dict:
@@ -371,10 +391,8 @@ def _attempt_record(
     accepted_at: str,
 ) -> dict:
     return {
-        "schema_version": 2,
+        **_release_state(policy),
         "submission_id": submission_id,
-        "release_id": policy.release_id,
-        "split": "test",
         "account_key": key,
         "hf_subject": identity.sub,
         "hf_username": identity.username,
@@ -385,20 +403,18 @@ def _attempt_record(
         "submitted_at": accepted_at,
         "submission_hash": submission_hash,
         "attempt_number": attempt_number,
-        "task_manifest_sha256": policy.task_manifest_sha256,
-        "gold_sha256": policy.gold_sha256,
         "metrics": metrics,
         "predictions": predictions,
     }
 
 
-def _account_projection(key, release_id, attempts, best) -> dict:
+def _account_projection(key, policy, attempts, best) -> dict:
     return {
-        "schema_version": 2,
+        **_release_state(policy),
         "account_key": key,
-        "release_id": release_id,
         "attempts": [
             {
+                **_release_state(policy),
                 "submission_id": attempt["submission_id"],
                 "attempt_number": attempt["attempt_number"],
             }
@@ -408,7 +424,7 @@ def _account_projection(key, release_id, attempts, best) -> dict:
     }
 
 
-def _organizer_projection(current, key, release_id, attempts, best) -> dict:
+def _organizer_projection(current, key, policy, attempts, best) -> dict:
     accounts = [
         account
         for account in current.get("accounts", [])
@@ -416,8 +432,8 @@ def _organizer_projection(current, key, release_id, attempts, best) -> dict:
     ]
     accounts.append(
         {
+            **_release_state(policy),
             "account_key": key,
-            "release_id": release_id,
             "attempt_count": len(attempts),
             "best_submission_id": best["submission_id"],
             "hf_subject": best["hf_subject"],
@@ -432,7 +448,33 @@ def _organizer_projection(current, key, release_id, attempts, best) -> dict:
         }
     )
     accounts.sort(key=lambda account: str(account["account_key"]))
-    return {"schema_version": 2, "release_id": release_id, "accounts": accounts}
+    return {**_release_state(policy), "accounts": accounts}
+
+
+def _release_state(policy: TestReleasePolicy) -> dict:
+    return {
+        "schema_version": 2,
+        "split": "test",
+        "release_id": policy.release_id,
+        "task_manifest_sha256": policy.task_manifest_sha256,
+        "gold_sha256": policy.gold_sha256,
+    }
+
+
+def _validate_release_state(value, policy: TestReleasePolicy):
+    if not isinstance(value, Mapping):
+        raise _Unavailable()
+    if any(value.get(field) != expected for field, expected in _release_state(policy).items()):
+        raise _Unavailable()
+
+
+def _validate_organizer_projection(value, policy: TestReleasePolicy):
+    _validate_release_state(value, policy)
+    accounts = value.get("accounts")
+    if not isinstance(accounts, list):
+        raise _Unavailable()
+    for account in accounts:
+        _validate_release_state(account, policy)
 
 
 def _json_bytes(value) -> bytes:

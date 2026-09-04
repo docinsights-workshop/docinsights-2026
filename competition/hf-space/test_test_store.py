@@ -109,6 +109,25 @@ class InMemoryHub:
         with self._lock:
             return dict(self._snapshots[self._sha])
 
+    def replace_json(self, path, **changes):
+        with self._lock:
+            updated = dict(self._snapshots[self._sha])
+            value = json.loads(updated[path].decode("utf-8"))
+            value.update(changes)
+            updated[path] = json.dumps(value).encode("utf-8")
+            self._advance(updated)
+
+    def replace_organizer_row(self, key, **changes):
+        with self._lock:
+            updated = dict(self._snapshots[self._sha])
+            value = json.loads(updated["projections/test/organizer_leaderboard.json"])
+            row = next(row for row in value["accounts"] if row["account_key"] == key)
+            row.update(changes)
+            updated["projections/test/organizer_leaderboard.json"] = json.dumps(value).encode(
+                "utf-8"
+            )
+            self._advance(updated)
+
     def repo_info(self, repo_id, *, repo_type, revision):
         with self._lock:
             self.repo_info_calls += 1
@@ -325,6 +344,62 @@ class HubTestStoreTests(unittest.TestCase):
             store.submit(IDENTITY, META, PREDICTIONS, METRICS, NOW)
         self.assertEqual(hub.create_calls, [])
 
+    def test_old_release_attempt_is_rejected_instead_of_counted(self):
+        hub = InMemoryHub()
+        store = HubTestStore(hub, repo_id="private/repo")
+        receipt = store.submit(IDENTITY, META, PREDICTIONS, METRICS, NOW)
+        key = account_key(IDENTITY)
+        hub.replace_json(
+            f"attempts/test/{key}/{receipt.submission_id}.json",
+            release_id="old-release",
+        )
+        commit_count = len(hub.create_calls)
+
+        with self.assertRaisesRegex(TestStoreError, "temporarily unavailable"):
+            store.submit(
+                IDENTITY,
+                META,
+                [{"instance_id": "test-1", "answer": "new answer", "evidence": ["b1"]}],
+                METRICS,
+                NOW,
+            )
+
+        self.assertEqual(len(hub.create_calls), commit_count)
+
+    def test_mismatched_account_and_organizer_projections_fail_closed(self):
+        key = account_key(IDENTITY)
+        cases = ("account", "organizer")
+        for projection in cases:
+            with self.subTest(projection=projection):
+                hub = InMemoryHub()
+                store = HubTestStore(hub, repo_id="private/repo")
+                store.submit(IDENTITY, META, PREDICTIONS, METRICS, NOW)
+                if projection == "account":
+                    hub.replace_json(
+                        f"projections/test/accounts/{key}.json",
+                        gold_sha256="d" * 64,
+                    )
+                else:
+                    hub.replace_organizer_row(key, task_manifest_sha256="e" * 64)
+                commit_count = len(hub.create_calls)
+
+                with self.assertRaisesRegex(TestStoreError, "temporarily unavailable"):
+                    store.submit(
+                        IDENTITY,
+                        META,
+                        [
+                            {
+                                "instance_id": "test-1",
+                                "answer": "new answer",
+                                "evidence": ["b1"],
+                            }
+                        ],
+                        METRICS,
+                        NOW,
+                    )
+
+                self.assertEqual(len(hub.create_calls), commit_count)
+
     def test_invalid_account_is_rejected_with_value_free_error(self):
         hub = InMemoryHub()
         store = HubTestStore(hub, repo_id="private/repo")
@@ -334,6 +409,17 @@ class HubTestStoreTests(unittest.TestCase):
 
         self.assertNotIn("object", str(caught.exception))
         self.assertEqual(hub.repo_info_calls, 0)
+
+    def test_subject_only_identity_is_rejected_before_repository_access(self):
+        hub = InMemoryHub()
+        store = HubTestStore(hub, repo_id="private/repo")
+        incomplete = OAuthIdentity(sub="subject-only", username="", email="")
+
+        with self.assertRaisesRegex(TestStoreError, "could not be accepted"):
+            store.submit(incomplete, META, PREDICTIONS, METRICS, NOW)
+
+        self.assertEqual(hub.repo_info_calls, 0)
+        self.assertEqual(hub.create_calls, [])
 
     def test_fourth_distinct_attempt_is_rejected_without_persistence(self):
         hub = InMemoryHub()
