@@ -27,6 +27,11 @@ GOLD_DIGEST = hashlib.sha256(GOLD).hexdigest()
 META = {
     "release_id": "docsem-test-2026",
     "task_manifest_sha256": TASK_DIGEST,
+    "scoring_gold_sha256": GOLD_DIGEST,
+    "scoring_private_revision": "sha-before-scoring",
+    "scoring_public_revision": "f" * 40,
+    "scoring_public_repo_id": "public/repo",
+    "scoring_task_manifest_path": "test/tasks.jsonl",
     "team": "Private Team",
     "participant_names": "Private Participant",
     "submission_name": "private run",
@@ -343,6 +348,87 @@ class HubTestStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(TestStoreError, "temporarily unavailable"):
             store.submit(IDENTITY, META, PREDICTIONS, METRICS, NOW)
         self.assertEqual(hub.create_calls, [])
+
+    def test_gold_change_after_scoring_is_rejected_before_commit(self):
+        changed_gold = (
+            b'{"instance_id":"test-1","answer":"changed gold",'
+            b'"evidence":["b2"]}\n'
+        )
+        changed_digest = hashlib.sha256(changed_gold).hexdigest()
+        hub = InMemoryHub(
+            files={
+                "private/test_release.json": release_bytes(gold_digest=changed_digest),
+                "private/test_labels.jsonl": changed_gold,
+            }
+        )
+        store = HubTestStore(hub, repo_id="private/repo")
+
+        with self.assertRaisesRegex(TestStoreError, "temporarily unavailable"):
+            store.submit(IDENTITY, META, PREDICTIONS, METRICS, NOW)
+
+        self.assertEqual(hub.create_calls, [])
+
+    def test_unrelated_private_head_advance_does_not_invalidate_scored_gold(self):
+        hub = InMemoryHub()
+        with hub._lock:
+            updated = dict(hub._snapshots[hub._sha])
+            updated["unrelated/audit.json"] = b"{}"
+            hub._advance(updated)
+        store = HubTestStore(hub, repo_id="private/repo")
+
+        receipt = store.submit(IDENTITY, META, PREDICTIONS, METRICS, NOW)
+
+        self.assertTrue(receipt.accepted)
+        self.assertEqual(hub.create_calls[0]["parent_commit"], "sha-1")
+
+    def test_attempt_record_retains_scoring_snapshot_audit_metadata(self):
+        hub = InMemoryHub()
+        store = HubTestStore(hub, repo_id="private/repo")
+
+        store.submit(IDENTITY, META, PREDICTIONS, METRICS, NOW)
+        record = store.account_history(IDENTITY)[0]
+
+        self.assertEqual(
+            {
+                key: record[key]
+                for key in (
+                    "scoring_gold_sha256",
+                    "scoring_private_revision",
+                    "scoring_public_revision",
+                    "scoring_public_repo_id",
+                    "scoring_task_manifest_path",
+                )
+            },
+            {
+                "scoring_gold_sha256": GOLD_DIGEST,
+                "scoring_private_revision": "sha-before-scoring",
+                "scoring_public_revision": "f" * 40,
+                "scoring_public_repo_id": "public/repo",
+                "scoring_task_manifest_path": "test/tasks.jsonl",
+            },
+        )
+
+    def test_existing_attempt_with_unbound_scoring_gold_fails_closed(self):
+        hub = InMemoryHub()
+        store = HubTestStore(hub, repo_id="private/repo")
+        receipt = store.submit(IDENTITY, META, PREDICTIONS, METRICS, NOW)
+        key = account_key(IDENTITY)
+        hub.replace_json(
+            f"attempts/test/{key}/{receipt.submission_id}.json",
+            scoring_gold_sha256="c" * 64,
+        )
+        commit_count = len(hub.create_calls)
+
+        with self.assertRaisesRegex(TestStoreError, "temporarily unavailable"):
+            store.submit(
+                IDENTITY,
+                META,
+                [{"instance_id": "test-1", "answer": "new", "evidence": ["b1"]}],
+                METRICS,
+                NOW,
+            )
+
+        self.assertEqual(len(hub.create_calls), commit_count)
 
     def test_old_release_attempt_is_rejected_instead_of_counted(self):
         hub = InMemoryHub()

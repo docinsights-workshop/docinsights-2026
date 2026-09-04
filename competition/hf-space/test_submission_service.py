@@ -31,6 +31,13 @@ PROFILE = {
 TEST_LABELS = [
     {"instance_id": "test-1", "answer": "42", "evidence": ["b1"]},
 ]
+TEST_TASKS = [
+    {
+        "instance_id": "test-1",
+        "user_query": "What is the answer?",
+        "document_pdf": "documents/test-1.pdf",
+    },
+]
 TEST_ROWS = [
     {"instance_id": "test-1", "answer": "42", "evidence": ["b1"]},
 ]
@@ -51,6 +58,11 @@ TEST_META = {
     "task_manifest_sha256": "c" * 64,
     "gold_sha256": "d" * 64,
     "gold_path": "../../private/client-labels.jsonl",
+    "scoring_gold_sha256": "e" * 64,
+    "scoring_private_revision": "client-private-revision",
+    "scoring_public_revision": "client-public-revision",
+    "scoring_public_repo_id": "client/public-repo",
+    "scoring_task_manifest_path": "../../client/tasks.jsonl",
     "metrics": {"answer_accuracy": 0.0},
     "identity": {"sub": "client-subject"},
     "attempt": 99,
@@ -127,7 +139,17 @@ def test_file(rows=TEST_ROWS):
 
 def configured_service(store=None, loader=None):
     store = store or RecordingStore()
-    loader = loader or (lambda now: TrustedTestConfig(TRUSTED_POLICY, TEST_LABELS))
+    loader = loader or (
+        lambda now: TrustedTestConfig(
+            policy=TRUSTED_POLICY,
+            labels=TEST_LABELS,
+            scoring_gold_sha256=TRUSTED_POLICY.gold_sha256,
+            private_revision="private-sha",
+            public_revision="f" * 40,
+            public_repo_id="public/repo",
+            task_manifest_path="test/tasks.jsonl",
+        )
+    )
     return SubmissionService(
         validation_submitter=lambda file_obj, metadata: app.evaluate_submission(
             file_obj,
@@ -318,6 +340,11 @@ class SplitAwareServiceTests(unittest.TestCase):
             {
                 "release_id": "trusted-release",
                 "task_manifest_sha256": "a" * 64,
+                "scoring_gold_sha256": "b" * 64,
+                "scoring_private_revision": "private-sha",
+                "scoring_public_revision": "f" * 40,
+                "scoring_public_repo_id": "public/repo",
+                "scoring_task_manifest_path": "test/tasks.jsonl",
                 "team": "Fixture Team",
                 "participant_names": "Alice Example, Bob Example",
                 "submission_name": "final-run",
@@ -450,22 +477,25 @@ def gradio_error_type():
 class InMemoryConfigHub:
     download_root = None
 
-    def __init__(self, release, gold):
+    def __init__(self, release, gold, tasks):
         self.files = {
-            "private/test_release.json": json.dumps(release).encode("utf-8"),
-            "private/test_labels.jsonl": gold,
+            ("private/repo", "private/test_release.json"): json.dumps(release).encode(
+                "utf-8"
+            ),
+            ("private/repo", "private/test_labels.jsonl"): gold,
+            ("public/repo", "test/tasks.jsonl"): tasks,
         }
-        self.repo_calls = 0
+        self.repo_calls = []
         self.download_calls = []
 
     def repo_info(self, repo_id, *, repo_type, revision):
-        self.repo_calls += 1
-        return SimpleNamespace(sha="trusted-sha")
+        self.repo_calls.append((repo_id, revision))
+        return SimpleNamespace(sha="private-sha")
 
     def hf_hub_download(self, repo_id, path, *, repo_type, revision):
-        self.download_calls.append((path, revision))
-        target = self.download_root / path.replace("/", "-")
-        target.write_bytes(self.files[path])
+        self.download_calls.append((repo_id, path, revision))
+        target = self.download_root / f"{repo_id}-{path}".replace("/", "-")
+        target.write_bytes(self.files[(repo_id, path)])
         return str(target)
 
 
@@ -475,10 +505,15 @@ class HubTestConfigLoaderTests(unittest.TestCase):
         self.addCleanup(self.downloads.cleanup)
         InMemoryConfigHub.download_root = Path(self.downloads.name)
         self.gold = b'{"instance_id":"test-1","answer":"42","evidence":["b1"]}\n'
+        self.tasks = (
+            b'{"instance_id":"test-1","user_query":"What is the answer?",'
+            b'"document_pdf":"documents/test-1.pdf"}\n'
+        )
         self.release = {
             "release_id": "trusted-release",
-            "task_manifest_sha256": "a" * 64,
+            "task_manifest_sha256": hashlib.sha256(self.tasks).hexdigest(),
             "gold_sha256": hashlib.sha256(self.gold).hexdigest(),
+            "public_revision": "f" * 40,
             "open_at": "2026-09-01T00:00:00Z",
             "close_at": "2026-10-01T00:00:00Z",
             "enabled": True,
@@ -486,46 +521,106 @@ class HubTestConfigLoaderTests(unittest.TestCase):
         }
 
     def test_loader_reads_fixed_server_paths_at_one_sha_and_verifies_gold(self):
-        hub = InMemoryConfigHub(self.release, self.gold)
+        hub = InMemoryConfigHub(self.release, self.gold, self.tasks)
 
-        config = HubTestConfigLoader(hub, "private/repo", enabled=True)(NOW)
+        config = HubTestConfigLoader(
+            hub,
+            "private/repo",
+            public_api=hub,
+            public_repo_id="public/repo",
+            task_manifest_path="test/tasks.jsonl",
+            enabled=True,
+        )(NOW)
 
         self.assertEqual(config.policy.release_id, "trusted-release")
         self.assertEqual(config.labels, TEST_LABELS)
-        self.assertEqual(hub.repo_calls, 1)
+        self.assertEqual(config.scoring_gold_sha256, hashlib.sha256(self.gold).hexdigest())
+        self.assertEqual(config.private_revision, "private-sha")
+        self.assertEqual(config.public_revision, "f" * 40)
+        self.assertEqual(config.public_repo_id, "public/repo")
+        self.assertEqual(config.task_manifest_path, "test/tasks.jsonl")
+        self.assertEqual(hub.repo_calls, [("private/repo", "main")])
         self.assertEqual(
             hub.download_calls,
             [
-                ("private/test_release.json", "trusted-sha"),
-                ("private/test_labels.jsonl", "trusted-sha"),
+                ("private/repo", "private/test_release.json", "private-sha"),
+                ("private/repo", "private/test_labels.jsonl", "private-sha"),
+                ("public/repo", "test/tasks.jsonl", "f" * 40),
             ],
         )
 
     def test_loader_rejects_malformed_server_digest(self):
         release = {**self.release, "task_manifest_sha256": "not-a-sha256"}
-        hub = InMemoryConfigHub(release, self.gold)
+        hub = InMemoryConfigHub(release, self.gold, self.tasks)
 
         with self.assertRaisesRegex(SubmissionError, "temporarily unavailable"):
-            HubTestConfigLoader(hub, "private/repo", enabled=True)(NOW)
+            self._loader(hub)(NOW)
+
+    def test_loader_rejects_public_task_content_digest_mismatch(self):
+        release = {**self.release, "task_manifest_sha256": "a" * 64}
+        hub = InMemoryConfigHub(release, self.gold, self.tasks)
+
+        with self.assertRaisesRegex(SubmissionError, "temporarily unavailable"):
+            self._loader(hub)(NOW)
+
+    def test_loader_rejects_non_exact_public_task_schema(self):
+        tasks = (
+            b'{"instance_id":"test-1","user_query":"question",'
+            b'"document_pdf":"documents/test-1.pdf","answer":"leak"}\n'
+        )
+        release = {**self.release, "task_manifest_sha256": hashlib.sha256(tasks).hexdigest()}
+        hub = InMemoryConfigHub(release, self.gold, tasks)
+
+        with self.assertRaisesRegex(SubmissionError, "temporarily unavailable"):
+            self._loader(hub)(NOW)
+
+    def test_loader_rejects_public_task_and_gold_id_mismatch(self):
+        tasks = (
+            b'{"instance_id":"test-2","user_query":"question",'
+            b'"document_pdf":"documents/test-2.pdf"}\n'
+        )
+        release = {**self.release, "task_manifest_sha256": hashlib.sha256(tasks).hexdigest()}
+        hub = InMemoryConfigHub(release, self.gold, tasks)
+
+        with self.assertRaisesRegex(SubmissionError, "temporarily unavailable"):
+            self._loader(hub)(NOW)
 
     def test_loader_rejects_gold_digest_mismatch_without_details(self):
         release = {**self.release, "gold_sha256": "c" * 64}
-        hub = InMemoryConfigHub(release, self.gold)
+        hub = InMemoryConfigHub(release, self.gold, self.tasks)
 
         with self.assertRaises(SubmissionError) as caught:
-            HubTestConfigLoader(hub, "private/repo", enabled=True)(NOW)
+            self._loader(hub)(NOW)
 
         self.assertEqual(str(caught.exception), "Test submission is temporarily unavailable.")
         self.assertNotIn("c" * 64, str(caught.exception))
 
     def test_disabled_loader_performs_no_repository_io(self):
-        hub = InMemoryConfigHub(self.release, self.gold)
+        hub = InMemoryConfigHub(self.release, self.gold, self.tasks)
 
         with self.assertRaisesRegex(SubmissionError, "temporarily unavailable"):
-            HubTestConfigLoader(hub, "private/repo", enabled=False)(NOW)
+            HubTestConfigLoader(
+                hub,
+                "private/repo",
+                public_api=hub,
+                public_repo_id="public/repo",
+                task_manifest_path="test/tasks.jsonl",
+                enabled=False,
+            )(NOW)
 
-        self.assertEqual(hub.repo_calls, 0)
+        self.assertEqual(hub.repo_calls, [])
         self.assertEqual(hub.download_calls, [])
+
+    @staticmethod
+    def _loader(hub):
+        return HubTestConfigLoader(
+            hub,
+            "private/repo",
+            public_api=hub,
+            public_repo_id="public/repo",
+            task_manifest_path="test/tasks.jsonl",
+            enabled=True,
+        )
 
 
 if __name__ == "__main__":

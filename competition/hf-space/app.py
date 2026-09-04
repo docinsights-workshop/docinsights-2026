@@ -45,6 +45,7 @@ TEST_SUBMISSIONS_ENABLED = os.getenv("TEST_SUBMISSIONS_ENABLED", "false").strip(
     "true",
     "yes",
 }
+TEST_TASKS_FILE = os.getenv("TEST_TASKS_FILE", "test/tasks.jsonl")
 
 PORTAL_CSS = """
 html,
@@ -687,12 +688,16 @@ def _legacy_validation_submitter(file_obj, metadata):
 
 
 _TEST_HUB_API = HfApi(token=WRITE_TOKEN)
+_PUBLIC_HUB_API = HfApi()
 _SUBMISSION_SERVICE = SubmissionService(
     validation_submitter=_legacy_validation_submitter,
     test_store=HubTestStore(_TEST_HUB_API, repo_id=SUBMISSIONS_REPO_ID),
     test_config_loader=HubTestConfigLoader(
         _TEST_HUB_API,
         repo_id=SUBMISSIONS_REPO_ID,
+        public_api=_PUBLIC_HUB_API,
+        public_repo_id=PUBLIC_DATASET_REPO,
+        task_manifest_path=TEST_TASKS_FILE,
         enabled=TEST_SUBMISSIONS_ENABLED and bool(WRITE_TOKEN),
     ),
 )

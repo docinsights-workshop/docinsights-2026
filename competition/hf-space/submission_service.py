@@ -41,18 +41,43 @@ class SubmissionSplit(str, Enum):
 class TrustedTestConfig:
     policy: TestReleasePolicy
     labels: list[dict]
+    scoring_gold_sha256: str
+    private_revision: str
+    public_revision: str
+    public_repo_id: str
+    task_manifest_path: str
 
 
 class HubTestConfigLoader:
     """Load one pinned private release and its gold labels from server policy."""
 
-    def __init__(self, api, repo_id: str, *, enabled: bool = False):
+    def __init__(
+        self,
+        api,
+        repo_id: str,
+        *,
+        public_api,
+        public_repo_id: str,
+        task_manifest_path: str,
+        enabled: bool = False,
+    ):
         self.api = api
         self.repo_id = str(repo_id or "").strip()
+        self.public_api = public_api
+        self.public_repo_id = str(public_repo_id or "").strip()
+        self.task_manifest_path = str(task_manifest_path or "").strip()
         self.enabled = enabled is True
 
     def __call__(self, now: dt.datetime) -> TrustedTestConfig:
-        if not self.enabled or not self.repo_id:
+        if not all(
+            (
+                self.enabled,
+                self.repo_id,
+                self.public_api,
+                self.public_repo_id,
+                self.task_manifest_path,
+            )
+        ):
             raise SubmissionError(TEST_UNAVAILABLE)
         try:
             info = self.api.repo_info(
@@ -70,6 +95,7 @@ class HubTestConfigLoader:
                 raise ValueError()
             task_digest = _sha256_digest(release.get("task_manifest_sha256"))
             gold_digest = _sha256_digest(release.get("gold_sha256"))
+            public_revision = _pinned_revision(release.get("public_revision"))
             policy = TestReleasePolicy(
                 release_id=release.get("release_id"),
                 task_manifest_sha256=task_digest,
@@ -82,8 +108,22 @@ class HubTestConfigLoader:
             policy.require_open(now)
             if hashlib.sha256(gold_raw).hexdigest() != policy.gold_sha256:
                 raise ValueError()
-            labels = load_jsonl_text(gold_raw.decode("utf-8"))
-            return TrustedTestConfig(policy=policy, labels=labels)
+            tasks_raw = self._read_public(public_revision)
+            if hashlib.sha256(tasks_raw).hexdigest() != policy.task_manifest_sha256:
+                raise ValueError()
+            task_ids = _public_task_ids(tasks_raw)
+            labels, gold_ids = _gold_rows_and_ids(gold_raw)
+            if task_ids != gold_ids:
+                raise ValueError()
+            return TrustedTestConfig(
+                policy=policy,
+                labels=labels,
+                scoring_gold_sha256=gold_digest,
+                private_revision=sha,
+                public_revision=public_revision,
+                public_repo_id=self.public_repo_id,
+                task_manifest_path=self.task_manifest_path,
+            )
         except Exception:
             raise SubmissionError(TEST_UNAVAILABLE) from None
 
@@ -97,6 +137,15 @@ class HubTestConfigLoader:
             )
         except EntryNotFoundError:
             raise ValueError() from None
+        return Path(local_path).read_bytes()
+
+    def _read_public(self, revision: str) -> bytes:
+        local_path = self.public_api.hf_hub_download(
+            self.public_repo_id,
+            self.task_manifest_path,
+            repo_type="dataset",
+            revision=revision,
+        )
         return Path(local_path).read_bytes()
 
 
@@ -130,7 +179,7 @@ class SubmissionService:
             if not isinstance(config, TrustedTestConfig):
                 raise ValueError()
             config.policy.require_open(now)
-            server_metadata = _test_metadata(metadata, config.policy)
+            server_metadata = _test_metadata(metadata, config)
         except Exception:
             raise SubmissionError(TEST_UNAVAILABLE) from None
 
@@ -190,7 +239,7 @@ def _oauth_identity(profile) -> OAuthIdentity:
         raise SubmissionError("Sign in with Hugging Face to submit test predictions.") from None
 
 
-def _test_metadata(metadata, policy: TestReleasePolicy) -> dict:
+def _test_metadata(metadata, config: TrustedTestConfig) -> dict:
     if not isinstance(metadata, Mapping):
         raise ValueError()
     team = metadata.get("team")
@@ -199,8 +248,13 @@ def _test_metadata(metadata, policy: TestReleasePolicy) -> dict:
     if any(not isinstance(value, str) or not value.strip() for value in (team, submission_name)):
         raise ValueError()
     return {
-        "release_id": policy.release_id,
-        "task_manifest_sha256": policy.task_manifest_sha256,
+        "release_id": config.policy.release_id,
+        "task_manifest_sha256": config.policy.task_manifest_sha256,
+        "scoring_gold_sha256": config.scoring_gold_sha256,
+        "scoring_private_revision": config.private_revision,
+        "scoring_public_revision": config.public_revision,
+        "scoring_public_repo_id": config.public_repo_id,
+        "scoring_task_manifest_path": config.task_manifest_path,
         "team": team.strip(),
         "participant_names": normalize_participant_names(participant_names),
         "submission_name": submission_name.strip(),
@@ -236,3 +290,50 @@ def _sha256_digest(value) -> str:
     if any(character not in "0123456789abcdef" for character in value):
         raise ValueError()
     return value
+
+
+def _pinned_revision(value) -> str:
+    if not isinstance(value, str) or len(value) != 40:
+        raise ValueError()
+    if any(character not in "0123456789abcdef" for character in value):
+        raise ValueError()
+    return value
+
+
+def _public_task_ids(raw: bytes) -> set[str]:
+    rows = load_jsonl_text(raw.decode("utf-8"))
+    expected_keys = {"instance_id", "user_query", "document_pdf"}
+    ids = set()
+    for row in rows:
+        if not isinstance(row, Mapping) or set(row) != expected_keys:
+            raise ValueError()
+        if any(not isinstance(row[key], str) or not row[key].strip() for key in expected_keys):
+            raise ValueError()
+        instance_id = row["instance_id"]
+        if instance_id in ids:
+            raise ValueError()
+        if row["document_pdf"] != f"documents/{instance_id}.pdf":
+            raise ValueError()
+        ids.add(instance_id)
+    return ids
+
+
+def _gold_rows_and_ids(raw: bytes) -> tuple[list[dict], set[str]]:
+    rows = load_jsonl_text(raw.decode("utf-8"))
+    expected_keys = {"instance_id", "answer", "evidence"}
+    ids = set()
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != expected_keys:
+            raise ValueError()
+        instance_id = row["instance_id"]
+        if not isinstance(instance_id, str) or not instance_id.strip() or instance_id in ids:
+            raise ValueError()
+        if not isinstance(row["answer"], str):
+            raise ValueError()
+        evidence = row["evidence"]
+        if not isinstance(evidence, list) or not evidence:
+            raise ValueError()
+        if any(not isinstance(item, str) or not item.strip() for item in evidence):
+            raise ValueError()
+        ids.add(instance_id)
+    return rows, ids

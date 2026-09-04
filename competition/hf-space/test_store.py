@@ -223,6 +223,7 @@ class HubTestStore:
             path = f"attempts/test/{key}/{submission_id}.json"
             record = self._read_json_required(path, sha)
             _validate_release_state(record, policy)
+            _validate_scoring_state(record, policy)
             if (
                 not isinstance(record, dict)
                 or record.get("account_key") != key
@@ -279,6 +280,11 @@ def _submission_metadata(metadata) -> dict:
     fields = (
         "release_id",
         "task_manifest_sha256",
+        "scoring_gold_sha256",
+        "scoring_private_revision",
+        "scoring_public_revision",
+        "scoring_public_repo_id",
+        "scoring_task_manifest_path",
         "team",
         "participant_names",
         "submission_name",
@@ -360,6 +366,8 @@ def _verify_release(snapshot: _Snapshot, metadata: Mapping):
         raise _Unavailable()
     if metadata.get("task_manifest_sha256") != snapshot.policy.task_manifest_sha256:
         raise _Unavailable()
+    if metadata.get("scoring_gold_sha256") != snapshot.policy.gold_sha256:
+        raise _Unavailable()
     if hashlib.sha256(snapshot.gold).hexdigest() != snapshot.policy.gold_sha256:
         raise _Unavailable()
 
@@ -397,6 +405,11 @@ def _attempt_record(
         "hf_subject": identity.sub,
         "hf_username": identity.username,
         "verified_email": identity.email,
+        "scoring_gold_sha256": metadata["scoring_gold_sha256"],
+        "scoring_private_revision": metadata["scoring_private_revision"],
+        "scoring_public_revision": metadata["scoring_public_revision"],
+        "scoring_public_repo_id": metadata["scoring_public_repo_id"],
+        "scoring_task_manifest_path": metadata["scoring_task_manifest_path"],
         "team": metadata["team"],
         "participant_names": metadata["participant_names"],
         "submission_name": metadata["submission_name"],
@@ -466,6 +479,20 @@ def _validate_release_state(value, policy: TestReleasePolicy):
         raise _Unavailable()
     if any(value.get(field) != expected for field, expected in _release_state(policy).items()):
         raise _Unavailable()
+
+
+def _validate_scoring_state(value, policy: TestReleasePolicy):
+    if value.get("scoring_gold_sha256") != policy.gold_sha256:
+        raise _Unavailable()
+    for field in (
+        "scoring_private_revision",
+        "scoring_public_revision",
+        "scoring_public_repo_id",
+        "scoring_task_manifest_path",
+    ):
+        item = value.get(field)
+        if not isinstance(item, str) or not item.strip():
+            raise _Unavailable()
 
 
 def _validate_organizer_projection(value, policy: TestReleasePolicy):
