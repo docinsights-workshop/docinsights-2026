@@ -3,6 +3,7 @@ import html
 import json
 import os
 import threading
+import warnings
 from pathlib import Path
 
 import gradio as gr
@@ -46,6 +47,8 @@ TEST_SUBMISSIONS_ENABLED = os.getenv("TEST_SUBMISSIONS_ENABLED", "false").strip(
     "yes",
 }
 TEST_TASKS_FILE = os.getenv("TEST_TASKS_FILE", "test/tasks.jsonl")
+VALIDATION_SPLIT_LABEL = "Validation (development)"
+TEST_SPLIT_LABEL = "Test (final)"
 
 PORTAL_CSS = """
 html,
@@ -717,6 +720,145 @@ def history_for_oauth(oauth_profile):
         raise gr.Error(str(exc)) from None
 
 
+def _selected_split(split_label):
+    return {
+        VALIDATION_SPLIT_LABEL: "validation",
+        TEST_SPLIT_LABEL: "test",
+    }.get(split_label, split_label)
+
+
+def submit_predictions(
+    split_label,
+    file_obj,
+    team,
+    participant_names,
+    contact,
+    submission_name,
+    oauth_profile: gr.OAuthProfile | None,
+):
+    response = submit_for_split(
+        _selected_split(split_label),
+        file_obj,
+        {
+            "team": team,
+            "participant_names": participant_names,
+            "contact": contact,
+            "submission_name": submission_name,
+        },
+        oauth_profile,
+    )
+    if isinstance(response, dict) and response.get("__type__") == "update":
+        return response
+    return gr.update(value=response, visible=True)
+
+
+def _masked_email(profile):
+    email = profile.get("email") if profile is not None else None
+    if not isinstance(email, str) or "@" not in email:
+        raise gr.Error("Sign in with Hugging Face to retrieve test submissions.")
+    local, domain = email.strip().casefold().rsplit("@", maxsplit=1)
+    if not local or not domain:
+        raise gr.Error("Sign in with Hugging Face to retrieve test submissions.")
+    return f"{local[0]}***@{domain}"
+
+
+def _test_history_html(attempts, masked_email):
+    rows = []
+    for attempt in attempts:
+        number = int(attempt.get("attempt", 0))
+        if number == 1:
+            feedback = (
+                f"Answer accuracy {_format_metric(attempt.get('answer_accuracy', 0.0))}; "
+                f"evidence F1 {_format_metric(attempt.get('evidence_f1', 0.0))}"
+            )
+        else:
+            feedback = "Score withheld until finalization"
+        rows.append(
+            "<tr>"
+            f"<td>{number}</td>"
+            f"<td>{html.escape(str(attempt.get('submission_name', '')))}</td>"
+            f"<td>{html.escape(str(attempt.get('accepted_at', '')))}</td>"
+            f"<td>{html.escape(str(attempt.get('receipt', '')))}</td>"
+            f"<td>{html.escape(feedback)}</td>"
+            "</tr>"
+        )
+    if not rows:
+        rows.append('<tr><td colspan="5">No accepted test submissions yet.</td></tr>')
+    remaining = max(0, 3 - len(attempts))
+    return f"""
+    <p>Signed in as <strong>{html.escape(masked_email)}</strong>. {remaining} accepted attempts remaining.</p>
+    <div class="leaderboard-table-wrap">
+        <table aria-label="My test submissions">
+            <thead>
+                <tr>
+                    <th scope="col">Attempt</th>
+                    <th scope="col">Submission</th>
+                    <th scope="col">Accepted (UTC)</th>
+                    <th scope="col">Receipt</th>
+                    <th scope="col">Feedback</th>
+                </tr>
+            </thead>
+            <tbody>{''.join(rows)}</tbody>
+        </table>
+    </div>
+    """
+
+
+def my_test_submissions(oauth_profile: gr.OAuthProfile | None):
+    attempts = history_for_oauth(oauth_profile)
+    return gr.update(
+        value=_test_history_html(attempts, _masked_email(oauth_profile)),
+        visible=True,
+    )
+
+
+def split_ui(split_label):
+    if split_label == TEST_SPLIT_LABEL:
+        availability = (
+            "Test submissions are open."
+            if TEST_SUBMISSIONS_ENABLED
+            else "Test submissions are not open yet."
+        )
+        return (
+            gr.update(
+                value=(
+                    "### Submit final test predictions\n"
+                    "Sign in with Hugging Face. Your verified account email replaces the "
+                    "validation contact field. The first accepted attempt shows aggregate "
+                    "metrics; later attempts are withheld until finalization. "
+                    f"{availability}"
+                )
+            ),
+            gr.update(visible=False),
+            gr.update(
+                value="Submit test predictions",
+                interactive=TEST_SUBMISSIONS_ENABLED,
+            ),
+            gr.update(visible=True),
+        )
+    return (
+        gr.update(
+            value=(
+                "### Submit validation predictions\n"
+                "Upload one JSON object per instance with `instance_id`, `answer`, and "
+                f"`evidence`. Review the [participant guide]({PARTICIPANT_GUIDE_URL}) "
+                "for the complete format and evaluation protocol."
+            )
+        ),
+        gr.update(visible=True),
+        gr.update(value="Validate and score", interactive=True),
+        gr.update(visible=False),
+    )
+
+
+class PortalBlocks(gr.Blocks):
+    @property
+    def expects_oauth(self):
+        # A real Space receives OAuth routes from its platform environment.
+        # Local and CI imports stay offline and never invoke Gradio's mock login.
+        return bool(os.getenv("SPACE_ID")) and super().expects_oauth
+
+
 blocks_options = {
     "title": "DocInsights 2026 Shared Task: DocSem",
     "fill_width": True,
@@ -725,7 +867,7 @@ if GRADIO_MAJOR_VERSION < 6:
     blocks_options["css"] = PORTAL_CSS
 
 
-with gr.Blocks(**blocks_options) as demo:
+with PortalBlocks(**blocks_options) as demo:
     gr.HTML(
         f"""
         <header id="portal-header">
@@ -773,17 +915,28 @@ with gr.Blocks(**blocks_options) as demo:
         """
     )
 
+    with gr.Row(elem_id="split-controls"):
+        split_selector = gr.Dropdown(
+            choices=[VALIDATION_SPLIT_LABEL, TEST_SPLIT_LABEL],
+            value=VALIDATION_SPLIT_LABEL,
+            label="Evaluation split",
+            interactive=True,
+        )
+        gr.LoginButton("Sign in with Hugging Face")
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="The `gr.LogoutButton` component is deprecated.*",
+                category=UserWarning,
+            )
+            gr.LogoutButton("Sign out")
+
     with gr.Group(elem_id="submission-panel"):
-        gr.HTML(
-            f"""
-            <h2>Submit validation predictions</h2>
-            <p class="submission-note">
-                Upload one JSON object per instance with <code>instance_id</code>,
-                <code>answer</code>, and <code>evidence</code>.
-                Review the <a href="{PARTICIPANT_GUIDE_URL}" target="_blank" rel="noopener">participant guide</a>
-                for the complete format and evaluation protocol.
-            </p>
-            """
+        submission_intro = gr.Markdown(
+            "### Submit validation predictions\n"
+            "Upload one JSON object per instance with `instance_id`, `answer`, and "
+            f"`evidence`. Review the [participant guide]({PARTICIPANT_GUIDE_URL}) "
+            "for the complete format and evaluation protocol."
         )
         with gr.Row(elem_id="submission-fields"):
             team = gr.Textbox(label="Team", placeholder="example-team")
@@ -818,12 +971,41 @@ with gr.Blocks(**blocks_options) as demo:
             elem_id="score-output",
         )
 
-    submit.click(
-        evaluate_submission,
-        inputs=[file_input, team, contact, submission_name, participant_names],
-        outputs=result,
-    )
+    with gr.Group(visible=False, elem_id="test-history-section") as test_history_group:
+        gr.Markdown(
+            "### My test submissions\n"
+            "Receipts are retrieved only for the currently signed-in account."
+        )
+        refresh_history = gr.Button("Refresh my submissions", variant="secondary")
+        test_history = gr.HTML(
+            value="<p>Sign in with Hugging Face to retrieve your test receipts.</p>"
+        )
 
+    submit.click(
+        submit_predictions,
+        inputs=[
+            split_selector,
+            file_input,
+            team,
+            participant_names,
+            contact,
+            submission_name,
+        ],
+        outputs=result,
+        api_name="submit_predictions",
+    )
+    refresh_history.click(
+        my_test_submissions,
+        inputs=None,
+        outputs=test_history,
+        api_name="my_test_submissions",
+    )
+    split_selector.change(
+        split_ui,
+        inputs=split_selector,
+        outputs=[submission_intro, contact, submit, test_history_group],
+        api_name="select_split",
+    )
     with gr.Column(elem_id="leaderboard-section"):
         with gr.Row(elem_id="leaderboard-heading"):
             gr.HTML(
@@ -846,6 +1028,12 @@ with gr.Blocks(**blocks_options) as demo:
             elem_id="leaderboard-table",
         )
         refresh.click(leaderboard_html, inputs=None, outputs=leaderboard)
+
+    with gr.Group(elem_id="test-leaderboard-section"):
+        gr.Markdown(
+            "## Test leaderboard\n"
+            "Final test standings will be published here after organizer finalization."
+        )
 
 
 if __name__ == "__main__":
