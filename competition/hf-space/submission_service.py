@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
@@ -30,6 +31,7 @@ from test_policy import (
 RELEASE_PATH = "private/test_release.json"
 GOLD_PATH = "private/test_labels.jsonl"
 TEST_UNAVAILABLE = "Test submission is temporarily unavailable."
+OPAQUE_INSTANCE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
 
 class SubmissionSplit(str, Enum):
@@ -310,6 +312,8 @@ def _public_task_ids(raw: bytes) -> set[str]:
         if any(not isinstance(row[key], str) or not row[key].strip() for key in expected_keys):
             raise ValueError()
         instance_id = row["instance_id"]
+        if OPAQUE_INSTANCE_ID.fullmatch(instance_id) is None:
+            raise ValueError()
         if instance_id in ids:
             raise ValueError()
         if row["document_pdf"] != f"test/documents/{instance_id}.pdf":

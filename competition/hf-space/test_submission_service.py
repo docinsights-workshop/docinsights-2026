@@ -611,6 +611,92 @@ class HubTestConfigLoaderTests(unittest.TestCase):
                 with self.assertRaisesRegex(SubmissionError, "temporarily unavailable"):
                     self._loader(hub)(NOW)
 
+    def test_loader_rejects_traversal_bearing_instance_id_with_matching_path(self):
+        tasks = (
+            b'{"instance_id":"../../private","user_query":"question",'
+            b'"document_pdf":"test/documents/../../private.pdf"}\n'
+        )
+        gold = b'{"instance_id":"../../private","answer":"42","evidence":["b1"]}\n'
+        release = {
+            **self.release,
+            "task_manifest_sha256": hashlib.sha256(tasks).hexdigest(),
+            "gold_sha256": hashlib.sha256(gold).hexdigest(),
+        }
+        hub = InMemoryConfigHub(release, gold, tasks)
+
+        with self.assertRaisesRegex(SubmissionError, "temporarily unavailable"):
+            self._loader(hub)(NOW)
+
+    def test_loader_rejects_ids_outside_safe_opaque_component_contract(self):
+        invalid_ids = (
+            "",
+            ".",
+            "..",
+            "bad/id",
+            "bad\\id",
+            "bad id",
+            "-leading",
+            "_leading",
+        )
+        for instance_id in invalid_ids:
+            with self.subTest(instance_id=instance_id):
+                tasks = json.dumps(
+                    {
+                        "instance_id": instance_id,
+                        "user_query": "question",
+                        "document_pdf": f"test/documents/{instance_id}.pdf",
+                    },
+                    separators=(",", ":"),
+                ).encode("utf-8") + b"\n"
+                gold = json.dumps(
+                    {"instance_id": instance_id, "answer": "42", "evidence": ["b1"]},
+                    separators=(",", ":"),
+                ).encode("utf-8") + b"\n"
+                release = {
+                    **self.release,
+                    "task_manifest_sha256": hashlib.sha256(tasks).hexdigest(),
+                    "gold_sha256": hashlib.sha256(gold).hexdigest(),
+                }
+                hub = InMemoryConfigHub(release, gold, tasks)
+
+                with self.assertRaisesRegex(SubmissionError, "temporarily unavailable"):
+                    self._loader(hub)(NOW)
+
+    def test_loader_accepts_safe_opaque_instance_ids(self):
+        task_rows = [
+            {
+                "instance_id": instance_id,
+                "user_query": "question",
+                "document_pdf": f"test/documents/{instance_id}.pdf",
+            }
+            for instance_id in ("task_000001", "opaque-id", "Task.2026_01")
+        ]
+        gold_rows = [
+            {"instance_id": row["instance_id"], "answer": "42", "evidence": ["b1"]}
+            for row in task_rows
+        ]
+        tasks = b"".join(
+            json.dumps(row, separators=(",", ":")).encode("utf-8") + b"\n"
+            for row in task_rows
+        )
+        gold = b"".join(
+            json.dumps(row, separators=(",", ":")).encode("utf-8") + b"\n"
+            for row in gold_rows
+        )
+        release = {
+            **self.release,
+            "task_manifest_sha256": hashlib.sha256(tasks).hexdigest(),
+            "gold_sha256": hashlib.sha256(gold).hexdigest(),
+        }
+        hub = InMemoryConfigHub(release, gold, tasks)
+
+        config = self._loader(hub)(NOW)
+
+        self.assertEqual(
+            [row["instance_id"] for row in config.labels],
+            ["task_000001", "opaque-id", "Task.2026_01"],
+        )
+
     def test_loader_rejects_gold_digest_mismatch_without_details(self):
         release = {**self.release, "gold_sha256": "c" * 64}
         hub = InMemoryConfigHub(release, self.gold, self.tasks)
