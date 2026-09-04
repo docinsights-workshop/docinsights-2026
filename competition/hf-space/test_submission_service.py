@@ -35,7 +35,7 @@ TEST_TASKS = [
     {
         "instance_id": "test-1",
         "user_query": "What is the answer?",
-        "document_pdf": "documents/test-1.pdf",
+        "document_pdf": "test/documents/test-1.pdf",
     },
 ]
 TEST_ROWS = [
@@ -507,7 +507,7 @@ class HubTestConfigLoaderTests(unittest.TestCase):
         self.gold = b'{"instance_id":"test-1","answer":"42","evidence":["b1"]}\n'
         self.tasks = (
             b'{"instance_id":"test-1","user_query":"What is the answer?",'
-            b'"document_pdf":"documents/test-1.pdf"}\n'
+            b'"document_pdf":"test/documents/test-1.pdf"}\n'
         )
         self.release = {
             "release_id": "trusted-release",
@@ -566,7 +566,7 @@ class HubTestConfigLoaderTests(unittest.TestCase):
     def test_loader_rejects_non_exact_public_task_schema(self):
         tasks = (
             b'{"instance_id":"test-1","user_query":"question",'
-            b'"document_pdf":"documents/test-1.pdf","answer":"leak"}\n'
+            b'"document_pdf":"test/documents/test-1.pdf","answer":"leak"}\n'
         )
         release = {**self.release, "task_manifest_sha256": hashlib.sha256(tasks).hexdigest()}
         hub = InMemoryConfigHub(release, self.gold, tasks)
@@ -577,13 +577,39 @@ class HubTestConfigLoaderTests(unittest.TestCase):
     def test_loader_rejects_public_task_and_gold_id_mismatch(self):
         tasks = (
             b'{"instance_id":"test-2","user_query":"question",'
-            b'"document_pdf":"documents/test-2.pdf"}\n'
+            b'"document_pdf":"test/documents/test-2.pdf"}\n'
         )
         release = {**self.release, "task_manifest_sha256": hashlib.sha256(tasks).hexdigest()}
         hub = InMemoryConfigHub(release, self.gold, tasks)
 
         with self.assertRaisesRegex(SubmissionError, "temporarily unavailable"):
             self._loader(hub)(NOW)
+
+    def test_loader_rejects_noncanonical_or_traversing_document_paths(self):
+        invalid_paths = (
+            "documents/test-1.pdf",
+            "test/documents/../private/test-1.pdf",
+            "private/test-1.pdf",
+            "test/documents/test-2.pdf",
+        )
+        for document_pdf in invalid_paths:
+            with self.subTest(document_pdf=document_pdf):
+                tasks = json.dumps(
+                    {
+                        "instance_id": "test-1",
+                        "user_query": "question",
+                        "document_pdf": document_pdf,
+                    },
+                    separators=(",", ":"),
+                ).encode("utf-8") + b"\n"
+                release = {
+                    **self.release,
+                    "task_manifest_sha256": hashlib.sha256(tasks).hexdigest(),
+                }
+                hub = InMemoryConfigHub(release, self.gold, tasks)
+
+                with self.assertRaisesRegex(SubmissionError, "temporarily unavailable"):
+                    self._loader(hub)(NOW)
 
     def test_loader_rejects_gold_digest_mismatch_without_details(self):
         release = {**self.release, "gold_sha256": "c" * 64}

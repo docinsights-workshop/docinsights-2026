@@ -312,7 +312,7 @@ def _public_task_ids(raw: bytes) -> set[str]:
         instance_id = row["instance_id"]
         if instance_id in ids:
             raise ValueError()
-        if row["document_pdf"] != f"documents/{instance_id}.pdf":
+        if row["document_pdf"] != f"test/documents/{instance_id}.pdf":
             raise ValueError()
         ids.add(instance_id)
     return ids
