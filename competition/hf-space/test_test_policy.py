@@ -158,6 +158,45 @@ class TestPolicyTests(unittest.TestCase):
     def test_best_attempt_uses_accuracy_f1_time_and_id(self):
         self.assertEqual(select_best_attempt(FIXTURE_ATTEMPTS)["submission_id"], "expected-id")
 
+    def test_best_attempt_orders_aware_timestamps_by_utc_instant(self):
+        attempts = [
+            {
+                "submission_id": "offset-earlier",
+                "accepted_at": "2026-09-05T10:00:00+01:00",
+                "metrics": {"answer_accuracy": 0.9, "evidence_f1": 0.8},
+            },
+            {
+                "submission_id": "utc-later",
+                "accepted_at": "2026-09-05T09:30:00Z",
+                "metrics": {"answer_accuracy": 0.9, "evidence_f1": 0.8},
+            },
+        ]
+
+        self.assertEqual(select_best_attempt(attempts)["submission_id"], "offset-earlier")
+
+    def test_best_attempt_rejects_missing_timestamp(self):
+        with self.assertRaisesRegex(TestPolicyError, "timestamp"):
+            select_best_attempt(
+                [
+                    {
+                        "submission_id": "missing-time",
+                        "metrics": {"answer_accuracy": 0.9, "evidence_f1": 0.8},
+                    }
+                ]
+            )
+
+    def test_best_attempt_rejects_malformed_timestamp(self):
+        with self.assertRaisesRegex(TestPolicyError, "timestamp"):
+            select_best_attempt(
+                [
+                    {
+                        "submission_id": "malformed-time",
+                        "accepted_at": "not-a-timestamp",
+                        "metrics": {"answer_accuracy": 0.9, "evidence_f1": 0.8},
+                    }
+                ]
+            )
+
     def test_best_attempt_rejects_empty_attempts(self):
         with self.assertRaisesRegex(TestPolicyError, "attempt"):
             select_best_attempt([])

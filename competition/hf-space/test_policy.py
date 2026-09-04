@@ -188,11 +188,29 @@ def _metric(attempt: Mapping, name: str) -> float:
     return value
 
 
-def _accepted_timestamp(attempt: Mapping) -> str:
-    value = attempt.get("accepted_at", attempt.get("submitted_at", attempt.get("timestamp", "")))
+def _accepted_timestamp(attempt: Mapping) -> dt.datetime:
+    """Parse an accepted timestamp and compare it as a UTC instant."""
+
+    value = None
+    for field in ("accepted_at", "submitted_at", "timestamp"):
+        if field in attempt:
+            value = attempt[field]
+            break
     if isinstance(value, dt.datetime):
-        return value.isoformat()
-    return str(value)
+        parsed = value
+    elif isinstance(value, str) and value.strip():
+        text = value.strip()
+        if text.endswith(("Z", "z")):
+            text = text[:-1] + "+00:00"
+        try:
+            parsed = dt.datetime.fromisoformat(text)
+        except ValueError as exc:
+            raise TestPolicyError("Accepted attempt timestamp is malformed.") from exc
+    else:
+        raise TestPolicyError("Accepted attempt timestamp is required.")
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise TestPolicyError("Accepted attempt timestamp must include a UTC offset.")
+    return parsed.astimezone(dt.timezone.utc)
 
 
 def select_best_attempt(attempts):
