@@ -6,7 +6,7 @@ import threading
 from pathlib import Path
 
 import gradio as gr
-from huggingface_hub import hf_hub_download, upload_file
+from huggingface_hub import HfApi, hf_hub_download, upload_file
 from huggingface_hub.utils import EntryNotFoundError, RepositoryNotFoundError
 
 from scoring import (
@@ -20,6 +20,8 @@ from scoring import (
     safe_slug,
     score_predictions,
 )
+from submission_service import HubTestConfigLoader, SubmissionService
+from test_store import HubTestStore
 
 
 PUBLIC_DATASET_REPO = os.getenv("PUBLIC_DATASET_REPO", "amitbcp/docinsights-2026-shared-task-data")
@@ -38,6 +40,11 @@ SUBMISSIONS_REPO_ID = os.getenv("SUBMISSIONS_REPO_ID", GOLD_REPO_ID)
 WRITE_TOKEN = os.getenv("HF_WRITE_TOKEN") or os.getenv("HF_TOKEN")
 GRADIO_MAJOR_VERSION = int(gr.__version__.split(".", maxsplit=1)[0])
 LEADERBOARD_LOCK = threading.Lock()
+TEST_SUBMISSIONS_ENABLED = os.getenv("TEST_SUBMISSIONS_ENABLED", "false").strip().casefold() in {
+    "1",
+    "true",
+    "yes",
+}
 
 PORTAL_CSS = """
 html,
@@ -667,6 +674,42 @@ def evaluate_submission(file_obj, team, contact, submission_name, participant_na
         },
         visible=True,
     )
+
+
+def _legacy_validation_submitter(file_obj, metadata):
+    return evaluate_submission(
+        file_obj,
+        metadata.get("team"),
+        metadata.get("contact"),
+        metadata.get("submission_name"),
+        metadata.get("participant_names"),
+    )
+
+
+_TEST_HUB_API = HfApi(token=WRITE_TOKEN)
+_SUBMISSION_SERVICE = SubmissionService(
+    validation_submitter=_legacy_validation_submitter,
+    test_store=HubTestStore(_TEST_HUB_API, repo_id=SUBMISSIONS_REPO_ID),
+    test_config_loader=HubTestConfigLoader(
+        _TEST_HUB_API,
+        repo_id=SUBMISSIONS_REPO_ID,
+        enabled=TEST_SUBMISSIONS_ENABLED and bool(WRITE_TOKEN),
+    ),
+)
+
+
+def submit_for_split(split, file_obj, metadata, oauth_profile):
+    try:
+        return _SUBMISSION_SERVICE.submit_for_split(split, file_obj, metadata, oauth_profile)
+    except SubmissionError as exc:
+        raise gr.Error(str(exc)) from None
+
+
+def history_for_oauth(oauth_profile):
+    try:
+        return _SUBMISSION_SERVICE.history_for_oauth(oauth_profile)
+    except SubmissionError as exc:
+        raise gr.Error(str(exc)) from None
 
 
 blocks_options = {
