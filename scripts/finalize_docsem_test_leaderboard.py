@@ -44,7 +44,11 @@ from test_contract import (  # noqa: E402
     sha256_digest,
     validate_test_predictions,
 )
-from test_policy import OAuthIdentity, canonical_submission_hash  # noqa: E402
+from test_policy import (  # noqa: E402
+    OAuthIdentity,
+    canonical_submission_hash,
+    select_best_attempt,
+)
 
 
 RELEASE_PATH = "private/test_release.json"
@@ -461,6 +465,10 @@ def build_finalization(snapshot, now) -> FinalizationPlan:
 
     if not isinstance(snapshot, FinalizationSnapshot):
         raise FinalizationError("The finalization snapshot is malformed.")
+    if snapshot.projection_issue_codes:
+        raise FinalizationError(
+            "Private test projections failed integrity verification."
+        )
     current = _require_utc(now)
     release_value, close_at = _validate_release(snapshot, current)
     base_release = _base_release(release_value)
@@ -685,6 +693,19 @@ def commit_finalization(
             "The expected private revision does not match the plan."
         )
 
+    current = _require_utc(now)
+    planned_at = _parse_utc(plan.audit_manifest.get("finalized_at"))
+    close_at = _parse_utc(plan.audit_manifest.get("close_at"))
+    if (
+        planned_at is None
+        or close_at is None
+        or planned_at < close_at
+        or current < close_at
+        or current < planned_at
+        or plan.finalized_release.get("finalized_at") != _format_utc(planned_at)
+    ):
+        raise FinalizationError("The finalization plan time is invalid.")
+
     _require_current_private_head(api, snapshot.repo_id, expected, token)
     if plan.already_finalized:
         return None
@@ -692,7 +713,6 @@ def commit_finalization(
         raise FinalizationError(
             "Finalization requires --yes and --maintenance-confirmed."
         )
-    current = _require_utc(now)
     fresh_release_bytes = _download_exact(
         api, snapshot.repo_id, expected, token, RELEASE_PATH
     )
@@ -706,13 +726,24 @@ def commit_finalization(
             "release_bytes": fresh_release_bytes,
         }
     )
-    fresh_plan = build_finalization(fresh_snapshot, current)
+    # ``finalized_at`` is part of every plan hash.  The precommit rebuild must
+    # therefore reuse that immutable planned instant while ``current`` above
+    # independently proves that the actual commit attempt is still after both
+    # the close and the plan time.
+    fresh_plan = build_finalization(fresh_snapshot, planned_at)
     if (
         fresh_plan.projection_sha256 != plan.projection_sha256
         or fresh_plan.audit_sha256 != plan.audit_sha256
         or fresh_plan.release_sha256 != plan.release_sha256
     ):
         raise FinalizationError("The finalization plan changed before commit.")
+    artifacts = (
+        (PUBLIC_FINAL_PATH, plan.public_bytes, plan.projection_sha256),
+        (AUDIT_PATH, plan.audit_bytes, plan.audit_sha256),
+        (RELEASE_PATH, plan.release_bytes, plan.release_sha256),
+    )
+    if any(_sha256(payload) != digest for _, payload, digest in artifacts):
+        raise FinalizationError("The finalization plan artifacts are invalid.")
     operations = [
         CommitOperationAdd(PUBLIC_FINAL_PATH, plan.public_bytes),
         CommitOperationAdd(AUDIT_PATH, plan.audit_bytes),
@@ -728,12 +759,30 @@ def commit_finalization(
             commit_message="Finalize DocSem held-out test leaderboard",
             token=token,
         )
-        revision = getattr(result, "oid", None) or getattr(result, "commit_id", None)
-        return revision_digest(revision)
-    except FinalizationError:
-        raise
+        returned = getattr(result, "oid", None) or getattr(result, "commit_id", None)
     except Exception:
         raise FinalizationError("The finalization commit did not succeed.") from None
+
+    # A successful API acknowledgement is not proof that the exact atomic
+    # write became the private main head.  Verify the returned revision and all
+    # three immutable artifacts before reporting success.  A failure in this
+    # phase may follow a real write, so the refusal explicitly directs a rerun
+    # from the newly observed head instead of inviting a blind retry.
+    try:
+        revision = revision_digest(returned)
+        if revision == expected:
+            raise ValueError()
+        _require_current_private_head(api, snapshot.repo_id, revision, token)
+        for path, expected_bytes, expected_digest in artifacts:
+            observed = _download_exact(api, snapshot.repo_id, revision, token, path)
+            if observed != expected_bytes or _sha256(observed) != expected_digest:
+                raise ValueError()
+    except Exception:
+        raise FinalizationError(
+            "The finalization commit may have succeeded but could not be verified; "
+            "rerun from the current private revision."
+        ) from None
+    return revision
 
 
 def _validate_release(snapshot: FinalizationSnapshot, now: dt.datetime):
@@ -906,7 +955,7 @@ def _attempt_reasons(item, snapshot, release, close_at, ids, hashes, account_num
         reasons.add("malformed")
     elif opened is None or submitted < opened:
         reasons.add("pre_window")
-    elif submitted > close_at:
+    elif submitted >= close_at:
         reasons.add("post_cutoff")
     if (
         record.get("scoring_public_revision") != release["public_revision"]
@@ -1280,7 +1329,6 @@ def _validate_label_rows(labels):
 
 def _projection_references(raw_files, release):
     references = {}
-    account_best = {}
     issues = set()
     expected_state = {
         "schema_version": 2,
@@ -1289,22 +1337,73 @@ def _projection_references(raw_files, release):
         "task_manifest_sha256": release.get("task_manifest_sha256"),
         "gold_sha256": release.get("gold_sha256"),
     }
-    account_paths = [
+    state_fields = set(expected_state)
+    reference_fields = state_fields | {
+        "submission_id",
+        "attempt_number",
+        "record_sha256",
+    }
+    account_fields = state_fields | {
+        "account_key",
+        "attempts",
+        "best_submission_id",
+    }
+    organizer_row_fields = state_fields | {
+        "account_key",
+        "attempt_count",
+        "best_submission_id",
+        "hf_subject",
+        "hf_username",
+        "verified_email",
+        "team",
+        "participant_names",
+        "submission_name",
+        "submitted_at",
+        "attempt_number",
+        "metrics",
+    }
+
+    def matches_state(value):
+        return isinstance(value, Mapping) and all(
+            value.get(name) == expected
+            and (name != "schema_version" or type(value.get(name)) is int)
+            for name, expected in expected_state.items()
+        )
+
+    attempt_files = {}
+    for path, payload in sorted(raw_files.items()):
+        match = _ATTEMPT_PATH.fullmatch(path)
+        if match is None:
+            continue
+        key = (match.group("account"), match.group("submission"))
+        try:
+            record = _decode_json(payload)
+        except Exception:
+            issues.add("account_projection_invalid")
+            continue
+        attempt_files[key] = {
+            "record": record,
+            "record_sha256": _sha256(payload),
+        }
+
+    account_records = {}
+    account_best = {}
+    account_paths = sorted(
         path for path in raw_files if _ACCOUNT_PROJECTION_PATH.fullmatch(path)
-    ]
+    )
     for path in account_paths:
         match = _ACCOUNT_PROJECTION_PATH.fullmatch(path)
+        account = match.group("account")
         try:
             projection = _decode_json(raw_files[path])
-            account = match.group("account")
-            if projection.get("account_key") != account or any(
-                projection.get(name) != expected
-                or (name == "schema_version" and type(projection.get(name)) is not int)
-                for name, expected in expected_state.items()
+            if (
+                not matches_state(projection)
+                or set(projection) != account_fields
+                or projection.get("account_key") != account
             ):
                 raise ValueError()
             entries = projection.get("attempts")
-            if not isinstance(entries, list) or len(entries) > 3:
+            if not isinstance(entries, list) or not 1 <= len(entries) <= 3:
                 raise ValueError()
             if [
                 entry.get("attempt_number")
@@ -1312,70 +1411,101 @@ def _projection_references(raw_files, release):
                 if isinstance(entry, Mapping)
             ] != list(range(1, len(entries) + 1)):
                 raise ValueError()
-            for entry in entries:
-                if not isinstance(entry, Mapping):
-                    raise ValueError()
-                submission = entry.get("submission_id")
-                record_sha = entry.get("record_sha256")
-                number = entry.get("attempt_number")
+
+            local_references = {}
+            records = []
+            for expected_number, entry in enumerate(entries, start=1):
                 if (
-                    not _uuid4(submission)
-                    or _SHA256.fullmatch(str(record_sha or "")) is None
-                    or type(number) is not int
-                    or not 1 <= number <= 3
-                    or (account, submission) in references
-                    or any(
-                        entry.get(name) != expected
-                        or (
-                            name == "schema_version"
-                            and type(entry.get(name)) is not int
-                        )
-                        for name, expected in expected_state.items()
-                    )
+                    not matches_state(entry)
+                    or set(entry) != reference_fields
+                    or type(entry.get("attempt_number")) is not int
+                    or entry.get("attempt_number") != expected_number
+                    or not _uuid4(entry.get("submission_id"))
+                    or _SHA256.fullmatch(str(entry.get("record_sha256", ""))) is None
                 ):
                     raise ValueError()
-                references[(account, submission)] = dict(entry)
-            if entries and projection.get("best_submission_id") not in {
-                entry["submission_id"] for entry in entries
-            }:
+                submission = entry["submission_id"]
+                key = (account, submission)
+                if key in local_references:
+                    raise ValueError()
+                loaded = attempt_files.get(key)
+                if loaded is None or loaded["record_sha256"] != entry["record_sha256"]:
+                    raise ValueError()
+                record = loaded["record"]
+                if (
+                    not isinstance(record, Mapping)
+                    or record.get("account_key") != account
+                    or record.get("submission_id") != submission
+                    or type(record.get("attempt_number")) is not int
+                    or record.get("attempt_number") != expected_number
+                ):
+                    raise ValueError()
+                local_references[key] = dict(entry)
+                records.append(record)
+
+            account_attempt_keys = {key for key in attempt_files if key[0] == account}
+            if account_attempt_keys != set(local_references):
                 raise ValueError()
-            if entries:
-                account_best[account] = projection["best_submission_id"]
+            best = select_best_attempt(records)
+            if not isinstance(best, Mapping) or projection.get(
+                "best_submission_id"
+            ) != best.get("submission_id"):
+                raise ValueError()
+
+            references.update(local_references)
+            account_records[account] = tuple(records)
+            account_best[account] = best
         except Exception:
             issues.add("account_projection_invalid")
-            account_best.pop(match.group("account"), None)
-            for key in list(references):
-                if key[0] == match.group("account"):
-                    references.pop(key, None)
+
+    # Every immutable attempt file must appear once in its account projection,
+    # and every projection reference must resolve to an immutable file.  This
+    # equality also catches accounts with attempts but no projection file.
+    if set(attempt_files) != set(references):
+        issues.add("account_projection_invalid")
+
     try:
         organizer = _decode_json(raw_files[ORGANIZER_PROJECTION_PATH])
-        if any(
-            organizer.get(name) != expected
-            or (name == "schema_version" and type(organizer.get(name)) is not int)
-            for name, expected in expected_state.items()
-        ):
+        if not matches_state(organizer) or set(organizer) != state_fields | {
+            "accounts"
+        }:
             raise ValueError()
         accounts = organizer.get("accounts")
-        if not isinstance(accounts, list):
+        if not isinstance(accounts, list) or len(accounts) != len(account_records):
             raise ValueError()
-        organizer_best = {}
+        organizer_accounts = set()
         for entry in accounts:
-            if not isinstance(entry, Mapping) or any(
-                entry.get(name) != expected
-                or (name == "schema_version" and type(entry.get(name)) is not int)
-                for name, expected in expected_state.items()
-            ):
-                raise ValueError()
-            account = entry.get("account_key")
-            best = entry.get("best_submission_id")
             if (
-                _SHA256.fullmatch(str(account or "")) is None
-                or not _uuid4(best)
-                or account in organizer_best
+                not matches_state(entry)
+                or set(entry) != organizer_row_fields
+                or _SHA256.fullmatch(str(entry.get("account_key", ""))) is None
             ):
                 raise ValueError()
-            organizer_best[account] = best
-        if organizer_best != account_best:
+            account = entry["account_key"]
+            if account in organizer_accounts or account not in account_records:
+                raise ValueError()
+            organizer_accounts.add(account)
+            best = account_best[account]
+            expected = {
+                "attempt_count": len(account_records[account]),
+                "best_submission_id": best.get("submission_id"),
+                "hf_subject": best.get("hf_subject"),
+                "hf_username": best.get("hf_username"),
+                "verified_email": best.get("verified_email"),
+                "team": best.get("team"),
+                "participant_names": best.get("participant_names"),
+                "submission_name": best.get("submission_name"),
+                "submitted_at": best.get("submitted_at"),
+                "attempt_number": best.get("attempt_number"),
+                "metrics": best.get("metrics"),
+            }
+            if (
+                type(entry.get("attempt_count")) is not int
+                or type(entry.get("attempt_number")) is not int
+                or any(entry.get(name) != value for name, value in expected.items())
+            ):
+                raise ValueError()
+        if organizer_accounts != set(account_records):
             raise ValueError()
     except Exception:
         issues.add("organizer_projection_mismatch")

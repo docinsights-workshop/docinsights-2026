@@ -273,6 +273,7 @@ class FinalizationPlanTests(unittest.TestCase):
             predictions(),
         )
         bad_cases = [
+            ("post_cutoff", {"submitted_at": "2026-10-01T00:00:00Z"}),
             ("post_cutoff", {"submitted_at": "2026-10-01T00:00:01Z"}),
             ("wrong_release", {"release_id": "other-release"}),
             ("wrong_task", {"task_manifest_sha256": "8" * 64}),
@@ -617,6 +618,7 @@ class FakeHub:
         self.sha = SOURCE_REVISION
         self.commits = [SOURCE_REVISION, PRIVATE_REVISION]
         self.create_calls = []
+        self.download_calls = []
 
     def repo_info(self, repo_id, *, repo_type, revision, token):
         if revision not in ("main", self.sha):
@@ -636,6 +638,7 @@ class FakeHub:
     ):
         if revision != self.sha or filename not in self.files:
             raise RuntimeError("missing")
+        self.download_calls.append((revision, filename))
         target_root = Path(cache_dir or self.root)
         target = target_root / filename
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -699,7 +702,27 @@ def hub_files(record):
         "release_id": "docsem-test-2026",
         "task_manifest_sha256": TASK_SHA,
         "gold_sha256": GOLD_SHA,
-        "accounts": [],
+        "accounts": [
+            {
+                "schema_version": 2,
+                "split": "test",
+                "release_id": "docsem-test-2026",
+                "task_manifest_sha256": TASK_SHA,
+                "gold_sha256": GOLD_SHA,
+                "account_key": account,
+                "attempt_count": 1,
+                "best_submission_id": record.value["submission_id"],
+                "hf_subject": record.value["hf_subject"],
+                "hf_username": record.value["hf_username"],
+                "verified_email": record.value["verified_email"],
+                "team": record.value["team"],
+                "participant_names": record.value["participant_names"],
+                "submission_name": record.value["submission_name"],
+                "submitted_at": record.value["submitted_at"],
+                "attempt_number": record.value["attempt_number"],
+                "metrics": record.value["metrics"],
+            }
+        ],
     }
     return {
         RELEASE_PATH: canonical_json(release_value),
@@ -775,14 +798,11 @@ class LoadAndCommitTests(unittest.TestCase):
         files[projection_path] = canonical_json(projection)
 
         loaded = self.load(hub=FakeHub(self.workspace.name, files))
-        plan = build_finalization(loaded, NOW)
 
         self.assertFalse(loaded.attempts[0].committed)
-        self.assertEqual(plan.eligible_attempt_count, 0)
-        self.assertEqual(
-            plan.audit_manifest["excluded_attempts"][0]["reason_code"],
-            "uncommitted",
-        )
+        self.assertIn("account_projection_invalid", loaded.projection_issue_codes)
+        with self.assertRaisesRegex(FinalizationError, "projection"):
+            build_finalization(loaded, NOW)
 
     def test_projection_with_wrong_release_cannot_mark_an_attempt_committed(self):
         files = hub_files(self.record)
@@ -798,22 +818,115 @@ class LoadAndCommitTests(unittest.TestCase):
 
         self.assertFalse(loaded.attempts[0].committed)
         self.assertIn("account_projection_invalid", loaded.projection_issue_codes)
+        with self.assertRaisesRegex(FinalizationError, "projection"):
+            build_finalization(loaded, NOW)
 
-    def test_organizer_projection_inventory_mismatch_is_recorded_privately(self):
-        loaded = self.load()
+    def test_projection_issue_refuses_finalization(self):
+        files = hub_files(self.record)
+        projection = json.loads(files["projections/test/organizer_leaderboard.json"])
+        projection["accounts"] = []
+        files["projections/test/organizer_leaderboard.json"] = canonical_json(
+            projection
+        )
+        loaded = self.load(hub=FakeHub(self.workspace.name, files))
 
         self.assertIn("organizer_projection_mismatch", loaded.projection_issue_codes)
-        plan = build_finalization(loaded, NOW)
-        self.assertIn(
-            "organizer_projection_mismatch",
-            plan.audit_manifest["projection_issue_codes"],
+        with self.assertRaisesRegex(FinalizationError, "projection"):
+            build_finalization(loaded, NOW)
+
+    def test_missing_attempt_referenced_as_projected_best_refuses_finalization(self):
+        files = hub_files(self.record)
+        del files[self.record.path]
+
+        loaded = self.load(hub=FakeHub(self.workspace.name, files))
+
+        self.assertIn("account_projection_invalid", loaded.projection_issue_codes)
+        with self.assertRaisesRegex(FinalizationError, "projection"):
+            build_finalization(loaded, NOW)
+
+    def test_projection_bijection_rejects_orphan_attempt_and_wrong_derived_best(self):
+        second = attempt(
+            "account-a",
+            2,
+            "22222222-2222-4222-8222-222222222222",
+            "2026-09-03T12:00:00Z",
+            predictions(second="wrong"),
         )
+
+        orphaned = hub_files(self.record)
+        orphaned[second.path] = canonical_json(second.value)
+        loaded = self.load(hub=FakeHub(self.workspace.name, orphaned))
+        self.assertIn("account_projection_invalid", loaded.projection_issue_codes)
+        with self.assertRaisesRegex(FinalizationError, "projection"):
+            build_finalization(loaded, NOW)
+
+        wrong_best = hub_files(self.record)
+        second_bytes = canonical_json(second.value)
+        wrong_best[second.path] = second_bytes
+        account_path = (
+            f"projections/test/accounts/{self.record.value['account_key']}.json"
+        )
+        account_projection = json.loads(wrong_best[account_path])
+        account_projection["attempts"].append(
+            {
+                "schema_version": 2,
+                "split": "test",
+                "release_id": "docsem-test-2026",
+                "task_manifest_sha256": TASK_SHA,
+                "gold_sha256": GOLD_SHA,
+                "submission_id": second.value["submission_id"],
+                "attempt_number": 2,
+                "record_sha256": hashlib.sha256(second_bytes).hexdigest(),
+            }
+        )
+        account_projection["best_submission_id"] = second.value["submission_id"]
+        wrong_best[account_path] = canonical_json(account_projection)
+        organizer = json.loads(
+            wrong_best["projections/test/organizer_leaderboard.json"]
+        )
+        row = organizer["accounts"][0]
+        row.update(
+            {
+                "attempt_count": 2,
+                "best_submission_id": second.value["submission_id"],
+                "hf_subject": second.value["hf_subject"],
+                "hf_username": second.value["hf_username"],
+                "verified_email": second.value["verified_email"],
+                "team": second.value["team"],
+                "participant_names": second.value["participant_names"],
+                "submission_name": second.value["submission_name"],
+                "submitted_at": second.value["submitted_at"],
+                "attempt_number": second.value["attempt_number"],
+                "metrics": second.value["metrics"],
+            }
+        )
+        wrong_best["projections/test/organizer_leaderboard.json"] = canonical_json(
+            organizer
+        )
+
+        loaded = self.load(hub=FakeHub(self.workspace.name, wrong_best))
+        self.assertIn("account_projection_invalid", loaded.projection_issue_codes)
+        with self.assertRaisesRegex(FinalizationError, "projection"):
+            build_finalization(loaded, NOW)
+
+    def test_organizer_projection_must_match_selected_record_fields(self):
+        files = hub_files(self.record)
+        organizer = json.loads(files["projections/test/organizer_leaderboard.json"])
+        organizer["accounts"][0]["team"] = "stale-team"
+        files["projections/test/organizer_leaderboard.json"] = canonical_json(organizer)
+
+        loaded = self.load(hub=FakeHub(self.workspace.name, files))
+
+        self.assertIn("organizer_projection_mismatch", loaded.projection_issue_codes)
+        with self.assertRaisesRegex(FinalizationError, "projection"):
+            build_finalization(loaded, NOW)
 
     def test_cas_requires_both_confirmations_exact_parent_and_writes_three_files_once(
         self,
     ):
         loaded = self.load()
         plan = build_finalization(loaded, NOW)
+        self.hub.download_calls.clear()
         for yes, maintenance in ((False, True), (True, False)):
             with self.subTest(yes=yes, maintenance=maintenance):
                 with self.assertRaises(FinalizationError):
@@ -835,7 +948,7 @@ class LoadAndCommitTests(unittest.TestCase):
             plan,
             token="private-token-sentinel",
             expected_private_sha=SOURCE_REVISION,
-            now=NOW,
+            now=NOW + dt.timedelta(microseconds=1),
             yes=True,
             maintenance_confirmed=True,
         )
@@ -846,9 +959,73 @@ class LoadAndCommitTests(unittest.TestCase):
             set(self.hub.create_calls[0][1]),
             {PUBLIC_FINAL_PATH, AUDIT_PATH, RELEASE_PATH},
         )
+        self.assertEqual(
+            self.hub.download_calls,
+            [
+                (SOURCE_REVISION, RELEASE_PATH),
+                (FINAL_REVISION, PUBLIC_FINAL_PATH),
+                (FINAL_REVISION, AUDIT_PATH),
+                (FINAL_REVISION, RELEASE_PATH),
+            ],
+        )
         finalized_release = json.loads(self.hub.files[RELEASE_PATH])
         self.assertTrue(finalized_release["finalized"])
         self.assertFalse(finalized_release["enabled"])
+        self.assertEqual(finalized_release["finalized_at"], "2026-10-02T00:00:00Z")
+
+    def test_commit_time_cannot_precede_the_immutable_plan_time(self):
+        loaded = self.load()
+        plan = build_finalization(loaded, NOW)
+
+        with self.assertRaisesRegex(FinalizationError, "plan time"):
+            commit_finalization(
+                self.hub,
+                loaded,
+                plan,
+                token="private-token-sentinel",
+                expected_private_sha=SOURCE_REVISION,
+                now=NOW - dt.timedelta(microseconds=1),
+                yes=True,
+                maintenance_confirmed=True,
+            )
+        self.assertEqual(self.hub.create_calls, [])
+
+    def test_post_commit_verification_refuses_unconfirmed_write_states(self):
+        class AckWithoutWriteHub(FakeHub):
+            def create_commit(self, **kwargs):
+                self.create_calls.append((kwargs["parent_commit"], ()))
+                return SimpleNamespace(oid=FINAL_REVISION)
+
+        class WrongArtifactHub(FakeHub):
+            def create_commit(self, **kwargs):
+                result = super().create_commit(**kwargs)
+                self.files[PUBLIC_FINAL_PATH] = b"{}\n"
+                return result
+
+        class ParentRevisionAckHub(FakeHub):
+            def create_commit(self, **kwargs):
+                super().create_commit(**kwargs)
+                return SimpleNamespace(oid=SOURCE_REVISION)
+
+        for hub_type in (AckWithoutWriteHub, WrongArtifactHub, ParentRevisionAckHub):
+            with self.subTest(hub=hub_type.__name__):
+                hub = hub_type(self.workspace.name, hub_files(self.record))
+                loaded = self.load(hub=hub)
+                plan = build_finalization(loaded, NOW)
+
+                with self.assertRaisesRegex(
+                    FinalizationError, "may have succeeded.*current private revision"
+                ):
+                    commit_finalization(
+                        hub,
+                        loaded,
+                        plan,
+                        token="private-token-sentinel",
+                        expected_private_sha=SOURCE_REVISION,
+                        now=NOW,
+                        yes=True,
+                        maintenance_confirmed=True,
+                    )
 
     def test_finalized_rerun_is_idempotent_and_mismatch_refuses(self):
         loaded = self.load()
