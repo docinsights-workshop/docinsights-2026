@@ -16,6 +16,7 @@ from pathlib import Path
 import re
 import resource
 import select
+import shutil
 import signal
 import stat
 import struct
@@ -35,6 +36,7 @@ TASK_KEYS = frozenset(("instance_id", "user_query", "document_pdf"))
 LABEL_KEYS = frozenset(("instance_id", "answer", "evidence"))
 BLOCK_ID = re.compile(r"b[0-9]+$")
 OCR_HEADER = re.compile(r"^[ \t]*(b[0-9]+):")
+RELEASE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
 PYMUPDF_VERSION = "1.26.3"
 TESSERACT_VERSION = "5.5.1"
@@ -70,6 +72,44 @@ PAGE_WORKFLOW_TIMEOUT_SECONDS = 45
 PAGE_WORKER_CPU_SECONDS = 40
 PAGE_WORKER_OPEN_FILES = 64
 MAX_EVIDENCE_IDS_PER_TASK = 1024
+MAX_PUBLIC_TASKS_BYTES = 16 * 1024 * 1024
+MAX_PUBLIC_MANIFEST_BYTES = 1024 * 1024
+MAX_PUBLIC_CHECKSUM_BYTES = 4 * 1024 * 1024
+
+PUBLIC_MANIFEST_RELATIVE_PATH = "test/release.json"
+PUBLIC_TASKS_RELATIVE_PATH = "test/tasks.jsonl"
+PUBLIC_CHECKSUMS_RELATIVE_PATH = "test/SHA256SUMS"
+PUBLIC_DOCUMENTS_RELATIVE_PATH = "test/documents"
+
+_PUBLIC_MANIFEST_KEYS = frozenset(
+    (
+        "schema_version",
+        "release_id",
+        "counts",
+        "sorted_ids_sha256",
+        "task_manifest_sha256",
+        "pdf_inventory_sha256",
+    )
+)
+_PUBLIC_FORBIDDEN_FIELD = re.compile(
+    r"(^|[_-])(answers?|evidence|labels?|gold|private|source[_-]?mappings?|"
+    r"source[_-]?(file|path|document)|organizer|notes?|correctness|per[_-]?example)($|[_-])",
+    re.IGNORECASE,
+)
+_EMBEDDED_FORBIDDEN_FIELD = re.compile(
+    rb'''["']\s*(?:answers?|evidence|labels?|gold|private|source[_-]?mappings?|'''
+    rb'''source[_-]?(?:file|path|document)|organizer|notes?|correctness|per[_-]?example)'''
+    rb'''\s*["']\s*:''',
+    re.IGNORECASE,
+)
+_ARCHIVE_MAGICS = (
+    b"PK\x03\x04",
+    b"PK\x05\x06",
+    b"PK\x07\x08",
+    b"\x1f\x8b",
+    b"7z\xbc\xaf'\x1c",
+    b"Rar!\x1a\x07",
+)
 
 _PAGE_RESULT_HEADER = struct.Struct(">Q")
 _DOCUMENT_PROBE_RESULT = struct.Struct(">I")
@@ -922,7 +962,7 @@ def _pdf_inventory_digest(paths: Iterable[Path]) -> str:
 
 def build_release_manifest(validated: ValidatedTestSource, release_id: str) -> dict:
     """Return a deterministic, sanitized manifest with private values only hashed."""
-    if not isinstance(release_id, str) or not release_id.strip() or release_id != release_id.strip():
+    if not isinstance(release_id, str) or not RELEASE_ID.fullmatch(release_id):
         raise ValidationError("Release ID is invalid.")
     return {
         "schema_version": SCHEMA_VERSION,
@@ -938,3 +978,428 @@ def build_release_manifest(validated: ValidatedTestSource, release_id: str) -> d
         "private_labels_sha256": _sha256(_canonical_rows(validated.label_rows)),
         "visibility_audit": _visibility_audit_contract(),
     }
+
+
+def _canonical_json_document(value: object) -> bytes:
+    return (
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + "\n"
+    ).encode("utf-8")
+
+
+def _write_new_file(path: Path, payload: bytes, mode: int) -> None:
+    """Create one file without following an existing link and set its exact mode."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = None
+    try:
+        descriptor = os.open(path, flags, mode)
+        os.fchmod(descriptor, mode)
+        with os.fdopen(descriptor, "wb", closefd=True) as output:
+            descriptor = None
+            output.write(payload)
+            output.flush()
+            os.fsync(output.fileno())
+    except OSError as exc:
+        raise ValidationError("A staging file could not be created safely.") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _safe_relative_file_name(value: str) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and not value.startswith(("/", "\\"))
+        and "\\" not in value
+        and all(part not in {"", ".", ".."} for part in value.split("/"))
+        and all(ord(character) >= 32 and ord(character) != 127 for character in value)
+    )
+
+
+def _walk_payload(root: Path) -> tuple[set[str], set[str]]:
+    """Return regular files/directories without following any link or special node."""
+    try:
+        root_stat = root.lstat()
+    except OSError as exc:
+        raise ValidationError("Public payload root is absent or unreadable.") from exc
+    if not stat.S_ISDIR(root_stat.st_mode) or stat.S_ISLNK(root_stat.st_mode):
+        _fail("Public payload root is not a real directory.")
+
+    files: set[str] = set()
+    directories: set[str] = set()
+
+    def visit(directory: Path) -> None:
+        try:
+            entries = tuple(os.scandir(directory))
+        except OSError as exc:
+            raise ValidationError("Public payload tree is unreadable.") from exc
+        for entry in entries:
+            relative = (directory / entry.name).relative_to(root).as_posix()
+            if not _safe_relative_file_name(relative):
+                _fail("Public payload contains an unsafe path.")
+            try:
+                entry_stat = entry.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise ValidationError("Public payload tree is unreadable.") from exc
+            if entry.is_symlink():
+                _fail("Public payload contains a symbolic link.")
+            if stat.S_ISDIR(entry_stat.st_mode):
+                directories.add(relative)
+                visit(directory / entry.name)
+            elif stat.S_ISREG(entry_stat.st_mode):
+                files.add(relative)
+            else:
+                _fail("Public payload contains a special file.")
+
+    visit(root)
+    return files, directories
+
+
+def _contains_forbidden_field(value: object) -> bool:
+    if isinstance(value, dict):
+        return any(
+            not isinstance(key, str)
+            or _PUBLIC_FORBIDDEN_FIELD.search(key)
+            or _contains_forbidden_field(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return any(_contains_forbidden_field(item) for item in value)
+    return False
+
+
+def _public_pdf_inventory_digest(paths: Iterable[Path]) -> str:
+    return _pdf_inventory_digest(sorted(paths, key=lambda path: path.name))
+
+
+def audit_public_payload(
+    path: str | Path,
+    *,
+    forbidden_values: Iterable[str | bytes] = (),
+) -> dict:
+    """Fail closed unless a staged public payload is exact and label-free.
+
+    ``forbidden_values`` lets the staging caller prove that organizer-only
+    scalar values were not copied into public metadata. PDF pages are not
+    searched for those values because a grounded answer may legitimately be
+    visible in the source document; they are still scanned for embedded label
+    records and archive/polyglot payloads.
+    """
+    root = Path(path)
+    files, directories = _walk_payload(root)
+    if directories != {"test", PUBLIC_DOCUMENTS_RELATIVE_PATH}:
+        _fail("Public payload directory inventory is not exact.")
+
+    fixed_files = {
+        PUBLIC_TASKS_RELATIVE_PATH,
+        PUBLIC_MANIFEST_RELATIVE_PATH,
+        PUBLIC_CHECKSUMS_RELATIVE_PATH,
+    }
+    pdf_files = files - fixed_files
+    if (
+        not pdf_files
+        or any(
+            not name.startswith(f"{PUBLIC_DOCUMENTS_RELATIVE_PATH}/")
+            or not name.lower().endswith(".pdf")
+            for name in pdf_files
+        )
+        or files != fixed_files | pdf_files
+    ):
+        _fail("Public payload file inventory is not exact.")
+
+    task_path = root / PUBLIC_TASKS_RELATIVE_PATH
+    task_bytes = _read_bounded_regular_file(
+        task_path,
+        MAX_PUBLIC_TASKS_BYTES,
+        "Public task manifest",
+    )
+    try:
+        task_rows = [json.loads(line) for line in task_bytes.decode("utf-8").splitlines()]
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValidationError("Public task manifest is malformed.") from exc
+    if not task_rows or any(not isinstance(row, dict) or set(row) != TASK_KEYS for row in task_rows):
+        _fail("Public task manifest schema is not exact.")
+    if _contains_forbidden_field(task_rows):
+        _fail("Public task manifest contains a forbidden field.")
+
+    task_ids: list[str] = []
+    for row in task_rows:
+        instance_id = row["instance_id"]
+        if (
+            not _valid_identifier(instance_id)
+            or not isinstance(row["user_query"], str)
+            or not row["user_query"].strip()
+            or row["document_pdf"]
+            != f"{PUBLIC_DOCUMENTS_RELATIVE_PATH}/{instance_id}.pdf"
+            or not _safe_relative_file_name(row["document_pdf"])
+        ):
+            _fail("Public task manifest contains an unsafe row.")
+        task_ids.append(instance_id)
+    if task_ids != sorted(set(task_ids)):
+        _fail("Public task manifest IDs are not unique and sorted.")
+    if task_bytes != _canonical_rows(task_rows):
+        _fail("Public task manifest is not canonical.")
+    expected_pdf_files = {
+        f"{PUBLIC_DOCUMENTS_RELATIVE_PATH}/{instance_id}.pdf"
+        for instance_id in task_ids
+    }
+    if pdf_files != expected_pdf_files:
+        _fail("Public tasks and PDFs are not a bijection.")
+
+    public_manifest_path = root / PUBLIC_MANIFEST_RELATIVE_PATH
+    public_manifest_bytes = _read_bounded_regular_file(
+        public_manifest_path,
+        MAX_PUBLIC_MANIFEST_BYTES,
+        "Public release manifest",
+    )
+    try:
+        public_manifest = json.loads(public_manifest_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValidationError("Public release manifest is malformed.") from exc
+    if (
+        not isinstance(public_manifest, dict)
+        or set(public_manifest) != _PUBLIC_MANIFEST_KEYS
+        or not isinstance(public_manifest.get("release_id"), str)
+        or not RELEASE_ID.fullmatch(public_manifest["release_id"])
+        or _contains_forbidden_field(public_manifest)
+        or public_manifest_bytes != _canonical_json_document(public_manifest)
+    ):
+        _fail("Public release manifest schema is not exact.")
+
+    pdf_paths = [root / name for name in sorted(pdf_files)]
+    for pdf_path in pdf_paths:
+        payload = _read_bounded_regular_file(pdf_path, MAX_PDF_BYTES, "Public PDF")
+        if (
+            not payload.startswith(b"%PDF-")
+            or not payload.rstrip().endswith(b"%%EOF")
+            or payload.startswith(_ARCHIVE_MAGICS)
+            or _EMBEDDED_FORBIDDEN_FIELD.search(payload)
+        ):
+            _fail("Public PDF contains an unsafe embedded payload.")
+
+    expected_public_manifest = {
+        "schema_version": SCHEMA_VERSION,
+        "release_id": public_manifest.get("release_id"),
+        "counts": {"tasks": len(task_rows), "pdfs": len(pdf_paths)},
+        "sorted_ids_sha256": _sha256(
+            "".join(f"{instance_id}\n" for instance_id in task_ids).encode("utf-8")
+        ),
+        "task_manifest_sha256": _sha256(task_bytes),
+        "pdf_inventory_sha256": _public_pdf_inventory_digest(pdf_paths),
+    }
+    if public_manifest != expected_public_manifest:
+        _fail("Public release manifest hashes do not match the payload.")
+
+    checksum_path = root / PUBLIC_CHECKSUMS_RELATIVE_PATH
+    checksum_bytes = _read_bounded_regular_file(
+        checksum_path,
+        MAX_PUBLIC_CHECKSUM_BYTES,
+        "Public checksum inventory",
+    )
+    checksum_targets = sorted(
+        {PUBLIC_TASKS_RELATIVE_PATH, PUBLIC_MANIFEST_RELATIVE_PATH} | pdf_files
+    )
+    expected_checksums = b"".join(
+        f"{_sha256((root / name).read_bytes())}  {name.removeprefix('test/')}\n".encode(
+            "ascii"
+        )
+        for name in checksum_targets
+    )
+    if checksum_bytes != expected_checksums:
+        _fail("Public checksum inventory does not match the payload.")
+
+    forbidden = []
+    for value in forbidden_values:
+        encoded = value if isinstance(value, bytes) else str(value).encode("utf-8")
+        if encoded:
+            forbidden.append(encoded)
+    public_metadata = task_bytes + public_manifest_bytes + checksum_bytes
+    if any(value in public_metadata for value in forbidden):
+        _fail("Public metadata contains an organizer-only value.")
+
+    return public_manifest
+
+
+def _normalized_public_tasks(validated: ValidatedTestSource) -> tuple[dict, ...]:
+    tasks_by_id = {row.get("instance_id"): row for row in validated.task_rows}
+    if tuple(sorted(tasks_by_id)) != validated.ids or len(tasks_by_id) != len(validated.task_rows):
+        _fail("Validated source task IDs are inconsistent.")
+    rows = []
+    for instance_id in validated.ids:
+        row = tasks_by_id[instance_id]
+        if set(row) != TASK_KEYS or row.get("document_pdf") != f"documents/{instance_id}.pdf":
+            _fail("Validated source task schema is inconsistent.")
+        rows.append(
+            {
+                "instance_id": instance_id,
+                "user_query": row["user_query"],
+                "document_pdf": f"{PUBLIC_DOCUMENTS_RELATIVE_PATH}/{instance_id}.pdf",
+            }
+        )
+    return tuple(rows)
+
+
+def _prepare_output_root(path: Path, mode: int) -> None:
+    path.mkdir(mode=mode)
+    path.chmod(mode)
+
+
+def _path_entry_exists(path: Path) -> bool:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise ValidationError("A staging destination could not be inspected safely.") from exc
+    return True
+
+
+def stage_release(
+    validated: ValidatedTestSource,
+    public_root: str | Path,
+    private_root: str | Path,
+    release_id: str,
+) -> dict:
+    """Stage deterministic public and private payloads without publishing them."""
+    if not isinstance(validated, ValidatedTestSource):
+        _fail("A validated test source is required for staging.")
+    source_manifest = build_release_manifest(validated, release_id)
+    public_destination = Path(public_root).absolute()
+    private_destination = Path(private_root).absolute()
+    source_root = validated.source_root.absolute()
+    try:
+        public_resolved = public_destination.resolve(strict=False)
+        private_resolved = private_destination.resolve(strict=False)
+        source_resolved = source_root.resolve(strict=True)
+    except OSError as exc:
+        raise ValidationError("Staging paths could not be resolved safely.") from exc
+    if (
+        public_resolved == private_resolved
+        or public_resolved == source_resolved
+        or private_resolved == source_resolved
+        or public_resolved in private_resolved.parents
+        or private_resolved in public_resolved.parents
+        or public_resolved in source_resolved.parents
+        or private_resolved in source_resolved.parents
+        or source_resolved in public_resolved.parents
+        or source_resolved in private_resolved.parents
+    ):
+        _fail("Public, private, and source roots must be separate.")
+    if _path_entry_exists(public_destination) or _path_entry_exists(private_destination):
+        _fail("Staging destinations must not already exist.")
+
+    tasks_by_id = _validate_tasks(list(validated.task_rows))
+    labels_by_id = _validate_labels(list(validated.label_rows))
+    if tuple(sorted(tasks_by_id)) != validated.ids or set(tasks_by_id) != set(labels_by_id):
+        _fail("Validated source rows are inconsistent.")
+    normalized_tasks = _normalized_public_tasks(validated)
+    task_bytes = _canonical_rows(normalized_tasks)
+    label_bytes = _canonical_rows(validated.label_rows)
+    pdfs_by_name = {path.name: path for path in validated.pdf_paths}
+    expected_pdf_names = {f"{instance_id}.pdf" for instance_id in validated.ids}
+    if set(pdfs_by_name) != expected_pdf_names:
+        _fail("Validated source PDF inventory is inconsistent.")
+
+    public_manifest = {
+        "schema_version": SCHEMA_VERSION,
+        "release_id": release_id,
+        "counts": {"tasks": len(normalized_tasks), "pdfs": len(pdfs_by_name)},
+        "sorted_ids_sha256": source_manifest["sorted_ids_sha256"],
+        "task_manifest_sha256": _sha256(task_bytes),
+        "pdf_inventory_sha256": source_manifest["pdf_inventory_sha256"],
+    }
+    public_manifest_bytes = _canonical_json_document(public_manifest)
+    private_manifest = {
+        "schema_version": SCHEMA_VERSION,
+        "release_id": release_id,
+        "counts": source_manifest["counts"],
+        "sorted_ids_sha256": source_manifest["sorted_ids_sha256"],
+        "task_manifest_sha256": _sha256(task_bytes),
+        "gold_sha256": _sha256(label_bytes),
+        "pdf_inventory_sha256": source_manifest["pdf_inventory_sha256"],
+        "visibility_audit": source_manifest["visibility_audit"],
+        "enabled": False,
+        "max_attempts": 3,
+        "feedback_policy": "first-attempt-only",
+        "finalized": False,
+    }
+
+    try:
+        for parent in (public_destination.parent, private_destination.parent):
+            parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ValidationError("Staging parent directories could not be prepared safely.") from exc
+    public_temporary = Path(
+        tempfile.mkdtemp(prefix=".docsem-public-stage-", dir=public_destination.parent)
+    )
+    private_temporary = Path(
+        tempfile.mkdtemp(prefix=".docsem-private-stage-", dir=private_destination.parent)
+    )
+    public_committed = False
+    private_committed = False
+    try:
+        public_temporary.chmod(0o700)
+        private_temporary.chmod(0o700)
+        public_test = public_temporary / "test"
+        public_documents = public_test / "documents"
+        private_directory = private_temporary / "private"
+        _prepare_output_root(public_test, 0o755)
+        _prepare_output_root(public_documents, 0o755)
+        _prepare_output_root(private_directory, 0o700)
+
+        _write_new_file(public_test / "tasks.jsonl", task_bytes, 0o644)
+        _write_new_file(public_test / "release.json", public_manifest_bytes, 0o644)
+        for name in sorted(pdfs_by_name):
+            pdf_bytes = _read_bounded_regular_file(
+                pdfs_by_name[name], MAX_PDF_BYTES, "Validated source PDF"
+            )
+            _write_new_file(public_documents / name, pdf_bytes, 0o644)
+
+        checksum_targets = sorted(
+            ["tasks.jsonl", "release.json"]
+            + [f"documents/{name}" for name in pdfs_by_name]
+        )
+        checksum_bytes = b"".join(
+            f"{_sha256((public_test / name).read_bytes())}  {name}\n".encode("ascii")
+            for name in checksum_targets
+        )
+        _write_new_file(public_test / "SHA256SUMS", checksum_bytes, 0o644)
+
+        _write_new_file(private_directory / "test_labels.jsonl", label_bytes, 0o600)
+        _write_new_file(
+            private_directory / "test_release.json",
+            _canonical_json_document(private_manifest),
+            0o600,
+        )
+        audit_public_payload(
+            public_temporary,
+            forbidden_values=tuple(
+                [row["answer"] for row in validated.label_rows]
+                + [
+                    evidence_id
+                    for row in validated.label_rows
+                    for evidence_id in row["evidence"]
+                ]
+            ),
+        )
+
+        public_temporary.chmod(0o755)
+        os.replace(private_temporary, private_destination)
+        private_committed = True
+        os.replace(public_temporary, public_destination)
+        public_committed = True
+    except ValidationError:
+        raise
+    except OSError as exc:
+        raise ValidationError("Staging payloads could not be committed safely.") from exc
+    finally:
+        if not public_committed:
+            shutil.rmtree(public_temporary, ignore_errors=True)
+        if not private_committed:
+            shutil.rmtree(private_temporary, ignore_errors=True)
+        if private_committed and not public_committed:
+            shutil.rmtree(private_destination, ignore_errors=True)
+
+    return private_manifest

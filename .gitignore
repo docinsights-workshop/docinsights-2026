@@ -9,6 +9,9 @@ competition/hf-dataset/train/
 competition/hf-dataset/val/
 competition/hf-dataset/examples/
 
+# Generated held-out test release payloads are staged outside Git history.
+competition/hf-test-staging/
+
 # Never commit organizer-only labels, submissions, or leaderboard state here.
 competition/hf-submissions/private/
 competition/hf-submissions/submissions/

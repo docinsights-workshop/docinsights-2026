@@ -6,7 +6,9 @@ import io
 import json
 import os
 import select
+import shutil
 import signal
+import stat
 import time
 import tempfile
 import unittest
@@ -961,6 +963,248 @@ class PrepareDocsemTestReleaseTests(unittest.TestCase):
             output.write(source.root / "tasks.jsonl", "tasks.jsonl")
         with self.assertRaises(ValidationError):
             validate_source(archive, (), ())
+
+    def test_stages_exact_deterministic_public_and_private_payloads(self):
+        """Catches nondeterminism, private metadata leakage, and altered PDFs."""
+        source = self.make_source()
+        validated = validate_source(source.root, (), ())
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+
+        manifests = []
+        staged_trees = []
+        for number in (1, 2):
+            public_root = root / f"public-{number}"
+            private_root = root / f"private-{number}"
+            manifests.append(
+                release_module.stage_release(
+                    validated,
+                    public_root,
+                    private_root,
+                    "synthetic-release-v1",
+                )
+            )
+            public_files = {
+                path.relative_to(public_root).as_posix()
+                for path in public_root.rglob("*")
+                if path.is_file()
+            }
+            self.assertEqual(
+                public_files,
+                {
+                    "test/SHA256SUMS",
+                    "test/release.json",
+                    "test/tasks.jsonl",
+                    "test/documents/synthetic-1.pdf",
+                    "test/documents/synthetic-2.pdf",
+                    "test/documents/synthetic-3.pdf",
+                },
+            )
+            self.assertEqual(
+                {
+                    path.relative_to(private_root).as_posix()
+                    for path in private_root.rglob("*")
+                    if path.is_file()
+                },
+                {"private/test_labels.jsonl", "private/test_release.json"},
+            )
+
+            task_bytes = (public_root / "test/tasks.jsonl").read_bytes()
+            task_rows = [json.loads(line) for line in task_bytes.splitlines()]
+            self.assertEqual(
+                task_rows,
+                [
+                    {
+                        "document_pdf": f"test/documents/synthetic-{item}.pdf",
+                        "instance_id": f"synthetic-{item}",
+                        "user_query": f"Synthetic query {item}",
+                    }
+                    for item in range(1, 4)
+                ],
+            )
+            for pdf in validated.pdf_paths:
+                self.assertEqual(
+                    (public_root / "test/documents" / pdf.name).read_bytes(),
+                    pdf.read_bytes(),
+                )
+
+            public_manifest = json.loads((public_root / "test/release.json").read_text())
+            serialized_public = json.dumps(public_manifest, sort_keys=True)
+            self.assertNotIn("private", serialized_public.casefold())
+            self.assertNotIn("answer", serialized_public.casefold())
+            self.assertNotIn("evidence", serialized_public.casefold())
+            self.assertNotIn("gold", serialized_public.casefold())
+            self.assertEqual(
+                public_manifest["task_manifest_sha256"],
+                hashlib.sha256(task_bytes).hexdigest(),
+            )
+
+            private_files = (
+                private_root / "private/test_labels.jsonl",
+                private_root / "private/test_release.json",
+            )
+            self.assertTrue(
+                all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in private_files)
+            )
+            self.assertTrue(
+                all(
+                    stat.S_IMODE(path.stat().st_mode) == 0o700
+                    for path in (private_root, private_root / "private")
+                )
+            )
+            self.assertEqual(
+                (private_root / "private/test_labels.jsonl").read_bytes(),
+                release_module._canonical_rows(validated.label_rows),
+            )
+            private_manifest = json.loads(
+                (private_root / "private/test_release.json").read_text()
+            )
+            self.assertEqual(private_manifest, manifests[-1])
+            self.assertEqual(private_manifest["enabled"], False)
+            self.assertEqual(private_manifest["finalized"], False)
+            self.assertEqual(private_manifest["max_attempts"], 3)
+            self.assertEqual(private_manifest["feedback_policy"], "first-attempt-only")
+
+            release_module.audit_public_payload(public_root)
+            staged_trees.append(
+                {
+                    path.relative_to(public_root).as_posix(): path.read_bytes()
+                    for path in public_root.rglob("*")
+                    if path.is_file()
+                }
+            )
+
+        self.assertEqual(manifests[0], manifests[1])
+        self.assertEqual(staged_trees[0], staged_trees[1])
+
+    def test_public_payload_audit_has_positive_leakage_controls(self):
+        """Catches forbidden paths, fields, values, archives, and unsafe nodes."""
+        source = self.make_source()
+        validated = validate_source(source.root, (), ())
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        good_public = root / "good-public"
+        release_module.stage_release(
+            validated,
+            good_public,
+            root / "good-private",
+            "synthetic-release-v1",
+        )
+
+        def copied(name):
+            target = root / name
+            shutil.copytree(good_public, target)
+            return target
+
+        mutations = []
+
+        public = copied("label-filename")
+        (public / "test/labels.jsonl").write_text("{}\n", encoding="utf-8")
+        mutations.append(("label filename", public, {}))
+
+        public = copied("answer-field")
+        rows = [json.loads(line) for line in (public / "test/tasks.jsonl").read_text().splitlines()]
+        rows[0]["answer"] = "leaked"
+        write_jsonl(public / "test/tasks.jsonl", rows)
+        mutations.append(("answer field", public, {}))
+
+        public = copied("evidence-field")
+        manifest = json.loads((public / "test/release.json").read_text())
+        manifest["evidence"] = ["b01"]
+        (public / "test/release.json").write_text(json.dumps(manifest), encoding="utf-8")
+        mutations.append(("evidence field", public, {}))
+
+        for name in ("private", "source_mapping", "organizer_notes"):
+            public = copied(name)
+            (public / "test" / f"{name}.json").write_text("{}", encoding="utf-8")
+            mutations.append((name, public, {}))
+
+        public = copied("archive")
+        with zipfile.ZipFile(public / "test/payload.zip", "w") as archive:
+            archive.writestr("labels.jsonl", "{}\n")
+        mutations.append(("archive", public, {}))
+
+        public = copied("symlink")
+        (public / "test/alias.pdf").symlink_to("documents/synthetic-1.pdf")
+        mutations.append(("symlink", public, {}))
+
+        public = copied("special")
+        os.mkfifo(public / "test/unexpected.pipe", mode=0o600)
+        mutations.append(("special file", public, {}))
+
+        public = copied("unexpected-directory")
+        (public / "test/extra").mkdir()
+        mutations.append(("unexpected directory", public, {}))
+
+        public = copied("unsafe-task-path")
+        rows = [json.loads(line) for line in (public / "test/tasks.jsonl").read_text().splitlines()]
+        rows[0]["document_pdf"] = "test/documents/../synthetic-1.pdf"
+        write_jsonl(public / "test/tasks.jsonl", rows)
+        mutations.append(("unsafe task path", public, {}))
+
+        public = copied("embedded-content")
+        pdf = public / "test/documents/synthetic-1.pdf"
+        pdf.write_bytes(pdf.read_bytes() + b'\n{"answer":"leaked"}\n')
+        mutations.append(("embedded label content", public, {}))
+
+        public = copied("private-value")
+        rows = [json.loads(line) for line in (public / "test/tasks.jsonl").read_text().splitlines()]
+        rows[0]["user_query"] = "private-synthetic-answer-1"
+        write_jsonl(public / "test/tasks.jsonl", rows)
+        mutations.append(
+            (
+                "private value",
+                public,
+                {"forbidden_values": ("private-synthetic-answer-1",)},
+            )
+        )
+
+        for name, public, keyword_arguments in mutations:
+            with self.subTest(leakage_case=name), self.assertRaises(ValidationError):
+                release_module.audit_public_payload(public, **keyword_arguments)
+
+    def test_staging_is_quiet_and_does_not_modify_existing_public_splits(self):
+        """Catches staging that logs private rows or rewrites train/validation."""
+        source = self.make_source()
+        validated = validate_source(source.root, (), ())
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        existing = root / "dataset"
+        for split in ("train", "validation"):
+            (existing / split / "documents").mkdir(parents=True)
+            (existing / split / "tasks.jsonl").write_text(
+                f'{{"instance_id":"{split}-1"}}\n', encoding="utf-8"
+            )
+            (existing / split / "documents" / f"{split}-1.pdf").write_bytes(
+                f"unchanged-{split}".encode("ascii")
+            )
+
+        def snapshot(path):
+            return {
+                item.relative_to(path).as_posix(): hashlib.sha256(item.read_bytes()).hexdigest()
+                for item in path.rglob("*")
+                if item.is_file()
+            }
+
+        before = snapshot(existing)
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            release_module.stage_release(
+                validated,
+                root / "staging/public",
+                root / "staging/private",
+                "synthetic-release-v1",
+            )
+        after = snapshot(existing)
+
+        self.assertEqual(after, before)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertNotIn("private-synthetic-answer", stdout.getvalue() + stderr.getvalue())
 
 
 if __name__ == "__main__":

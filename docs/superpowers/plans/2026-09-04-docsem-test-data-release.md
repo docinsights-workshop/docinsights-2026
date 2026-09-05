@@ -120,29 +120,29 @@ git commit -m "Validate image-backed DocSem evidence safely"
 **Interfaces:**
 - Produces: `stage_release(validated, public_root, private_root, release_id) -> manifest`.
 
-- [ ] **Step 1: Write failing staging tests**
+- [x] **Step 1: Write failing staging tests**
 
 Assert public staging contains exactly `test/tasks.jsonl`, `test/documents/*.pdf`, `test/SHA256SUMS`, and a public manifest without private fields. Assert private staging contains `private/test_labels.jsonl` and `private/test_release.json` with mode `0600`; private directories use mode `0700`.
 
-- [ ] **Step 2: Implement deterministic staging**
+- [x] **Step 2: Implement deterministic staging**
 
 Normalize public `document_pdf` to `test/documents/<filename>`, copy PDFs byte-for-byte, emit sorted checksums, and write private files without printing rows or answers.
 
-- [ ] **Step 3: Add a positive-control public leakage scanner**
+- [x] **Step 3: Add a positive-control public leakage scanner**
 
 Implement `audit_public_payload(path)` and prove it rejects fixtures containing label filenames, `answer`/`evidence` fields, private path names, source mappings, or ZIP archives.
 
-- [ ] **Step 4: Verify staging does not alter existing public splits**
+- [x] **Step 4: Verify staging does not alter existing public splits**
 
 Hash current train/validation manifests and PDF inventories before and after staging; assert equality.
 
-- [ ] **Step 5: Run staging and leakage tests**
+- [x] **Step 5: Run staging and leakage tests**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 /Users/aamita/miniconda3/bin/python scripts/test_prepare_docsem_test_release.py`
 
 Expected: public/private separation, file-mode, hash, and positive-control leakage tests pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add .gitignore scripts/prepare_docsem_test_release.py scripts/test_prepare_docsem_test_release.py
