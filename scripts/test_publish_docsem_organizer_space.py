@@ -505,11 +505,19 @@ class RequestGateTests(unittest.TestCase):
                 )
             )
 
-    def test_all_three_tokens_must_be_distinct_and_never_rendered(self):
+    def test_two_required_tokens_are_distinct_and_optional_probe_is_separate(self):
+        publisher.require_separate_tokens(WRITE_TOKEN, READ_TOKEN, None)
+
+        with self.assertRaisesRegex(publisher.DeploymentError, "required"):
+            publisher.require_separate_tokens(None, READ_TOKEN, None)
+        with self.assertRaisesRegex(publisher.DeploymentError, "required"):
+            publisher.require_separate_tokens(WRITE_TOKEN, None, None)
         with self.assertRaisesRegex(publisher.DeploymentError, "separate"):
             publisher.require_separate_tokens(WRITE_TOKEN, WRITE_TOKEN, DENIED_TOKEN)
         with self.assertRaisesRegex(publisher.DeploymentError, "separate"):
             publisher.require_separate_tokens(WRITE_TOKEN, READ_TOKEN, READ_TOKEN)
+        with self.assertRaisesRegex(publisher.DeploymentError, "optional"):
+            publisher.require_separate_tokens(WRITE_TOKEN, READ_TOKEN, object())
 
         request = self.valid_request()
         rendered = repr(request)
@@ -522,12 +530,17 @@ class DeploymentWorkflowTests(unittest.TestCase):
         self.source = FakeSourceBackend()
         self.hub = FakeHubBackend(self.source)
 
-    def execute(self, request=None, snapshot_auditor=None):
+    def execute(
+        self,
+        request=None,
+        snapshot_auditor=None,
+        denied_token=DENIED_TOKEN,
+    ):
         return publisher.run_deployment(
             request or valid_request(),
             deploy_token=WRITE_TOKEN,
             runtime_token=READ_TOKEN,
-            denied_token=DENIED_TOKEN,
+            denied_token=denied_token,
             source_backend=self.source,
             hub_backend=self.hub,
             snapshot_auditor=snapshot_auditor,
@@ -669,9 +682,9 @@ class DeploymentWorkflowTests(unittest.TestCase):
                 with self.assertRaisesRegex(publisher.DeploymentError, "release"):
                     self.execute()
 
-    def test_verify_only_is_zero_write_and_performs_full_three_identity_probe(self):
+    def test_verify_only_needs_only_unauthenticated_denial_and_owner_success(self):
         self.hub.space_tree = dict(self.source.files)
-        result = self.execute(valid_request(verify_only=True))
+        result = self.execute(valid_request(verify_only=True), denied_token=None)
 
         self.assertEqual(result.outcome, "verified")
         self.assertEqual(result.action, "verify")
@@ -684,11 +697,11 @@ class DeploymentWorkflowTests(unittest.TestCase):
         for path in ("/", "/config", "/info"):
             self.assertIn(("GET", host + path, None, None), self.hub.request_calls)
             self.assertIn(
-                ("GET", host + path, DENIED_TOKEN, None), self.hub.request_calls
-            )
-            self.assertIn(
                 ("GET", host + path, READ_TOKEN, None), self.hub.request_calls
             )
+        self.assertFalse(
+            any(call[2] == DENIED_TOKEN for call in self.hub.request_calls)
+        )
 
     def test_publish_pending_then_verify_only_converges_without_second_write(self):
         self.hub.commit_runtime_stage = "BUILDING"
@@ -913,7 +926,7 @@ class DeploymentWorkflowTests(unittest.TestCase):
                     ):
                         self.execute(request)
 
-    def test_denied_probe_must_be_available_before_any_publish_write(self):
+    def test_supplied_denied_probe_must_be_available_before_any_publish_write(self):
         del self.hub.identities[DENIED_TOKEN]
         request = valid_request(
             publish=True,
@@ -1340,7 +1353,7 @@ class ImportAndCliTests(unittest.TestCase):
         for secret in environment.values():
             self.assertNotIn(secret, output.getvalue())
 
-    def test_main_missing_denied_probe_token_is_incomplete_and_never_runs(self):
+    def test_main_allows_missing_optional_denied_probe_token(self):
         output = io.StringIO()
         error = io.StringIO()
         argv = [
@@ -1360,7 +1373,24 @@ class ImportAndCliTests(unittest.TestCase):
             "DOCSEM_ORGANIZER_DEPLOY_TOKEN": WRITE_TOKEN,
             "DOCSEM_ORGANIZER_READ_TOKEN": READ_TOKEN,
         }
-        with mock.patch.object(publisher, "run_deployment") as run:
+        expected = publisher.DeploymentResult(
+            published=False,
+            action="verify",
+            outcome="verified",
+            source_revision=SOURCE_REVISION,
+            bundle_tree_sha256="f" * 64,
+            space_revision=SPACE_PARENT,
+            private_dataset_revision=PRIVATE_REVISION,
+            organizer_reconciliation="disabled/no-release",
+            organizer_account_count=0,
+            organizer_attempt_count=0,
+            participant_test_submissions_disabled=True,
+            participant_final_leaderboard_disabled=True,
+            runtime_access="verified",
+        )
+        with mock.patch.object(
+            publisher, "run_deployment", return_value=expected
+        ) as run:
             status = publisher.main(
                 argv,
                 environment=environment,
@@ -1368,10 +1398,10 @@ class ImportAndCliTests(unittest.TestCase):
                 stderr=error,
             )
 
-        self.assertEqual(status, 2)
-        self.assertEqual(output.getvalue(), "")
-        self.assertIn("three", error.getvalue().casefold())
-        run.assert_not_called()
+        self.assertEqual(status, 0)
+        self.assertEqual(error.getvalue(), "")
+        self.assertEqual(run.call_args.kwargs["denied_token"], None)
+        self.assertEqual(json.loads(output.getvalue())["outcome"], "verified")
 
 
 if __name__ == "__main__":

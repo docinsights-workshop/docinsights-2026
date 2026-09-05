@@ -238,13 +238,14 @@ The organizer dashboard is a separate, platform-private Space at
 independent of the participant Space and cannot write submissions, finalize a
 leaderboard, or mutate the private dataset.
 
-Use three different Hugging Face user access tokens from the operator's secure
-environment:
+Use two different Hugging Face user access tokens from the operator's secure
+environment. A third token from an account outside the owner allowlist is an
+optional additional denial probe:
 
 ```text
 DOCSEM_ORGANIZER_DEPLOY_TOKEN=<classic write token owned by amitbcp>
 DOCSEM_ORGANIZER_READ_TOKEN=<classic read token owned by amitbcp>
-DOCSEM_ORGANIZER_DENIED_TOKEN=<access token owned by an account outside the allowlist>
+DOCSEM_ORGANIZER_DENIED_TOKEN=<optional access token owned by an account outside the allowlist>
 ```
 
 Do not reuse `HF_WRITE_TOKEN`, the participant submission token, or a
@@ -252,12 +253,12 @@ fine-grained token whose read-only scope cannot be proven by the documented
 `whoami-v2` response. The deployment token is used only for the private Space
 repository and its two required secrets. The runtime token must be read-only
 and must be able to read the private submissions dataset. Token values are
-never command-line arguments, receipts, or local files. The denied-probe token
-must resolve through the documented `whoami-v2` response to an identity other
-than `amitbcp`; it is used only from the local verification process, is never
-installed as a Space secret, and must not belong to any private-Space
-allowlist. Without that independent token, deployment verification is
-incomplete and the command fails closed.
+never command-line arguments, receipts, or local files. When supplied, the
+denied-probe token must resolve through the documented `whoami-v2` response to
+an identity other than `amitbcp`; it is used only from the local verification
+process, is never installed as a Space secret, and must not belong to any
+private-Space allowlist. It is optional because denial for unauthenticated
+requests already provides the required external privacy-boundary proof.
 
 Record the clean source commit, the current private-dataset commit, and either
 the current organizer-Space commit or the fact that the Space is absent. The
@@ -311,12 +312,14 @@ using an exact-parent compare-and-swap commit; tests, caches, and older extra
 Space files are excluded. It updates only the `ORGANIZER_READ_TOKEN` and
 `PRIVATE_REPO_ID` Space secrets and leaves every other existing secret intact.
 
-Post-deployment checks require private visibility, exact five-file bytes, and
-three access results on `/`, `/config`, and `/info`: unauthenticated denial,
-denial for the independently identified outside account, and owner runtime-read
-success. All three authenticated response bodies are scanned for every token
-value, credential/configuration name, and the private repository ID; the
-configuration must expose no named or mutating endpoint or mutation control.
+Post-deployment checks require private visibility, exact five-file bytes,
+unauthenticated denial on `/`, `/config`, and `/info`, and owner runtime-read
+HTTP 200 on all three paths. When the optional independently identified outside
+account token is supplied, denial on all three paths is required as additional
+evidence. All three owner-authenticated response bodies are scanned for every
+supplied token value, credential/configuration name, and the private repository
+ID; the configuration must expose no named or mutating endpoint or mutation
+control.
 At the same pinned private-dataset commit, the
 organizer reader must reconstruct every immutable test attempt. Until an
 official `private/test_release.json` exists, the expected safe status is

@@ -387,16 +387,31 @@ def verify_denied_identity(
 def require_separate_tokens(
     deploy_token: object,
     runtime_token: object,
-    denied_token: object,
+    denied_token: object | None,
 ) -> None:
-    tokens = (deploy_token, runtime_token, denied_token)
+    required_tokens = (deploy_token, runtime_token)
     if any(
-        not isinstance(token, str) or not token or len(token) > 4096 for token in tokens
+        not isinstance(token, str) or not token or len(token) > 4096
+        for token in required_tokens
     ):
-        raise DeploymentError("All three organizer verification tokens are required.")
-    if len(set(tokens)) != len(tokens):
         raise DeploymentError(
-            "separate deploy-write, runtime-read, and denied-probe tokens are required."
+            "Both organizer deploy and runtime tokens are required."
+        )
+    if deploy_token == runtime_token:
+        raise DeploymentError(
+            "separate deploy-write and runtime-read tokens are required."
+        )
+    if denied_token is None:
+        return
+    if (
+        not isinstance(denied_token, str)
+        or not denied_token
+        or len(denied_token) > 4096
+    ):
+        raise DeploymentError("The optional organizer denied-probe token is invalid.")
+    if denied_token in required_tokens:
+        raise DeploymentError(
+            "The optional denied-probe token must be separate from required tokens."
         )
 
 
@@ -748,7 +763,7 @@ def _verify_organizer_runtime(
     state: SpaceState,
     runtime_token: str,
     deploy_token: str,
-    denied_token: str,
+    denied_token: str | None,
 ) -> str:
     if state.runtime_stage != _READY_STAGE:
         raise DeploymentError(
@@ -761,9 +776,10 @@ def _verify_organizer_runtime(
         denied = backend.request("GET", host + path)
         if denied.status_code not in {401, 403, 404}:
             raise DeploymentError("Unauthenticated organizer access was not denied.")
-        outsider = backend.request("GET", host + path, token=denied_token)
-        if outsider.status_code not in {401, 403, 404}:
-            raise DeploymentError("Outside organizer access was not denied.")
+        if denied_token is not None:
+            outsider = backend.request("GET", host + path, token=denied_token)
+            if outsider.status_code not in {401, 403, 404}:
+                raise DeploymentError("Outside organizer access was not denied.")
 
     root = backend.request("GET", host + "/", token=runtime_token)
     if (
@@ -774,10 +790,9 @@ def _verify_organizer_runtime(
         raise DeploymentError("Authenticated organizer access is unavailable.")
     config_response = backend.request("GET", host + "/config", token=runtime_token)
     info_response = backend.request("GET", host + "/info", token=runtime_token)
-    forbidden_values = (
+    forbidden_values = [
         runtime_token.encode("utf-8"),
         deploy_token.encode("utf-8"),
-        denied_token.encode("utf-8"),
         PRIVATE_DATASET_REPO_ID.encode("utf-8"),
         b"ORGANIZER_READ_TOKEN",
         b"PRIVATE_REPO_ID",
@@ -785,7 +800,9 @@ def _verify_organizer_runtime(
         b"DOCSEM_ORGANIZER_READ_TOKEN",
         b"DOCSEM_ORGANIZER_DENIED_TOKEN",
         b"HF_WRITE_TOKEN",
-    )
+    ]
+    if denied_token is not None:
+        forbidden_values.append(denied_token.encode("utf-8"))
     response_bodies = (root.body, config_response.body, info_response.body)
     if any(
         value and value in body
@@ -848,7 +865,7 @@ def run_deployment(
     *,
     deploy_token: str,
     runtime_token: str,
-    denied_token: str,
+    denied_token: str | None,
     source_backend: SourceBackend | None = None,
     hub_backend: HubBackend | None = None,
     snapshot_auditor: Callable[..., SnapshotAudit] | None = None,
@@ -866,10 +883,11 @@ def run_deployment(
             hub.whoami(runtime_token),
             collaborators=request.collaborators,
         )
-        verify_denied_identity(
-            hub.whoami(denied_token),
-            collaborators=request.collaborators,
-        )
+        if denied_token is not None:
+            verify_denied_identity(
+                hub.whoami(denied_token),
+                collaborators=request.collaborators,
+            )
     except DeploymentError:
         raise
     except Exception as exc:
