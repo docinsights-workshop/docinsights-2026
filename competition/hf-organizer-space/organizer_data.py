@@ -7,7 +7,6 @@ source of leaderboard rows.
 
 from __future__ import annotations
 
-import copy
 import datetime as dt
 import hashlib
 import json
@@ -15,6 +14,7 @@ import math
 import re
 import sys
 import tempfile
+import uuid
 from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -27,7 +27,12 @@ _HF_SPACE = Path(__file__).resolve().parents[1] / "hf-space"
 if str(_HF_SPACE) not in sys.path:
     sys.path.insert(0, str(_HF_SPACE))
 
-from test_policy import TestPolicyError, select_best_attempt  # noqa: E402
+from test_policy import (  # noqa: E402
+    OAuthIdentity,
+    TestPolicyError,
+    canonical_submission_hash,
+    select_best_attempt,
+)
 
 
 RELEASE_POLICY_PATH = "private/test_release.json"
@@ -43,13 +48,22 @@ MAX_FILE_BYTES = 16 * 1024 * 1024
 MAX_SNAPSHOT_BYTES = 128 * 1024 * 1024
 MAX_ATTEMPTS = 3
 MAX_ROWS_PER_ATTEMPT = 10_000
+MAX_INSTANCE_ID_CHARACTERS = 256
+MAX_ANSWER_CHARACTERS = 4096
+MAX_EVIDENCE_IDS = 128
+MAX_EVIDENCE_ID_CHARACTERS = 256
+RELEASE_SCHEMA_VERSION = 1
+LEDGER_SCHEMA_VERSION = 2
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _REVISION = re.compile(r"[0-9a-f]{40}")
 _ACCOUNT = _SHA256
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+_UUID = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
+)
 _ATTEMPT_PATH = re.compile(
-    r"attempts/test/(?P<account>[0-9a-f]{64})/(?P<record>[A-Za-z0-9][A-Za-z0-9._-]{0,127})\.json"
+    r"attempts/test/(?P<account>[0-9a-f]{64})/(?P<record>[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.json"
 )
 _ACCOUNT_PATH = re.compile(r"projections/test/accounts/(?P<account>[0-9a-f]{64})\.json")
 _EXCLUSION_PATH = re.compile(
@@ -212,6 +226,22 @@ def verify_snapshot(snapshot) -> AuditReport:
 
     if not isinstance(snapshot, OrganizerSnapshot):
         return AuditReport(False, ("snapshot_invalid",), "", 0, 0, 0, 0)
+    try:
+        return _verify_snapshot(snapshot)
+    except Exception:
+        return AuditReport(
+            False,
+            ("snapshot_invalid",),
+            snapshot.revision,
+            0,
+            len(snapshot.attempts),
+            len(snapshot.exclusions),
+            len(snapshot.adjudications),
+        )
+
+
+def _verify_snapshot(snapshot: OrganizerSnapshot) -> AuditReport:
+    """Internal verifier; the public boundary sanitizes all payload failures."""
 
     issues: set[str] = set()
     state = _release_state(snapshot.release, issues)
@@ -227,7 +257,7 @@ def verify_snapshot(snapshot) -> AuditReport:
             continue
         account = path_match.group("account")
         submission_id = path_match.group("record")
-        if not _valid_attempt(record, state, account, submission_id):
+        if not _valid_attempt(record, state, snapshot.release, account, submission_id):
             issues.add("attempt_invalid")
         if submission_id in submission_ids:
             issues.add("attempt_duplicate_id")
@@ -367,7 +397,16 @@ def organizer_rows(snapshot) -> list[dict]:
         )
         best = select_best_attempt(attempts)
         for attempt in attempts:
-            metrics = copy.deepcopy(attempt["metrics"])
+            metrics = attempt["metrics"]
+            per_example = [
+                {
+                    "instance_id": row["instance_id"],
+                    "answer_exact_match": row["answer_exact_match"],
+                    "evidence_exact_match": row["evidence_exact_match"],
+                    "evidence_f1": row["evidence_f1"],
+                }
+                for row in metrics["per_example"]
+            ]
             rows.append(
                 {
                     "account_key": account,
@@ -394,19 +433,26 @@ def organizer_rows(snapshot) -> list[dict]:
                     "evidence_f1": metrics["evidence_f1"],
                     "evidence_exact_match": metrics.get("evidence_exact_match"),
                     "examples": metrics.get("examples"),
-                    "per_example": metrics.get("per_example", []),
+                    "per_example": per_example,
                 }
             )
     return rows
 
 
 def _repository_id(value) -> str:
+    if not _valid_repository_id(value):
+        raise OrganizerDataError("Organizer snapshot is unavailable.")
+    return value.strip()
+
+
+def _valid_repository_id(value) -> bool:
     if not isinstance(value, str) or not value.strip() or len(value.strip()) > 256:
-        raise OrganizerDataError("Organizer snapshot is unavailable.")
-    result = value.strip()
-    if result.startswith("/") or ".." in result.split("/") or result.count("/") != 1:
-        raise OrganizerDataError("Organizer snapshot is unavailable.")
-    return result
+        return False
+    parts = value.strip().split("/")
+    return len(parts) == 2 and all(
+        re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", part) is not None
+        for part in parts
+    )
 
 
 def _pinned_revision(value) -> str:
@@ -509,7 +555,7 @@ def _release_state(release, issues: set[str]) -> dict | None:
         issues.add("release_invalid")
         return None
     state = {
-        "schema_version": release.get("schema_version"),
+        "schema_version": LEDGER_SCHEMA_VERSION,
         "split": "test",
         "release_id": release.get("release_id"),
         "task_manifest_sha256": release.get("task_manifest_sha256"),
@@ -517,32 +563,45 @@ def _release_state(release, issues: set[str]) -> dict | None:
     }
     split = release.get("split", "test")
     if (
-        state["schema_version"] != 2
-        or isinstance(state["schema_version"], bool)
+        type(release.get("schema_version")) is not int
+        or release.get("schema_version") != RELEASE_SCHEMA_VERSION
         or split != "test"
         or not _nonempty(state["release_id"])
         or not _digest(state["task_manifest_sha256"])
         or not _digest(state["gold_sha256"])
+        or type(release.get("max_attempts")) is not int
         or release.get("max_attempts") != MAX_ATTEMPTS
-        or isinstance(release.get("max_attempts"), bool)
         or release.get("feedback_policy") != "first-attempt-only"
         or not isinstance(release.get("enabled"), bool)
         or not isinstance(release.get("finalized"), bool)
     ):
         issues.add("release_invalid")
         return None
+    if release.get("enabled") is True:
+        open_at = _parse_timestamp(release.get("open_at"))
+        close_at = _parse_timestamp(release.get("close_at"))
+        if (
+            open_at is None
+            or close_at is None
+            or close_at <= open_at
+            or not _revision_digest(release.get("public_revision"))
+        ):
+            issues.add("release_invalid")
+            return None
     return state
 
 
 def _matches_state(value, state) -> bool:
-    return (
-        state is not None
-        and isinstance(value, Mapping)
-        and all(value.get(key) == expected for key, expected in state.items())
+    if state is None or not isinstance(value, Mapping):
+        return False
+    return all(
+        value.get(key) == expected
+        and (key != "schema_version" or type(value.get(key)) is int)
+        for key, expected in state.items()
     )
 
 
-def _valid_attempt(record, state, account, submission_id) -> bool:
+def _valid_attempt(record, state, release, account, submission_id) -> bool:
     if not _matches_state(record, state):
         return False
     number = record.get("attempt_number")
@@ -551,25 +610,27 @@ def _valid_attempt(record, state, account, submission_id) -> bool:
     if (
         record.get("account_key") != account
         or record.get("submission_id") != submission_id
+        or not _valid_uuid4(submission_id)
         or not isinstance(number, int)
         or isinstance(number, bool)
         or not 1 <= number <= MAX_ATTEMPTS
         or not _digest(record.get("submission_hash"))
         or record.get("scoring_gold_sha256") != state["gold_sha256"]
+        or not _revision_digest(record.get("scoring_private_revision"))
+        or not _revision_digest(record.get("scoring_public_revision"))
+        or not isinstance(release, Mapping)
+        or record.get("scoring_public_revision") != release.get("public_revision")
+        or not _valid_repository_id(record.get("scoring_public_repo_id"))
+        or record.get("scoring_task_manifest_path") != "test/tasks.jsonl"
         or not _valid_timestamp(record.get("submitted_at"))
         or not _valid_metrics(metrics)
-        or not isinstance(predictions, list)
-        or len(predictions) > MAX_ROWS_PER_ATTEMPT
+        or not _valid_predictions(predictions, metrics)
     ):
         return False
     for name in (
         "hf_subject",
         "hf_username",
         "verified_email",
-        "scoring_private_revision",
-        "scoring_public_revision",
-        "scoring_public_repo_id",
-        "scoring_task_manifest_path",
         "team",
         "participant_names",
         "submission_name",
@@ -577,13 +638,36 @@ def _valid_attempt(record, state, account, submission_id) -> bool:
         if not _nonempty(record.get(name)):
             return False
     expected_key = hashlib.sha256(str(record["hf_subject"]).encode("utf-8")).hexdigest()
-    return expected_key == account
+    if expected_key != account:
+        return False
+    try:
+        identity = OAuthIdentity(
+            sub=record["hf_subject"],
+            username=record["hf_username"],
+            email=record["verified_email"],
+        )
+        expected_hash = canonical_submission_hash(
+            predictions,
+            record["split"],
+            record["release_id"],
+            identity,
+        )
+    except (TestPolicyError, TypeError, ValueError):
+        return False
+    return record.get("submission_hash") == expected_hash
 
 
 def _valid_metrics(metrics) -> bool:
-    if not isinstance(metrics, Mapping):
+    aggregate_fields = {
+        "answer_accuracy",
+        "evidence_exact_match",
+        "evidence_f1",
+        "examples",
+        "per_example",
+    }
+    if not isinstance(metrics, Mapping) or set(metrics) != aggregate_fields:
         return False
-    for name in ("answer_accuracy", "evidence_f1"):
+    for name in ("answer_accuracy", "evidence_exact_match", "evidence_f1"):
         value = metrics.get(name)
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             return False
@@ -598,20 +682,103 @@ def _valid_metrics(metrics) -> bool:
     ):
         return False
     per_example = metrics.get("per_example", [])
-    return isinstance(per_example, list) and len(per_example) <= MAX_ROWS_PER_ATTEMPT
+    if not isinstance(per_example, list) or len(per_example) != examples:
+        return False
+    identifiers = set()
+    sums = {
+        "answer_accuracy": 0.0,
+        "evidence_exact_match": 0.0,
+        "evidence_f1": 0.0,
+    }
+    for row in per_example:
+        detail_fields = {
+            "instance_id",
+            "answer_exact_match",
+            "evidence_exact_match",
+            "evidence_f1",
+        }
+        if not isinstance(row, Mapping) or set(row) != detail_fields:
+            return False
+        identifier = row.get("instance_id")
+        if (
+            not _bounded_string(identifier, MAX_INSTANCE_ID_CHARACTERS)
+            or identifier in identifiers
+        ):
+            return False
+        identifiers.add(identifier)
+        for name in ("answer_exact_match", "evidence_exact_match", "evidence_f1"):
+            value = row.get(name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or not 0.0 <= float(value) <= 1.0
+            ):
+                return False
+            aggregate_name = "answer_accuracy" if name == "answer_exact_match" else name
+            sums[aggregate_name] += float(value)
+    for name, total in sums.items():
+        if round(total / examples, 6) != float(metrics[name]):
+            return False
+    return True
+
+
+def _valid_predictions(predictions, metrics) -> bool:
+    if not isinstance(predictions, list) or not isinstance(metrics, Mapping):
+        return False
+    examples = metrics.get("examples")
+    if len(predictions) != examples or len(predictions) > MAX_ROWS_PER_ATTEMPT:
+        return False
+    prediction_ids = set()
+    for row in predictions:
+        if not isinstance(row, Mapping) or set(row) != {
+            "instance_id",
+            "answer",
+            "evidence",
+        }:
+            return False
+        identifier = row.get("instance_id")
+        answer = row.get("answer")
+        evidence = row.get("evidence")
+        if (
+            not _bounded_string(identifier, MAX_INSTANCE_ID_CHARACTERS)
+            or identifier in prediction_ids
+            or not isinstance(answer, str)
+            or len(answer) > MAX_ANSWER_CHARACTERS
+            or not isinstance(evidence, list)
+            or not 1 <= len(evidence) <= MAX_EVIDENCE_IDS
+            or any(
+                not _bounded_string(item, MAX_EVIDENCE_ID_CHARACTERS)
+                for item in evidence
+            )
+        ):
+            return False
+        prediction_ids.add(identifier)
+    metric_ids = {
+        row.get("instance_id")
+        for row in metrics.get("per_example", ())
+        if isinstance(row, Mapping)
+    }
+    return prediction_ids == metric_ids
 
 
 def _valid_timestamp(value) -> bool:
+    return _parse_timestamp(value) is not None
+
+
+def _parse_timestamp(value) -> dt.datetime | None:
     if not isinstance(value, str) or not value.strip() or len(value) > 64:
-        return False
+        return None
     text = value.strip()
     if text.endswith(("Z", "z")):
         text = text[:-1] + "+00:00"
     try:
         parsed = dt.datetime.fromisoformat(text)
     except ValueError:
-        return False
-    return parsed.tzinfo is not None and parsed.utcoffset() == dt.timedelta(0)
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() != dt.timedelta(0):
+        return None
+    return parsed
 
 
 def _attempt_sort_number(record) -> int:
@@ -648,7 +815,7 @@ def _account_projection_matches(account, entries, projection, state) -> bool:
         ):
             return False
         record_digest = reference.get("record_sha256")
-        if record_digest is not None and record_digest != loaded.sha256:
+        if not _digest(record_digest) or record_digest != loaded.sha256:
             return False
     best = _select_best(ordered)
     return best is not None and projection.get("best_submission_id") == best.get(
@@ -667,6 +834,8 @@ def _organizer_projection_matches(grouped, projection, state) -> bool:
         if not isinstance(row, Mapping) or not _matches_state(row, state):
             return False
         account = row.get("account_key")
+        if not isinstance(account, str) or _ACCOUNT.fullmatch(account) is None:
+            return False
         if account in by_account:
             return False
         by_account[account] = row
@@ -696,11 +865,15 @@ def _organizer_projection_matches(grouped, projection, state) -> bool:
 
 
 def _valid_audit_record(record, state, record_id, grouped) -> bool:
+    if not isinstance(record, Mapping):
+        return False
+    account = record.get("account_key")
     return (
         _matches_state(record, state)
-        and isinstance(record, Mapping)
         and record.get("record_id") == record_id
-        and record.get("account_key") in grouped
+        and isinstance(account, str)
+        and _ACCOUNT.fullmatch(account) is not None
+        and account in grouped
         and _valid_timestamp(record.get("created_at"))
     )
 
@@ -709,5 +882,22 @@ def _nonempty(value) -> bool:
     return isinstance(value, str) and bool(value.strip()) and len(value) <= 4096
 
 
+def _bounded_string(value, limit: int) -> bool:
+    return isinstance(value, str) and bool(value.strip()) and len(value) <= limit
+
+
+def _valid_uuid4(value) -> bool:
+    if not isinstance(value, str) or _UUID.fullmatch(value) is None:
+        return False
+    try:
+        return str(uuid.UUID(value)) == value and uuid.UUID(value).version == 4
+    except ValueError:
+        return False
+
+
 def _digest(value) -> bool:
     return isinstance(value, str) and _SHA256.fullmatch(value) is not None
+
+
+def _revision_digest(value) -> bool:
+    return isinstance(value, str) and _REVISION.fullmatch(value) is not None

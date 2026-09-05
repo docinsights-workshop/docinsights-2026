@@ -22,6 +22,12 @@ GOLD_DIGEST = "2" * 64
 ACCOUNT_A = hashlib.sha256(b"subject-a").hexdigest()
 ACCOUNT_B = hashlib.sha256(b"subject-b").hexdigest()
 PRIVATE_TOKEN = "organizer-read-token-sentinel"
+HASH_A1 = "b6f5a9d8a5677110b6258d277266f894c07a1f77b101b025b07cd5d1f479df7d"
+HASH_A2 = "a206eb6e77e5293c16ec434605c724e05507cca91a1a11647bff797877f39931"
+HASH_B1 = "1eb7b1f4aff10fe6baed1bef45188b49ae6d8688021ea41a484efdfa36ba3cd5"
+ID_A1 = "11111111-1111-4111-8111-111111111111"
+ID_A2 = "22222222-2222-4222-8222-222222222222"
+ID_B1 = "33333333-3333-4333-8333-333333333333"
 RELEASE_STATE = {
     "schema_version": 2,
     "split": "test",
@@ -45,6 +51,7 @@ def attempt(
     *,
     team="Shared Team",
 ):
+    label = f"a-{number}" if account == ACCOUNT_A else f"b-{number}"
     return {
         **RELEASE_STATE,
         "submission_id": submission_id,
@@ -73,16 +80,31 @@ def attempt(
             "evidence_exact_match": evidence,
             "examples": 2,
             "per_example": [
-                {"instance_id": "task-1", "answer_exact_match": answer},
-                {"instance_id": "task-2", "answer_exact_match": answer},
+                {
+                    "instance_id": "task-1",
+                    "answer_exact_match": answer,
+                    "evidence_exact_match": evidence,
+                    "evidence_f1": evidence,
+                },
+                {
+                    "instance_id": "task-2",
+                    "answer_exact_match": answer,
+                    "evidence_exact_match": evidence,
+                    "evidence_f1": evidence,
+                },
             ],
         },
         "predictions": [
             {
                 "instance_id": "task-1",
-                "answer": "raw-private-prediction-sentinel",
+                "answer": f"raw-private-prediction-sentinel-{label}",
                 "evidence": ["block-1"],
-            }
+            },
+            {
+                "instance_id": "task-2",
+                "answer": f"another-private-prediction-{label}",
+                "evidence": ["block-2"],
+            },
         ],
     }
 
@@ -105,6 +127,7 @@ def account_projection(account, attempts):
                 **RELEASE_STATE,
                 "submission_id": item["submission_id"],
                 "attempt_number": item["attempt_number"],
+                "record_sha256": hashlib.sha256(json_bytes(item)).hexdigest(),
             }
             for item in attempts
         ],
@@ -145,16 +168,22 @@ def organizer_projection(grouped):
 
 
 def fixture_files():
-    a1 = attempt(ACCOUNT_A, 1, "submission-a1", "5" * 64, 0.50, 0.80)
-    a2 = attempt(ACCOUNT_A, 2, "submission-a2", "6" * 64, 0.75, 0.60)
-    b1 = attempt(ACCOUNT_B, 1, "submission-b1", "7" * 64, 0.70, 0.90)
+    a1 = attempt(ACCOUNT_A, 1, ID_A1, HASH_A1, 0.50, 0.80)
+    a2 = attempt(ACCOUNT_A, 2, ID_A2, HASH_A2, 0.75, 0.60)
+    b1 = attempt(ACCOUNT_B, 1, ID_B1, HASH_B1, 0.70, 0.90)
     grouped = {ACCOUNT_A: [a1, a2], ACCOUNT_B: [b1]}
     release = {
-        **RELEASE_STATE,
+        "schema_version": 1,
+        "release_id": RELEASE_STATE["release_id"],
+        "task_manifest_sha256": TASK_DIGEST,
+        "gold_sha256": GOLD_DIGEST,
         "enabled": True,
         "finalized": False,
         "max_attempts": 3,
         "feedback_policy": "first-attempt-only",
+        "open_at": "2026-09-01T00:00:00Z",
+        "close_at": "2026-10-01T00:00:00Z",
+        "public_revision": "4" * 40,
     }
     files = {
         "private/test_release.json": json_bytes(release),
@@ -187,7 +216,7 @@ def fixture_files():
             **RELEASE_STATE,
             "record_id": "appeal-reviewed",
             "account_key": ACCOUNT_A,
-            "submission_id": "submission-a2",
+            "submission_id": ID_A2,
             "created_at": "2026-09-05T12:00:00Z",
             "action": "note",
             "reason_code": "technical-review-complete",
@@ -288,7 +317,10 @@ class OrganizerSnapshotTests(unittest.TestCase):
     def test_disabled_release_without_attempts_is_a_valid_empty_snapshot(self):
         """Catches readiness mode requiring nonexistent attempt projections."""
         release = {
-            **RELEASE_STATE,
+            "schema_version": 1,
+            "release_id": RELEASE_STATE["release_id"],
+            "task_manifest_sha256": TASK_DIGEST,
+            "gold_sha256": GOLD_DIGEST,
             "enabled": False,
             "finalized": False,
             "max_attempts": 3,
@@ -321,11 +353,11 @@ class OrganizerSnapshotTests(unittest.TestCase):
         """Catches missing referenced files and record identity changed after admission."""
         mutations = []
         missing = fixture_files()
-        del missing[f"attempts/test/{ACCOUNT_A}/submission-a1.json"]
+        del missing[f"attempts/test/{ACCOUNT_A}/{ID_A1}.json"]
         mutations.append(missing)
 
         changed = fixture_files()
-        path = f"attempts/test/{ACCOUNT_A}/submission-a1.json"
+        path = f"attempts/test/{ACCOUNT_A}/{ID_A1}.json"
         value = json.loads(changed[path])
         value["submission_id"] = "different-id"
         changed[path] = json_bytes(value)
@@ -343,25 +375,23 @@ class OrganizerSnapshotTests(unittest.TestCase):
         mutations = []
 
         duplicate_id = fixture_files()
-        b_path = f"attempts/test/{ACCOUNT_B}/submission-b1.json"
+        b_path = f"attempts/test/{ACCOUNT_B}/{ID_B1}.json"
         b_record = json.loads(duplicate_id.pop(b_path))
-        b_record["submission_id"] = "submission-a1"
-        duplicate_id[f"attempts/test/{ACCOUNT_B}/submission-a1.json"] = json_bytes(
-            b_record
-        )
+        b_record["submission_id"] = ID_A1
+        duplicate_id[f"attempts/test/{ACCOUNT_B}/{ID_A1}.json"] = json_bytes(b_record)
         b_projection = json.loads(
             duplicate_id[f"projections/test/accounts/{ACCOUNT_B}.json"]
         )
-        b_projection["attempts"][0]["submission_id"] = "submission-a1"
-        b_projection["best_submission_id"] = "submission-a1"
+        b_projection["attempts"][0]["submission_id"] = ID_A1
+        b_projection["best_submission_id"] = ID_A1
         duplicate_id[f"projections/test/accounts/{ACCOUNT_B}.json"] = json_bytes(
             b_projection
         )
         organizer = json.loads(
             duplicate_id["projections/test/organizer_leaderboard.json"]
         )
-        organizer["accounts"][1]["best_submission_id"] = "submission-a1"
-        organizer["accounts"][1]["submission_id"] = "submission-a1"
+        organizer["accounts"][1]["best_submission_id"] = ID_A1
+        organizer["accounts"][1]["submission_id"] = ID_A1
         duplicate_id["projections/test/organizer_leaderboard.json"] = json_bytes(
             organizer
         )
@@ -369,12 +399,12 @@ class OrganizerSnapshotTests(unittest.TestCase):
 
         duplicate_hash = fixture_files()
         b_record = json.loads(duplicate_hash[b_path])
-        b_record["submission_hash"] = "5" * 64
+        b_record["submission_hash"] = HASH_A1
         duplicate_hash[b_path] = json_bytes(b_record)
         mutations.append(duplicate_hash)
 
         gap = fixture_files()
-        a2_path = f"attempts/test/{ACCOUNT_A}/submission-a2.json"
+        a2_path = f"attempts/test/{ACCOUNT_A}/{ID_A2}.json"
         a2 = json.loads(gap[a2_path])
         a2["attempt_number"] = 3
         gap[a2_path] = json_bytes(a2)
@@ -389,8 +419,14 @@ class OrganizerSnapshotTests(unittest.TestCase):
         """Catches mixed releases/evaluators and stale cached leaderboard projections."""
         mutations = []
 
+        inexact_schema = fixture_files()
+        release = json.loads(inexact_schema["private/test_release.json"])
+        release["schema_version"] = 1.0
+        inexact_schema["private/test_release.json"] = json_bytes(release)
+        mutations.append(inexact_schema)
+
         wrong_digest = fixture_files()
-        path = f"attempts/test/{ACCOUNT_A}/submission-a1.json"
+        path = f"attempts/test/{ACCOUNT_A}/{ID_A1}.json"
         value = json.loads(wrong_digest[path])
         value["scoring_gold_sha256"] = "9" * 64
         wrong_digest[path] = json_bytes(value)
@@ -399,7 +435,7 @@ class OrganizerSnapshotTests(unittest.TestCase):
         stale_account = fixture_files()
         path = f"projections/test/accounts/{ACCOUNT_A}.json"
         value = json.loads(stale_account[path])
-        value["best_submission_id"] = "submission-a1"
+        value["best_submission_id"] = ID_A1
         stale_account[path] = json_bytes(value)
         mutations.append(stale_account)
 
@@ -411,11 +447,17 @@ class OrganizerSnapshotTests(unittest.TestCase):
         mutations.append(stale_organizer)
 
         malformed_metrics = fixture_files()
-        path = f"attempts/test/{ACCOUNT_A}/submission-a1.json"
+        path = f"attempts/test/{ACCOUNT_A}/{ID_A1}.json"
         value = json.loads(malformed_metrics[path])
         value["metrics"]["answer_accuracy"] = float("nan")
         malformed_metrics[path] = json.dumps(value, allow_nan=True).encode()
         mutations.append(malformed_metrics)
+
+        malformed_exact_match = fixture_files()
+        value = json.loads(malformed_exact_match[path])
+        value["metrics"]["evidence_exact_match"] = -1
+        malformed_exact_match[path] = json_bytes(value)
+        mutations.append(malformed_exact_match)
 
         malformed_timestamp = fixture_files()
         value = json.loads(malformed_timestamp[path])
@@ -429,6 +471,123 @@ class OrganizerSnapshotTests(unittest.TestCase):
             self.assertFalse(audit.valid)
             self.assertTrue(audit.issue_codes)
             self.assertNotIn("raw-private", repr(audit))
+
+    def test_attempt_and_projection_schema_versions_are_exact_integers(self):
+        """Catches JSON floats masquerading as schema-version integers."""
+        mutations = []
+        attempt_schema = fixture_files()
+        attempt_path = f"attempts/test/{ACCOUNT_A}/{ID_A1}.json"
+        value = json.loads(attempt_schema[attempt_path])
+        value["schema_version"] = 2.0
+        attempt_schema[attempt_path] = json_bytes(value)
+        mutations.append(attempt_schema)
+
+        projection_schema = fixture_files()
+        projection_path = f"projections/test/accounts/{ACCOUNT_A}.json"
+        value = json.loads(projection_schema[projection_path])
+        value["schema_version"] = 2.0
+        projection_schema[projection_path] = json_bytes(value)
+        mutations.append(projection_schema)
+
+        expected_codes = ("attempt_invalid", "account_projection_mismatch")
+        for files, expected_code in zip(mutations, expected_codes):
+            report = verify_snapshot(self.load(FakeHub(files)))
+            self.assertFalse(report.valid)
+            self.assertIn(expected_code, report.issue_codes)
+
+    def test_per_example_metrics_and_prediction_inventory_are_validated(self):
+        """Catches malformed detailed metrics or incomplete immutable payloads."""
+        mutations = []
+
+        malformed_detail = fixture_files()
+        path = f"attempts/test/{ACCOUNT_A}/{ID_A1}.json"
+        value = json.loads(malformed_detail[path])
+        value["metrics"]["per_example"][0]["evidence_f1"] = 1.5
+        malformed_detail[path] = json_bytes(value)
+        mutations.append(malformed_detail)
+
+        incomplete_predictions = fixture_files()
+        value = json.loads(incomplete_predictions[path])
+        value["predictions"].pop()
+        incomplete_predictions[path] = json_bytes(value)
+        mutations.append(incomplete_predictions)
+
+        private_detail = fixture_files()
+        value = json.loads(private_detail[path])
+        value["metrics"]["per_example"][0]["gold_answer"] = "private-gold-sentinel"
+        private_detail[path] = json_bytes(value)
+        mutations.append(private_detail)
+
+        for files in mutations:
+            snapshot = self.load(FakeHub(files))
+            report = verify_snapshot(snapshot)
+            self.assertFalse(report.valid)
+            self.assertIn("attempt_invalid", report.issue_codes)
+            with self.assertRaises(OrganizerDataError):
+                organizer_rows(snapshot)
+
+    def test_submission_hash_is_recomputed_from_committed_predictions(self):
+        """Catches an immutable record whose canonical payload hash was altered."""
+        files = fixture_files()
+        path = f"attempts/test/{ACCOUNT_A}/{ID_A1}.json"
+        value = json.loads(files[path])
+        value["submission_hash"] = "8" * 64
+        files[path] = json_bytes(value)
+        report = verify_snapshot(self.load(FakeHub(files)))
+        self.assertFalse(report.valid)
+        self.assertIn("attempt_invalid", report.issue_codes)
+
+    def test_scoring_revisions_and_manifest_path_are_pinned(self):
+        """Catches mutable evaluator refs and traversal-bearing scoring paths."""
+        mutations = []
+        path = f"attempts/test/{ACCOUNT_A}/{ID_A1}.json"
+        for field, replacement in (
+            ("scoring_private_revision", "main"),
+            ("scoring_public_revision", "not-a-sha"),
+            ("scoring_task_manifest_path", "../../private/test_labels.jsonl"),
+        ):
+            files = fixture_files()
+            value = json.loads(files[path])
+            value[field] = replacement
+            files[path] = json_bytes(value)
+            mutations.append(files)
+        for files in mutations:
+            report = verify_snapshot(self.load(FakeHub(files)))
+            self.assertFalse(report.valid)
+            self.assertIn("attempt_invalid", report.issue_codes)
+
+    def test_account_projection_requires_exact_attempt_record_digest(self):
+        """Catches references that are not bound to immutable record bytes."""
+        files = fixture_files()
+        path = f"projections/test/accounts/{ACCOUNT_A}.json"
+        value = json.loads(files[path])
+        del value["attempts"][0]["record_sha256"]
+        files[path] = json_bytes(value)
+        report = verify_snapshot(self.load(FakeHub(files)))
+        self.assertFalse(report.valid)
+        self.assertIn("account_projection_mismatch", report.issue_codes)
+
+    def test_malformed_account_keys_return_a_generic_failed_audit(self):
+        """Catches unhashable private JSON values escaping as TypeError."""
+        mutations = []
+        exclusion = fixture_files()
+        path = f"{EXCLUSION_PREFIX}exclude-smoke.json"
+        value = json.loads(exclusion[path])
+        value["account_key"] = [ACCOUNT_A]
+        exclusion[path] = json_bytes(value)
+        mutations.append(exclusion)
+
+        organizer = fixture_files()
+        path = "projections/test/organizer_leaderboard.json"
+        value = json.loads(organizer[path])
+        value["accounts"][0]["account_key"] = [ACCOUNT_A]
+        organizer[path] = json_bytes(value)
+        mutations.append(organizer)
+
+        for files in mutations:
+            report = verify_snapshot(self.load(FakeHub(files)))
+            self.assertFalse(report.valid)
+            self.assertTrue(report.issue_codes)
 
     def test_malformed_optional_audit_record_fails_without_private_detail(self):
         """Catches invalid append-only audit records being silently ignored."""
