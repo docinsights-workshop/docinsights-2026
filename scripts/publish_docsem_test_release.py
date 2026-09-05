@@ -818,16 +818,6 @@ def _inspect_targets(
         private_paths = hf_backend.list_paths(
             PRIVATE_HF_REPOSITORY, config.private_hf_base, private_token
         )
-        remote_card = hf_backend.read_files(
-            PUBLIC_HF_REPOSITORY,
-            public_state.revision,
-            ("README.md",),
-            public_token,
-        )
-        if remote_card != {"README.md": release.card_template.read_bytes()}:
-            raise ReleaseError(
-                "The dataset card template is not the exact public Hugging Face base README.md."
-            )
         _scan_current_public_tree(
             revision=github_revision,
             paths=github_paths,
@@ -895,6 +885,21 @@ def _inspect_targets(
                 companion_path="README.md",
             ),
         }
+        remote_card = hf_backend.read_files(
+            PUBLIC_HF_REPOSITORY,
+            public_state.revision,
+            ("README.md",),
+            public_token,
+        )
+        expected_base_card = (
+            release.release_card
+            if statuses["public_hugging_face"] == "already-published"
+            else release.card_template
+        )
+        if remote_card != {"README.md": expected_base_card.read_bytes()}:
+            raise ReleaseError(
+                "The dataset card is not the exact deterministic README.md for the public Hugging Face base state."
+            )
     except ReleaseError:
         raise
     except Exception as exc:

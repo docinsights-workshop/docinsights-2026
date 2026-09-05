@@ -851,6 +851,35 @@ class PublishDocsemTestReleaseTests(unittest.TestCase):
         with self.assertRaises(publisher.ReleaseError):
             self.run_release()
 
+    def test_exact_public_hf_partial_release_can_resume_from_release_card_base(self):
+        repository = publisher.PUBLIC_HF_REPOSITORY
+        self.hf.trees[repository].update(
+            {
+                "README.md": self.fixture.release_card_bytes,
+                "test/tasks.jsonl": self.fixture.tasks_bytes,
+                "test/release.json": self.fixture.public_manifest_bytes,
+                "test/SHA256SUMS": self.fixture.checksum_bytes,
+                **{
+                    f"test/documents/{name}": payload
+                    for name, payload in self.fixture.pdfs.items()
+                },
+            }
+        )
+        self.hf.history[repository][-1] = (
+            self.PUBLIC_BASE,
+            dict(self.hf.trees[repository]),
+        )
+
+        plan = self.run_release()
+
+        public_operation = next(
+            operation
+            for operation in plan["operations"]
+            if operation["target"] == "public_hugging_face"
+        )
+        self.assertEqual(public_operation["status"], "already-published")
+        self.assertEqual(self.hf.writes, [])
+
     def setUp_fresh_fixture(self):
         self.temporary.cleanup()
         self.setUp()
