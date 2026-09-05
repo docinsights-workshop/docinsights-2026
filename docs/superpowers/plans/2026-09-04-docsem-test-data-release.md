@@ -161,19 +161,19 @@ git commit -m "Stage DocSem test data with hard privacy boundaries"
 - Consumes: staged public test payload and release manifest.
 - Produces: Hugging Face `tasks` config with train, validation, and test; `labels` config remains train-only.
 
-- [ ] **Step 1: Write a failing metadata test**
+- [x] **Step 1: Write a failing metadata test**
 
 Parse the dataset card front matter and assert `tasks` has `test/tasks.jsonl`, while `labels` contains only `train/labels.jsonl` and contains no validation/test label path.
 
-- [ ] **Step 2: Implement metadata and participant instructions**
+- [x] **Step 2: Implement metadata and participant instructions**
 
 Document the held-out test schema, checksums, OAuth submission portal, three attempts per HF account, first-attempt feedback, later score withholding, and finalization behavior. Do not include test IDs or private repository paths beyond the generic label contract.
 
-- [ ] **Step 3: Update the generator safely**
+- [x] **Step 3: Update the generator safely**
 
 The existing no-argument generation path remains train/validation-only. Test inclusion requires explicit `--test-public-staging` and validates the manifest before copying only public files.
 
-- [ ] **Step 4: Run metadata, generator, and scoring tests**
+- [x] **Step 4: Run metadata, generator, and scoring tests**
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 /Users/aamita/miniconda3/bin/python scripts/test_prepare_docsem_test_release.py
@@ -182,7 +182,7 @@ PYTHONDONTWRITEBYTECODE=1 /Users/aamita/miniconda3/bin/python scripts/test_compe
 
 Expected: metadata exposes test tasks but no validation/test labels; existing scoring checks remain green.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add competition/hf-dataset/README.md competition/README.md scripts/prepare_docsem_hf_dataset.py scripts/test_prepare_docsem_test_release.py

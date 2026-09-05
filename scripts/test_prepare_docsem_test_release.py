@@ -16,6 +16,9 @@ from unittest.mock import patch
 import zipfile
 from pathlib import Path
 
+import yaml
+
+import prepare_docsem_hf_dataset as hf_dataset_module
 import prepare_docsem_test_release as release_module
 from prepare_docsem_test_release import (
     ValidationError,
@@ -197,6 +200,23 @@ def temporary_module_values(**values):
                 delattr(release_module, name)
             else:
                 setattr(release_module, name, value)
+
+
+@contextmanager
+def temporary_module_attributes(module, **values):
+    """Temporarily replace filesystem roots at a module's public boundary."""
+    missing = object()
+    originals = {name: getattr(module, name, missing) for name in values}
+    try:
+        for name, value in values.items():
+            setattr(module, name, value)
+        yield
+    finally:
+        for name, value in originals.items():
+            if value is missing:
+                delattr(module, name)
+            else:
+                setattr(module, name, value)
 
 
 def write_fake_tesseract(path, *, version="5.5.1", ocr_body="exit 0"):
@@ -1066,6 +1086,237 @@ class PrepareDocsemTestReleaseTests(unittest.TestCase):
         self.assertEqual(stdout.getvalue(), "")
         self.assertEqual(stderr.getvalue(), "")
         self.assertNotIn("private-synthetic-answer", stdout.getvalue() + stderr.getvalue())
+
+
+class PrepareDocsemHFDatasetTests(unittest.TestCase):
+    def make_source(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        return SourceFixture(Path(temporary.name) / "official-source").create()
+
+    def assert_rejected(self, source, *, train_ids=(), val_ids=()):
+        with self.assertRaises(ValidationError) as caught:
+            validate_source(source.root, train_ids, val_ids)
+        self.assertNotIn("private-synthetic-answer", str(caught.exception))
+
+    def make_generation_environment(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        public_source = root / "canonical" / "docsem"
+        organizer_source = root / "organizer"
+        target_root = root / "hf-dataset"
+        private_root = root / "hf-private"
+
+        for split, instance_id in (("train", "train-fixture"), ("val", "val-fixture")):
+            split_root = public_source / split
+            (split_root / "documents").mkdir(parents=True)
+            write_jsonl(
+                split_root / "tasks.jsonl",
+                [
+                    {
+                        "instance_id": instance_id,
+                        "user_query": f"Public {split} query",
+                        "document_pdf": f"documents/{instance_id}.pdf",
+                    }
+                ],
+            )
+            (split_root / "documents" / f"{instance_id}.pdf").write_bytes(
+                f"public-{split}-pdf".encode("ascii")
+            )
+
+        write_jsonl(
+            public_source / "train" / "labels.jsonl",
+            [{"instance_id": "train-fixture", "answer": "1", "evidence": ["b01"]}],
+        )
+        (organizer_source / "val").mkdir(parents=True)
+        write_jsonl(
+            organizer_source / "val" / "labels.jsonl",
+            [{"instance_id": "val-fixture", "answer": "2", "evidence": ["b02"]}],
+        )
+        (public_source / "PARTICIPANT_INSTRUCTIONS.md").write_text(
+            "Synthetic participant instructions\n",
+            encoding="utf-8",
+        )
+        license_path = public_source.parent / "LICENSE.txt"
+        license_path.write_text("Synthetic public license\n", encoding="utf-8")
+        return {
+            "root": root,
+            "public_source": public_source,
+            "organizer_source": organizer_source,
+            "target_root": target_root,
+            "private_root": private_root,
+            "license_path": license_path,
+        }
+
+    def make_staged_public_release(self, root):
+        source = SourceFixture(root / "official-source").create()
+        validated = validate_source(source.root, (), ())
+        public_root = root / "staged-public"
+        release_module.stage_release(
+            validated,
+            public_root,
+            root / "staged-private",
+            "synthetic-release-v1",
+        )
+        return public_root
+
+    def generation_roots(self, environment):
+        return temporary_module_attributes(
+            hf_dataset_module,
+            PUBLIC_SOURCE_ROOT=environment["public_source"],
+            PUBLIC_LICENSE=environment["license_path"],
+            ORGANIZER_SOURCE_ROOT=environment["organizer_source"],
+            TARGET_ROOT=environment["target_root"],
+            PRIVATE_ROOT=environment["private_root"],
+        )
+
+    def test_dataset_card_exposes_test_tasks_but_only_training_labels(self):
+        """Catches publishing a test label path or omitting the public test inputs."""
+        card_path = Path(__file__).resolve().parents[1] / "competition/hf-dataset/README.md"
+        text = card_path.read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("---\n"))
+        front_matter = yaml.safe_load(text.split("---\n", 2)[1])
+        configs = {item["config_name"]: item["data_files"] for item in front_matter["configs"]}
+
+        self.assertEqual(
+            configs["tasks"],
+            [
+                {"split": "train", "path": "train/tasks.jsonl"},
+                {"split": "validation", "path": "val/tasks.jsonl"},
+                {"split": "test", "path": "test/tasks.jsonl"},
+            ],
+        )
+        self.assertEqual(
+            configs["labels"],
+            [{"split": "train", "path": "train/labels.jsonl"}],
+        )
+
+    def test_no_argument_generation_removes_stale_test_output(self):
+        """Catches a normal train/validation refresh silently republishing stale test data."""
+        environment = self.make_generation_environment()
+        stale_test = environment["target_root"] / "test"
+        stale_test.mkdir(parents=True)
+        (stale_test / "stale-private-copy.jsonl").write_text(
+            '{"answer":"must-not-survive"}\n',
+            encoding="utf-8",
+        )
+
+        with self.generation_roots(environment):
+            summary = hf_dataset_module.generate_dataset()
+
+        self.assertFalse(stale_test.exists())
+        self.assertEqual(
+            summary,
+            {
+                "train_tasks": 1,
+                "train_labels": 1,
+                "val_tasks_public": 1,
+                "val_labels_private": 1,
+                "leaderboard_reset": False,
+            },
+        )
+        self.assertTrue((environment["target_root"] / "train/tasks.jsonl").is_file())
+        self.assertTrue((environment["target_root"] / "val/tasks.jsonl").is_file())
+
+    def test_generation_rejects_a_linked_dataset_root_without_deleting_its_target(self):
+        """Catches stale-output cleanup escaping through a linked dataset root."""
+        environment = self.make_generation_environment()
+        real_target = environment["root"] / "external-dataset"
+        (real_target / "test").mkdir(parents=True)
+        protected_file = real_target / "test/keep.json"
+        protected_file.write_text('{"keep":true}\n', encoding="utf-8")
+        environment["target_root"].symlink_to(real_target, target_is_directory=True)
+
+        with self.generation_roots(environment), self.assertRaises(ValidationError):
+            hf_dataset_module.generate_dataset()
+
+        self.assertEqual(protected_file.read_text(encoding="utf-8"), '{"keep":true}\n')
+        self.assertFalse((real_target / "train").exists())
+        self.assertFalse((real_target / "val").exists())
+
+    def test_explicit_public_staging_is_a_byte_identical_test_import(self):
+        """Catches transforming audited public bytes or copying organizer-only staging."""
+        environment = self.make_generation_environment()
+        staged_public = self.make_staged_public_release(environment["root"] / "release")
+
+        with self.generation_roots(environment):
+            summary = hf_dataset_module.generate_dataset(
+                test_public_staging=staged_public,
+            )
+
+        source_files = {
+            path.relative_to(staged_public / "test").as_posix(): path.read_bytes()
+            for path in (staged_public / "test").rglob("*")
+            if path.is_file()
+        }
+        target_test = environment["target_root"] / "test"
+        target_files = {
+            path.relative_to(target_test).as_posix(): path.read_bytes()
+            for path in target_test.rglob("*")
+            if path.is_file()
+        }
+        self.assertEqual(target_files, source_files)
+        self.assertEqual(summary["test_tasks_public"], 3)
+        self.assertEqual(summary["test_release_id"], "synthetic-release-v1")
+        self.assertNotIn("labels.jsonl", target_files)
+        self.assertFalse((environment["target_root"] / "private").exists())
+
+    def test_explicit_import_rejects_malicious_staging_before_mutating_outputs(self):
+        """Catches a generator that trusts a source path and copies private or linked files."""
+        environment = self.make_generation_environment()
+        staged_public = self.make_staged_public_release(environment["root"] / "release")
+        target_root = environment["target_root"]
+        target_root.mkdir(parents=True)
+        (target_root / "keep.txt").write_text("unchanged\n", encoding="utf-8")
+        before = {
+            path.relative_to(target_root).as_posix(): path.read_bytes()
+            for path in target_root.rglob("*")
+            if path.is_file()
+        }
+
+        malicious_roots = []
+        extra_label_root = environment["root"] / "extra-label"
+        shutil.copytree(staged_public, extra_label_root)
+        (extra_label_root / "test/private_labels.jsonl").write_text(
+            '{"answer":"private"}\n',
+            encoding="utf-8",
+        )
+        malicious_roots.append(("extra private file", extra_label_root))
+
+        linked_pdf_root = environment["root"] / "linked-pdf"
+        shutil.copytree(staged_public, linked_pdf_root)
+        linked_pdf = linked_pdf_root / "test/documents/synthetic-1.pdf"
+        linked_pdf.unlink()
+        linked_pdf.symlink_to(environment["organizer_source"] / "val/labels.jsonl")
+        malicious_roots.append(("linked private file", linked_pdf_root))
+
+        with self.generation_roots(environment):
+            for name, malicious_root in malicious_roots:
+                with self.subTest(staging_case=name), self.assertRaises(ValidationError):
+                    hf_dataset_module.generate_dataset(
+                        test_public_staging=malicious_root,
+                    )
+
+        after = {
+            path.relative_to(target_root).as_posix(): path.read_bytes()
+            for path in target_root.rglob("*")
+            if path.is_file()
+        }
+        self.assertEqual(after, before)
+
+    def test_cli_requires_the_explicit_test_public_staging_flag(self):
+        """Catches implicit test-source discovery or an ambiguous positional path."""
+        no_test = hf_dataset_module.parse_args([])
+        with_test = hf_dataset_module.parse_args(
+            ["--test-public-staging", "/tmp/synthetic-public-stage"]
+        )
+
+        self.assertIsNone(no_test.test_public_staging)
+        self.assertEqual(
+            with_test.test_public_staging,
+            Path("/tmp/synthetic-public-stage"),
+        )
 
     def test_rejects_a_zip_instead_of_an_explicit_source_directory(self):
         """Catches treating an archive as an implicitly selected release source."""

@@ -6,9 +6,10 @@ This folder contains source code and documentation for the DocInsights 2026 docu
 
 The current deployment targets:
 
-- `amitbcp/docinsights-2026-shared-task-data`: public dataset repo for labelled train tasks, unlabelled validation tasks, PDFs, instructions, and a sample submission.
-- `amitbcp/docinsights-2026-shared-task-submissions`: private dataset repo for hidden validation labels, raw submissions, and leaderboard state.
-- `amitbcp/docsem-docinsights`: Gradio Space for submission scoring and the public leaderboard.
+- `amitbcp/docinsights-2026-shared-task-data`: public dataset repo for labelled train tasks, unlabelled validation tasks, and—after its audited release—held-out test tasks, PDFs, checksums, instructions, and a sample submission.
+- `amitbcp/docinsights-2026-shared-task-submissions`: private dataset repo for hidden validation/test labels, immutable submissions, and derived leaderboard state.
+- `amitbcp/docsem-docinsights`: public Gradio Space for split-aware submission scoring and the validation leaderboard.
+- `amitbcp/docsem-docinsights-organizer`: private, read-only organizer Space for detailed held-out test attempts and projections.
 
 ## Source Data
 
@@ -29,6 +30,17 @@ Regenerate local HF payloads without changing leaderboard state:
 /Users/aamita/miniconda3/bin/python scripts/prepare_docsem_hf_dataset.py
 ```
 
+That no-argument command intentionally generates only train and validation and removes any stale generated `test/` output. It never discovers a test source by directory name.
+
+No official held-out test release is present in this checkout, so the test portal remains disabled. After an explicitly selected official source has passed the separate public/private staging audit, add only its audited public half to the Hugging Face payload:
+
+```bash
+/Users/aamita/miniconda3/bin/python scripts/prepare_docsem_hf_dataset.py \
+  --test-public-staging competition/hf-test-staging/public
+```
+
+The explicit staging root must contain exactly public test tasks, PDFs, checksums, and the sanitized release manifest. The generator re-audits counts and hashes, copies those public files byte-for-byte, and never reads or copies private staging. Missing, malformed, linked, special, extra, or label-bearing inputs fail closed before generated output changes.
+
 To prepare an intentional leaderboard reset as part of a refreshed release:
 
 ```bash
@@ -42,9 +54,16 @@ The published dataset includes:
 - 217 validation tasks without public labels
 - train and validation PDFs
 
+Once the official held-out release is audited and published, it additionally includes:
+
+- test tasks without labels
+- test PDFs
+- public checksums and sanitized release metadata
+
 The private submissions dataset includes:
 
 - 217 hidden validation labels
+- held-out test labels and release policy only after the official private release is configured
 
 Generated dataset payloads, private labels, submissions, and leaderboard state are intentionally ignored by this GitHub repository. Publish them only to the dedicated Hugging Face repositories.
 
@@ -59,6 +78,8 @@ repo_id = "amitbcp/docinsights-2026-shared-task-data"
 tasks = load_dataset(repo_id, "tasks")
 train_tasks = tasks["train"]
 val_tasks = tasks["validation"]
+# Available only after the official held-out release is published:
+test_tasks = tasks["test"]
 
 train_labels = load_dataset(repo_id, "labels")["train"]
 
@@ -71,11 +92,20 @@ pdf_path = hf_hub_download(
 
 ## Submission Format
 
-Participants submit JSONL for validation, one object per instance:
+Participants submit JSONL for the selected split, one object per instance:
 
 ```json
 {"instance_id":"task_000909","answer":"140","evidence":["b14"]}
 ```
+
+Validation remains anonymous-compatible, unlimited, and visible on the existing public validation leaderboard. The held-out test workflow is different:
+
+- Hugging Face OAuth is required for test; the authenticated account controls quota.
+- Each Hugging Face account receives at most three valid test attempts.
+- Attempt 1 returns answer accuracy and evidence F1 and can be revisited from that signed-in account's submission history.
+- Attempts 2 and 3 are accepted with receipts but their scores are withheld.
+- The account's best of three is selected for the final ranking using deterministic metric and timestamp tie-breaks.
+- No public test score or rank is shown while the window is open. Organizers use the separate private, read-only Space for detailed live test results.
 
 ## Publishing
 
@@ -85,6 +115,8 @@ release contains 1,125 PDFs:
 ```bash
 /Users/aamita/miniconda3/bin/huggingface-cli upload-large-folder amitbcp/docinsights-2026-shared-task-data competition/hf-dataset --repo-type dataset --num-workers 4
 ```
+
+Do not run that publication command with a generated `test/` directory until the label-free release manifest, task/PDF counts, and every checksum have passed the guarded publication dry run. Declaring the future `test` split in the dataset card does not mean the held-out data has been released or that the submission window is open.
 
 Reset prior submissions and leaderboard state only when the public release has
 changed and prior scores are no longer comparable. The command is a dry run
