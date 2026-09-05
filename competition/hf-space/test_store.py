@@ -14,6 +14,7 @@ from huggingface_hub import CommitOperationAdd
 from huggingface_hub.errors import EntryNotFoundError, HfHubHTTPError
 
 from test_contract import (
+    MAX_LEDGER_FILE_BYTES,
     bounded_private_text,
     repository_id,
     revision_digest,
@@ -54,6 +55,7 @@ class _Snapshot:
     policy: TestReleasePolicy
     gold: bytes
     attempts: tuple[dict, ...]
+    attempt_record_sha256: Mapping[str, str]
     organizer: dict
 
 
@@ -142,10 +144,19 @@ class HubTestStore:
                     attempt_number=attempt_number,
                     accepted_at=accepted_at,
                 )
+                record_bytes = _bounded_json_bytes(record)
                 attempts = [*snapshot.attempts, record]
+                attempt_record_sha256 = {
+                    **snapshot.attempt_record_sha256,
+                    candidate_id: hashlib.sha256(record_bytes).hexdigest(),
+                }
                 best = select_best_attempt(attempts)
                 account_projection = _account_projection(
-                    key, snapshot.policy, attempts, best
+                    key,
+                    snapshot.policy,
+                    attempts,
+                    best,
+                    attempt_record_sha256,
                 )
                 organizer_projection = _organizer_projection(
                     snapshot.organizer,
@@ -154,13 +165,15 @@ class HubTestStore:
                     attempts,
                     best,
                 )
+                account_projection_bytes = _bounded_json_bytes(account_projection)
+                organizer_projection_bytes = _bounded_json_bytes(organizer_projection)
 
                 operations = _commit_operations(
                     key,
                     candidate_id,
-                    record,
-                    account_projection,
-                    organizer_projection,
+                    record_bytes,
+                    account_projection_bytes,
+                    organizer_projection_bytes,
                 )
                 try:
                     self.api.create_commit(
@@ -201,10 +214,8 @@ class HubTestStore:
             self._require_config_paths()
             sha = self._head_sha()
             policy = _release_policy(self._read_required(self.release_config_path, sha))
-            return [
-                dict(attempt)
-                for attempt in self._load_account_attempts(key, sha, policy)
-            ]
+            attempts, _ = self._load_account_attempts(key, sha, policy)
+            return [dict(attempt) for attempt in attempts]
         except Exception:
             raise TestStoreError(
                 "Test submission history is temporarily unavailable."
@@ -243,14 +254,21 @@ class HubTestStore:
         gold = self._read_required(self.gold_config_path, sha)
         policy = _release_policy(release_raw)
         _validate_gold(gold)
-        attempts = self._load_account_attempts(key, sha, policy)
+        attempts, attempt_record_sha256 = self._load_account_attempts(key, sha, policy)
         organizer = self._read_json_optional(
             ORGANIZER_PATH,
             sha,
             {**_release_state(policy), "accounts": []},
         )
         _validate_organizer_projection(organizer, policy)
-        return _Snapshot(sha, policy, gold, tuple(attempts), organizer)
+        return _Snapshot(
+            sha,
+            policy,
+            gold,
+            tuple(attempts),
+            attempt_record_sha256,
+            organizer,
+        )
 
     def _require_config_paths(self) -> None:
         if not self.release_config_path or not self.gold_config_path:
@@ -272,11 +290,11 @@ class HubTestStore:
         key: str,
         sha: str,
         policy: TestReleasePolicy,
-    ) -> list[dict]:
+    ) -> tuple[list[dict], dict[str, str]]:
         account_path = f"projections/test/accounts/{key}.json"
         projection = self._read_json_optional(account_path, sha, None)
         if projection is None:
-            return []
+            return [], {}
         _validate_release_state(projection, policy)
         if projection.get("account_key") != key:
             raise _Unavailable()
@@ -284,6 +302,7 @@ class HubTestStore:
         if not isinstance(references, list):
             raise _Unavailable()
         attempts = []
+        attempt_record_sha256 = {}
         for expected_number, reference in enumerate(references, start=1):
             if not isinstance(reference, Mapping):
                 raise _Unavailable()
@@ -297,18 +316,19 @@ class HubTestStore:
             _validate_release_state(record, policy)
             _validate_scoring_state(record, policy)
             _validate_attempt_contract(record)
+            record_sha256 = hashlib.sha256(record_raw).hexdigest()
             if (
                 not isinstance(record, dict)
                 or record.get("account_key") != key
                 or record.get("submission_id") != submission_id
                 or record.get("attempt_number") != expected_number
                 or reference.get("attempt_number") != expected_number
-                or reference.get("record_sha256")
-                != hashlib.sha256(record_raw).hexdigest()
+                or reference.get("record_sha256") != record_sha256
             ):
                 raise _Unavailable()
             attempts.append(record)
-        return attempts
+            attempt_record_sha256[submission_id] = record_sha256
+        return attempts, attempt_record_sha256
 
     def _read_required(self, path: str, sha: str) -> bytes:
         try:
@@ -537,7 +557,9 @@ def _attempt_record(
     }
 
 
-def _account_projection(key, policy, attempts, best) -> dict:
+def _account_projection(
+    key, policy, attempts, best, attempt_record_sha256: Mapping[str, str]
+) -> dict:
     return {
         **_release_state(policy),
         "account_key": key,
@@ -546,7 +568,7 @@ def _account_projection(key, policy, attempts, best) -> dict:
                 **_release_state(policy),
                 "submission_id": attempt["submission_id"],
                 "attempt_number": attempt["attempt_number"],
-                "record_sha256": hashlib.sha256(_json_bytes(attempt)).hexdigest(),
+                "record_sha256": attempt_record_sha256[attempt["submission_id"]],
             }
             for attempt in attempts
         ],
@@ -633,21 +655,32 @@ def _json_bytes(value) -> bytes:
     return (serialized + "\n").encode("utf-8")
 
 
+def _bounded_json_bytes(value) -> bytes:
+    raw = _json_bytes(value)
+    if len(raw) > MAX_LEDGER_FILE_BYTES:
+        raise _InvalidSubmission()
+    return raw
+
+
 def _commit_operations(
-    key, submission_id, record, account_projection, organizer_projection
+    key,
+    submission_id,
+    record_bytes,
+    account_projection_bytes,
+    organizer_projection_bytes,
 ):
     return [
         CommitOperationAdd(
             path_in_repo=f"attempts/test/{key}/{submission_id}.json",
-            path_or_fileobj=_json_bytes(record),
+            path_or_fileobj=record_bytes,
         ),
         CommitOperationAdd(
             path_in_repo=f"projections/test/accounts/{key}.json",
-            path_or_fileobj=_json_bytes(account_projection),
+            path_or_fileobj=account_projection_bytes,
         ),
         CommitOperationAdd(
             path_in_repo=ORGANIZER_PATH,
-            path_or_fileobj=_json_bytes(organizer_projection),
+            path_or_fileobj=organizer_projection_bytes,
         ),
     ]
 

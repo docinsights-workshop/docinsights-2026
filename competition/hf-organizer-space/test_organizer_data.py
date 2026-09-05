@@ -19,6 +19,7 @@ from organizer_data import (
     verify_snapshot,
 )
 from scoring import score_predictions
+import test_contract
 from test_policy import OAuthIdentity, account_key
 from test_store import HubTestStore, TestStoreError
 
@@ -395,6 +396,56 @@ class OrganizerSnapshotTests(unittest.TestCase):
         receipt = store.submit(identity, metadata, predictions, metrics)
         return hub.files, identity, receipt
 
+    def make_real_store(self):
+        """Return a real store over an in-memory private-Hub fixture."""
+        workspace = tempfile.TemporaryDirectory()
+        self.addCleanup(workspace.cleanup)
+        gold = b'{"instance_id":"task-0","answer":"42","evidence":["b1"]}\n'
+        gold_digest = hashlib.sha256(gold).hexdigest()
+        release = {
+            "schema_version": 1,
+            "release_id": "docsem-test-2026",
+            "task_manifest_sha256": TASK_DIGEST,
+            "gold_sha256": gold_digest,
+            "enabled": True,
+            "finalized": False,
+            "max_attempts": 3,
+            "feedback_policy": "first-attempt-only",
+            "open_at": "2026-09-01T00:00:00Z",
+            "close_at": "2026-10-01T00:00:00Z",
+            "public_revision": "4" * 40,
+            "public_repo_id": "public/docsem",
+            "task_manifest_path": "test/tasks.jsonl",
+        }
+        hub = ProducerHub(
+            workspace.name,
+            {
+                "private/test_release.json": json_bytes(release),
+                "private/test_labels.jsonl": gold,
+            },
+        )
+        identity = OAuthIdentity("subject-a", "user-a", "user-a@example.org")
+        metadata = {
+            "release_id": release["release_id"],
+            "task_manifest_sha256": TASK_DIGEST,
+            "scoring_gold_sha256": gold_digest,
+            "scoring_private_revision": "3" * 40,
+            "scoring_public_revision": "4" * 40,
+            "scoring_public_repo_id": "public/docsem",
+            "scoring_task_manifest_path": "test/tasks.jsonl",
+            "team": "Shared Team",
+            "participant_names": "Participant A",
+            "submission_name": "run-a-1",
+        }
+        store = HubTestStore(
+            hub,
+            repo_id="private/docsem",
+            release_config_path="private/test_release.json",
+            gold_config_path="private/test_labels.jsonl",
+            now_provider=lambda: dt.datetime(2026, 9, 5, 12, 0, tzinfo=dt.timezone.utc),
+        )
+        return hub, store, identity, metadata
+
     def test_real_participant_producer_records_verify_at_exact_text_boundaries(self):
         """Catches drift between producer records and OrganizerSnapshot validation."""
         files, identity, receipt = self.produce_real_store_attempt()
@@ -499,6 +550,110 @@ class OrganizerSnapshotTests(unittest.TestCase):
 
         self.assertEqual(hub.create_calls, [])
         self.assertFalse(any(path.startswith("attempts/test/") for path in hub.files))
+
+    def test_real_store_rejects_attempt_above_reader_file_bound_without_mutation(self):
+        """Catches the producer committing a record the organizer cannot read."""
+        hub, store, identity, metadata = self.make_real_store()
+        labels = [{"instance_id": "task-0", "answer": "42", "evidence": ["b1"]}]
+        first_predictions = [dict(labels[0])]
+        first_metrics = score_predictions(first_predictions, labels)
+        first = store.submit(identity, metadata, first_predictions, first_metrics)
+        before_files = dict(hub.files)
+        oversized_predictions = [
+            {
+                "instance_id": f"task-{index:04d}",
+                "answer": "a" * 4_096,
+                "evidence": ["b1"],
+            }
+            for index in range(4_100)
+        ]
+
+        with self.assertRaisesRegex(TestStoreError, "could not be accepted"):
+            store.submit(identity, metadata, oversized_predictions, first_metrics)
+
+        self.assertEqual(len(hub.create_calls), 1)
+        self.assertEqual(hub.files, before_files)
+        snapshot = self.load(FakeHub(hub.files))
+        report = verify_snapshot(snapshot)
+        self.assertTrue(report.valid)
+        self.assertEqual(report.attempt_count, 1)
+        self.assertEqual(
+            organizer_rows(snapshot)[0]["submission_id"], first.submission_id
+        )
+
+    def test_real_store_and_reader_accept_an_attempt_at_exact_file_byte_limit(self):
+        """Catches an accidental inclusive rejection at the shared byte ceiling."""
+        hub, store, identity, metadata = self.make_real_store()
+        predictions = [
+            {
+                "instance_id": f"task-{index:04d}",
+                "answer": "a" * 4_096,
+                "evidence": ["b"],
+            }
+            for index in range(3_800)
+        ]
+        metrics = {
+            "answer_accuracy": 1.0,
+            "evidence_exact_match": 1.0,
+            "evidence_f1": 1.0,
+            "examples": len(predictions),
+            "per_example": [
+                {
+                    "instance_id": row["instance_id"],
+                    "answer_exact_match": 1.0,
+                    "evidence_exact_match": 1.0,
+                    "evidence_f1": 1.0,
+                }
+                for row in predictions
+            ],
+        }
+        first = store.submit(identity, metadata, predictions, metrics)
+        key = account_key(identity)
+        first_path = f"attempts/test/{key}/{first.submission_id}.json"
+        remaining = test_contract.MAX_LEDGER_FILE_BYTES - len(hub.files[first_path])
+        self.assertGreater(remaining, 0)
+        self.assertLessEqual(remaining, 255 * len(predictions))
+
+        boundary_predictions = []
+        for row in predictions:
+            extra = min(remaining, 255)
+            remaining -= extra
+            boundary_predictions.append(
+                {
+                    "instance_id": row["instance_id"],
+                    "answer": "z" * 4_096,
+                    "evidence": ["b" + "e" * extra],
+                }
+            )
+        self.assertEqual(remaining, 0)
+
+        second = store.submit(identity, metadata, boundary_predictions, metrics)
+        second_path = f"attempts/test/{key}/{second.submission_id}.json"
+        self.assertEqual(
+            len(hub.files[second_path]), test_contract.MAX_LEDGER_FILE_BYTES
+        )
+
+        snapshot = self.load(FakeHub(hub.files))
+        report = verify_snapshot(snapshot)
+        self.assertTrue(report.valid)
+        self.assertEqual(report.attempt_count, 2)
+
+    def test_reader_accepts_a_file_at_the_shared_serialized_byte_boundary(self):
+        """Catches producer and organizer ledger-file limits drifting apart."""
+        self.assertEqual(
+            MAX_FILE_BYTES,
+            getattr(test_contract, "MAX_LEDGER_FILE_BYTES", None),
+        )
+        files = fixture_files()
+        release = files["private/test_release.json"]
+        self.assertLess(len(release), MAX_FILE_BYTES)
+        files["private/test_release.json"] = release + b" " * (
+            MAX_FILE_BYTES - len(release)
+        )
+
+        report = verify_snapshot(self.load(FakeHub(files)))
+
+        self.assertTrue(report.valid)
 
     def test_reconstructs_all_accounts_attempts_best_exclusions_and_adjudications(self):
         """Catches trusting a projection or collapsing accounts that share a team."""
