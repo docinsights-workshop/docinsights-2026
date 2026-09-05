@@ -28,6 +28,7 @@ SOURCE_ROOT = REPOSITORY_ROOT / "competition" / "hf-organizer-space"
 SPACE_REPO_ID = "amitbcp/docsem-docinsights-organizer"
 PRIVATE_DATASET_REPO_ID = "amitbcp/docinsights-2026-shared-task-submissions"
 PARTICIPANT_SPACE_REPO_ID = "amitbcp/docsem-docinsights"
+PARTICIPANT_SPACE_REVISION = "282fb9d37d30b18497dc2b90648f7a9740ca2bf2"
 SPACE_OWNER = "amitbcp"
 PUBLISH_CONFIRMATION = "PUBLISH_PRIVATE_ORGANIZER_SPACE"
 BUNDLE_PATHS = (
@@ -43,7 +44,10 @@ _USERNAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _RESERVED_SECRET_NAMES = ("ORGANIZER_READ_TOKEN", "PRIVATE_REPO_ID")
 _READY_STAGE = "RUNNING"
 _MAX_HTTP_BYTES = 4 * 1024 * 1024
+_MAX_PARTICIPANT_SSE_BYTES = 256 * 1024
+_MAX_PARTICIPANT_SSE_EVENTS = 64
 _MAX_BUNDLE_FILE_BYTES = 4 * 1024 * 1024
+_QUEUE_EVENT_ID = re.compile(r"[0-9a-f]{32}\Z")
 _WRITE_CAPABILITY = re.compile(
     rb"\b(?:create_commit|create_repo|upload_file|upload_folder|delete_file|"
     rb"delete_repo|update_repo_settings|add_space_secret|delete_space_secret|"
@@ -494,6 +498,142 @@ def _safe_json(response: HttpResponse, description: str) -> Mapping[str, object]
     return value
 
 
+def _participant_queue_result(
+    backend: HubBackend,
+    host: str,
+) -> list[object]:
+    """Invoke one public named Gradio endpoint and parse its bounded SSE result."""
+
+    description = "public participant split response"
+    try:
+        queued = _safe_json(
+            backend.request(
+                "POST",
+                host + "/call/select_split",
+                json_body={"data": ["Test (final)"]},
+            ),
+            description,
+        )
+    except DeploymentError:
+        raise
+    except Exception as exc:
+        raise DeploymentError(f"The {description} is unavailable.") from exc
+    event_id = queued.get("event_id")
+    if set(queued) != {"event_id"} or not isinstance(event_id, str):
+        raise DeploymentError("The public participant queue event is malformed.")
+    if _QUEUE_EVENT_ID.fullmatch(event_id) is None:
+        raise DeploymentError("The public participant queue event is malformed.")
+    try:
+        response = backend.request(
+            "GET",
+            host + f"/call/select_split/{event_id}",
+        )
+    except DeploymentError:
+        raise
+    except Exception as exc:
+        raise DeploymentError(f"The {description} is unavailable.") from exc
+    return _parse_participant_sse(response)
+
+
+def _parse_participant_sse(response: HttpResponse) -> list[object]:
+    description = "public participant split response"
+    if (
+        not isinstance(response, HttpResponse)
+        or response.status_code != 200
+        or not isinstance(response.body, bytes)
+        or len(response.body) > _MAX_PARTICIPANT_SSE_BYTES
+    ):
+        raise DeploymentError(f"The {description} is unavailable.")
+    content_type = next(
+        (
+            value
+            for key, value in response.headers.items()
+            if isinstance(key, str) and key.casefold() == "content-type"
+        ),
+        "",
+    )
+    if not isinstance(content_type, str) or not content_type.casefold().startswith(
+        "text/event-stream"
+    ):
+        raise DeploymentError(f"The {description} is malformed.")
+    try:
+        text = response.body.decode("utf-8").replace("\r\n", "\n")
+    except UnicodeDecodeError as exc:
+        raise DeploymentError(f"The {description} is malformed.") from exc
+    if "\r" in text:
+        raise DeploymentError(f"The {description} is malformed.")
+    frames = text.split("\n\n")
+    if frames and frames[-1] == "":
+        frames.pop()
+    if (
+        not frames
+        or len(frames) > _MAX_PARTICIPANT_SSE_EVENTS
+        or any(not frame for frame in frames)
+    ):
+        raise DeploymentError(f"The {description} is malformed.")
+
+    def no_duplicate_keys(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError("duplicate key")
+            value[key] = item
+        return value
+
+    complete: list[object] | None = None
+    for frame in frames:
+        lines = frame.split("\n")
+        if (
+            len(lines) != 2
+            or not lines[0].startswith("event: ")
+            or not lines[1].startswith("data: ")
+        ):
+            raise DeploymentError(f"The {description} is malformed.")
+        event = lines[0].removeprefix("event: ")
+        try:
+            data = json.loads(
+                lines[1].removeprefix("data: "),
+                object_pairs_hook=no_duplicate_keys,
+                parse_constant=lambda _: (_ for _ in ()).throw(
+                    ValueError("invalid constant")
+                ),
+            )
+        except (json.JSONDecodeError, RecursionError, TypeError, ValueError) as exc:
+            raise DeploymentError(f"The {description} is malformed.") from exc
+        if event == "heartbeat" and data is None:
+            continue
+        if event != "complete" or complete is not None or not isinstance(data, list):
+            raise DeploymentError(f"The {description} is malformed.")
+        complete = data
+    if complete is None:
+        raise DeploymentError(f"The {description} is malformed.")
+    return complete
+
+
+def _verify_participant_api_info(info: Mapping[str, object]) -> None:
+    named = info.get("named_endpoints")
+    if (
+        not isinstance(named, Mapping)
+        or "/select_split" not in named
+        or len(named) > 128
+    ):
+        raise DeploymentError("The public participant API information is malformed.")
+    for endpoint in named:
+        if not isinstance(endpoint, str) or not endpoint.startswith("/"):
+            raise DeploymentError(
+                "The public participant API information is malformed."
+            )
+        folded = endpoint.casefold()
+        exposes_final = "final" in folded
+        exposes_test_result = "test" in folded and any(
+            marker in folded for marker in ("leaderboard", "rank", "result", "score")
+        )
+        if exposes_final or exposes_test_result:
+            raise DeploymentError(
+                "The public participant Space exposes a named final endpoint."
+            )
+
+
 def _reconcile_private_dataset(
     backend: HubBackend,
     revision: str,
@@ -624,7 +764,7 @@ def _verify_participant_disabled(
     try:
         state = _require_existing_space(
             backend.inspect_space(PARTICIPANT_SPACE_REPO_ID, deploy_token),
-            expected_revision=None,
+            expected_revision=PARTICIPANT_SPACE_REVISION,
             expected_private=False,
             description="public participant Space",
         )
@@ -634,10 +774,16 @@ def _verify_participant_disabled(
         raise DeploymentError("The public participant Space is unavailable.") from exc
     if not state.host:
         raise DeploymentError("The public participant Space host is unavailable.")
+    host = state.host.rstrip("/")
     config = _safe_json(
-        backend.request("GET", state.host.rstrip("/") + "/config"),
+        backend.request("GET", host + "/config"),
         "public participant configuration",
     )
+    info = _safe_json(
+        backend.request("GET", host + "/info"),
+        "public participant API information",
+    )
+    _verify_participant_api_info(info)
     split = _component_with_label(config, "Evaluation split")
     leaderboard = _component_with_label(config, "Leaderboard view")
     split_props = split.get("props")
@@ -650,15 +796,7 @@ def _verify_participant_disabled(
     ):
         raise DeploymentError("The public participant test surfaces are not disabled.")
 
-    split_result = _safe_json(
-        backend.request(
-            "POST",
-            state.host.rstrip("/") + "/api/select_split",
-            json_body={"data": ["Test (final)"]},
-        ),
-        "public participant split response",
-    )
-    split_data = split_result.get("data")
+    split_data = _participant_queue_result(backend, host)
     if (
         not isinstance(split_data, list)
         or len(split_data) != 4
@@ -684,28 +822,6 @@ def _verify_participant_disabled(
                 candidates.append(dependency)
     if len(candidates) != 1 or type(candidates[0].get("id")) is not int:
         raise DeploymentError("The public participant configuration is malformed.")
-    final_result = _safe_json(
-        backend.request(
-            "POST",
-            state.host.rstrip("/") + "/api/predict",
-            json_body={
-                "fn_index": candidates[0]["id"],
-                "data": ["Final test leaderboard"],
-            },
-        ),
-        "public participant final-leaderboard response",
-    )
-    final_data = final_result.get("data")
-    if (
-        not isinstance(final_data, list)
-        or len(final_data) != 3
-        or not isinstance(final_data[1], Mapping)
-        or not isinstance(final_data[2], Mapping)
-        or final_data[2].get("visible") is not False
-        or "not available yet" not in str(final_data[1].get("value", "")).casefold()
-        or "<table" in str(final_data[1].get("value", "")).casefold()
-    ):
-        raise DeploymentError("The public participant test surfaces are not disabled.")
     return True, True
 
 

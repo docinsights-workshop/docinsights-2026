@@ -19,6 +19,7 @@ DENIED_TOKEN = "hf_denied_probe_sentinel"
 SOURCE_REVISION = "a" * 40
 SPACE_PARENT = "b" * 40
 PRIVATE_REVISION = "c" * 40
+PARTICIPANT_REVISION = "282fb9d37d30b18497dc2b90648f7a9740ca2bf2"
 
 
 def whoami(role: str, name: str = "amitbcp") -> dict:
@@ -87,7 +88,7 @@ class FakeHubBackend:
         )
         self.participant = publisher.SpaceState(
             exists=True,
-            revision="e" * 40,
+            revision=PARTICIPANT_REVISION,
             private=False,
             sdk="gradio",
             host="https://participant.example.test",
@@ -156,6 +157,23 @@ class FakeHubBackend:
                 }
             ],
         }
+        self.participant_info = {
+            "named_endpoints": {
+                "/select_split": {},
+                "/submit_predictions": {},
+                "/my_test_submissions": {},
+                "/leaderboard_html": {},
+            },
+            "unnamed_endpoints": {},
+        }
+        self.participant_event_id = "0123456789abcdef0123456789abcdef"
+        self.participant_sse = (
+            b"event: heartbeat\ndata: null\n\n"
+            b"event: complete\n"
+            b'data: [{"value": "Test submissions are not open yet."}, '
+            b'{"visible": false}, {"interactive": false, '
+            b'"value": "Submit test predictions"}, {"visible": true}]\n\n'
+        )
 
     def whoami(self, token):
         return self.identities[token]
@@ -272,39 +290,23 @@ class FakeHubBackend:
                 return publisher.HttpResponse(
                     200, json.dumps(self.participant_config).encode(), {}
                 )
-            if method == "POST" and path == "/api/select_split":
+            if method == "GET" and path == "/info":
                 return publisher.HttpResponse(
-                    200,
-                    json.dumps(
-                        {
-                            "data": [
-                                {"value": "Test submissions are not open yet."},
-                                {"visible": False},
-                                {
-                                    "interactive": False,
-                                    "value": "Submit test predictions",
-                                },
-                                {"visible": True},
-                            ]
-                        }
-                    ).encode(),
-                    {},
+                    200, json.dumps(self.participant_info).encode(), {}
                 )
-            if method == "POST" and path == "/api/predict":
+            if method == "POST" and path == "/call/select_split":
                 return publisher.HttpResponse(
                     200,
-                    json.dumps(
-                        {
-                            "data": [
-                                {"value": "Final test leaderboard"},
-                                {
-                                    "value": "The final test leaderboard is not available yet."
-                                },
-                                {"visible": False},
-                            ]
-                        }
-                    ).encode(),
-                    {},
+                    json.dumps({"event_id": self.participant_event_id}).encode(),
+                    {"content-type": "application/json"},
+                )
+            if method == "GET" and path == (
+                f"/call/select_split/{self.participant_event_id}"
+            ):
+                return publisher.HttpResponse(
+                    200,
+                    self.participant_sse,
+                    {"content-type": "text/event-stream; charset=utf-8"},
                 )
         return publisher.HttpResponse(404, b"not found", {})
 
@@ -949,41 +951,124 @@ class DeploymentWorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(publisher.DeploymentError, "variable"):
             self.execute(request)
 
-    def test_participant_reconciliation_rejects_open_test_or_final_rows(self):
+    def test_participant_reconciliation_rejects_open_test(self):
         self.hub.participant_config["components"][0]["props"]["value"] = "Test (final)"
         with self.assertRaisesRegex(publisher.DeploymentError, "participant"):
             self.execute()
 
         self.setUp()
-        original = self.hub.request
-
-        def open_test(method, url, **kwargs):
-            response = original(method, url, **kwargs)
-            if url.endswith("/api/select_split"):
-                body = json.loads(response.body)
-                body["data"][2]["interactive"] = True
-                return publisher.HttpResponse(200, json.dumps(body).encode(), {})
-            return response
-
-        self.hub.request = open_test
+        self.hub.participant_sse = self.hub.participant_sse.replace(
+            b'"interactive": false', b'"interactive": true'
+        )
         with self.assertRaisesRegex(publisher.DeploymentError, "participant"):
             self.execute()
 
-        self.setUp()
-        original = self.hub.request
+    def test_participant_disabled_uses_only_pinned_named_queue_and_hidden_config(self):
+        result = self.execute()
 
-        def final_rows(method, url, **kwargs):
-            response = original(method, url, **kwargs)
-            if method == "POST" and url.endswith("/api/predict"):
-                body = json.loads(response.body)
-                body["data"][1]["value"] = "<table><tr><td>99</td></tr></table>"
-                body["data"][2]["visible"] = True
-                return publisher.HttpResponse(200, json.dumps(body).encode(), {})
-            return response
+        self.assertTrue(result.participant_test_submissions_disabled)
+        self.assertTrue(result.participant_final_leaderboard_disabled)
+        host = self.hub.participant.host
+        self.assertIn(("GET", host + "/info", None, None), self.hub.request_calls)
+        self.assertIn(
+            (
+                "POST",
+                host + "/call/select_split",
+                None,
+                {"data": ["Test (final)"]},
+            ),
+            self.hub.request_calls,
+        )
+        self.assertIn(
+            (
+                "GET",
+                host + f"/call/select_split/{self.hub.participant_event_id}",
+                None,
+                None,
+            ),
+            self.hub.request_calls,
+        )
+        self.assertFalse(
+            any("/api/" in call[1] for call in self.hub.request_calls),
+            self.hub.request_calls,
+        )
 
-        self.hub.request = final_rows
-        with self.assertRaisesRegex(publisher.DeploymentError, "participant"):
+    def test_participant_revision_drift_fails_before_any_participant_request(self):
+        self.hub.participant = publisher.SpaceState(
+            exists=True,
+            revision="e" * 40,
+            private=False,
+            sdk="gradio",
+            host=self.hub.participant.host,
+            runtime_stage="RUNNING",
+        )
+
+        with self.assertRaisesRegex(publisher.DeploymentError, "revision"):
             self.execute()
+
+        self.assertFalse(
+            any(
+                call[1].startswith(self.hub.participant.host)
+                for call in self.hub.request_calls
+            )
+        )
+
+    def test_participant_info_refuses_any_named_final_or_test_result_endpoint(self):
+        for endpoint in ("/finalize", "/final_test_leaderboard", "/test_score"):
+            with self.subTest(endpoint=endpoint):
+                self.setUp()
+                self.hub.participant_info["named_endpoints"][endpoint] = {}
+
+                with self.assertRaisesRegex(publisher.DeploymentError, "endpoint"):
+                    self.execute()
+
+    def test_participant_queue_rejects_unsafe_event_ids_without_following_them(self):
+        for event_id in (
+            "",
+            "ABCDEF0123456789ABCDEF0123456789",
+            "0" * 31,
+            "0" * 33,
+            "../info",
+            "0" * 16 + "/" + "0" * 16,
+        ):
+            with self.subTest(event_id=event_id):
+                self.setUp()
+                self.hub.participant_event_id = event_id
+
+                with self.assertRaisesRegex(publisher.DeploymentError, "event"):
+                    self.execute()
+
+                self.assertFalse(
+                    any(
+                        call[0] == "GET" and "/call/select_split/" in call[1]
+                        for call in self.hub.request_calls
+                    ),
+                    self.hub.request_calls,
+                )
+
+    def test_participant_queue_rejects_malformed_oversize_or_error_sse(self):
+        complete = (
+            b"event: complete\n"
+            b'data: [{"value": "Test submissions are not open yet."}, '
+            b'{"visible": false}, {"interactive": false}, '
+            b'{"visible": true}]\n\n'
+        )
+        invalid_streams = {
+            "invalid utf8": b"event: complete\ndata: \xff\n\n",
+            "missing complete": b"event: heartbeat\ndata: null\n\n",
+            "duplicate complete": complete + complete,
+            "error event": b'event: error\ndata: "failed"\n\n',
+            "unknown event": b"event: generating\ndata: []\n\n",
+            "complete not list": b'event: complete\ndata: {"data": []}\n\n',
+            "oversize": b"x" * (256 * 1024 + 1),
+        }
+        for label, payload in invalid_streams.items():
+            with self.subTest(label=label):
+                self.setUp()
+                self.hub.participant_sse = payload
+
+                with self.assertRaisesRegex(publisher.DeploymentError, "participant"):
+                    self.execute()
 
 
 class FakeApi:
