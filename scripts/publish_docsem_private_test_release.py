@@ -11,7 +11,8 @@ import argparse
 import base64
 from contextlib import contextmanager
 import ctypes
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 import errno
 import json
 import os
@@ -79,6 +80,11 @@ PDF_INVENTORY_SHA256 = (
     "3fce062d7485c44c3986df8945eac069703adfd8c52571578763458e11748238"
 )
 CONFIRMATION = "PUBLISH_DISABLED_PRIVATE_TEST_RELEASE"
+LEGACY_HISTORY_POLICY = "legacy-private-label-cycle-v1"
+LEGACY_HISTORY_CONFIRMATION = "ACKNOWLEDGE_RETAINED_LEGACY_PRIVATE_LABEL_HISTORY"
+LEGACY_HISTORY_METADATA_SHA256 = (
+    "17107b3da2db03b98356ba11ead006be38d85dad06f8f9b9e20a3bd02a5d1215"
+)
 EXPECTED_OWNER = "amitbcp"
 EXPECTED_ROLE = "write"
 MAX_PRIVATE_LABEL_BYTES = 64 * 1024 * 1024
@@ -119,6 +125,7 @@ __all__ = [
     "HfRepositoryState",
     "ReleaseError",
     "RemoteMovedError",
+    "PublicationUncertainError",
     "ReleaseConfig",
     "HfIdentity",
     "RemoteFile",
@@ -127,6 +134,10 @@ __all__ = [
     "run_private_continuation",
     "main",
 ]
+
+
+class PublicationUncertainError(ReleaseError):
+    """A private write may have landed and must never be retried automatically."""
 
 
 @dataclass(frozen=True)
@@ -147,6 +158,45 @@ class HfIdentity:
 class RemoteFile:
     size: int
     sha256: str | None
+
+
+@dataclass(frozen=True, repr=False)
+class PrivateHistoryEvent:
+    revision: str
+    parents: tuple[str, ...]
+    timestamp: str
+    status: str
+    path: str
+    subject: str
+
+    def __repr__(self) -> str:
+        return (
+            "PrivateHistoryEvent(revision=<sanitized>, status="
+            f"{self.status!r}, path=<sanitized>)"
+        )
+
+
+@dataclass(frozen=True, repr=False)
+class PrivateHistoryAudit:
+    head: str
+    events: tuple[PrivateHistoryEvent, ...]
+    reachable: frozenset[str]
+    shallow: bool
+    blob_objects_fetched: bool
+    parent_map: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+
+    def __repr__(self) -> str:
+        return f"PrivateHistoryAudit(event_count={len(self.events)}, sanitized=True)"
+
+
+def _event_metadata(event: PrivateHistoryEvent) -> dict[str, object]:
+    return {
+        "revision": event.revision,
+        "parents": list(event.parents),
+        "timestamp": event.timestamp,
+        "status": event.status,
+        "path": event.path,
+    }
 
 
 @dataclass(frozen=True, repr=False)
@@ -496,13 +546,14 @@ def _receipt(
     status: str,
     private_base: str | None = None,
     private_revision: str | None = None,
+    legacy_result: str | None = None,
 ) -> dict[str, object]:
     revisions = {"public": PUBLIC_REVISION}
     if private_base is not None:
         revisions["private_base"] = private_base
     if private_revision is not None:
         revisions["private_returned"] = private_revision
-    return {
+    result = {
         "status": status,
         "release_id": RELEASE_ID,
         "counts": {
@@ -519,6 +570,19 @@ def _receipt(
         "revisions": revisions,
         "activation": "not-performed",
     }
+    if legacy_result is not None:
+        result["legacy_history"] = {
+            "policy_id": LEGACY_HISTORY_POLICY,
+            "result": legacy_result,
+            "legacy_event_count": 2,
+            "metadata_sha256": LEGACY_HISTORY_METADATA_SHA256,
+            "blob_objects_fetched": False,
+            "blob_contents_read": False,
+            "legacy_content_compared": False,
+            "legacy_history_retained": True,
+        }
+        result["operation"] = {"overwrites": 0, "deletes": 0, "retries": 0}
+    return result
 
 
 def prepare_stage(
@@ -682,6 +746,162 @@ def _validate_identity(identity: HfIdentity) -> None:
         )
 
 
+def _event_key(event: PrivateHistoryEvent) -> tuple[object, ...]:
+    return (
+        event.revision,
+        event.parents,
+        event.timestamp,
+        event.status,
+        event.path,
+    )
+
+
+def _validate_publication_events(
+    events: Sequence[PrivateHistoryEvent],
+    *,
+    audit: PrivateHistoryAudit,
+    expected_parent: str | None,
+) -> str:
+    if len(events) != 2:
+        raise ReleaseError(
+            "Private history does not contain one exact publication event."
+        )
+    labels, release = events
+    expected_subject = f"Install {RELEASE_ID} disabled"
+    if (
+        labels.revision != release.revision
+        or labels.parents != release.parents
+        or labels.timestamp != release.timestamp
+        or labels.status != "A"
+        or release.status != "A"
+        or (labels.path, release.path) != _PRIVATE_PATHS
+        or labels.subject != expected_subject
+        or release.subject != expected_subject
+        or len(labels.parents) != 1
+        or labels.parents[0] not in audit.reachable
+        or (expected_parent is not None and labels.parents != (expected_parent,))
+        or labels.revision not in audit.reachable
+    ):
+        raise ReleaseError("Private history publication metadata is not exact.")
+    return labels.revision
+
+
+def _validate_private_history(
+    audit: PrivateHistoryAudit,
+    *,
+    expected_head: str,
+    current_status: str,
+    legacy_policy: str | None,
+    expected_publication_parent: str | None = None,
+) -> str:
+    if (
+        not isinstance(audit, PrivateHistoryAudit)
+        or audit.head != expected_head
+        or audit.shallow is not False
+        or audit.blob_objects_fetched is not False
+        or expected_head not in audit.reachable
+        or not 1 <= len(audit.reachable) <= MAX_HISTORY_COMMITS
+        or any(not re.fullmatch(r"[0-9a-f]{40}", item) for item in audit.reachable)
+        or set(audit.parent_map) != set(audit.reachable)
+        or any(not isinstance(parents, tuple) for parents in audit.parent_map.values())
+        or any(
+            parent not in audit.reachable
+            for parents in audit.parent_map.values()
+            for parent in parents
+        )
+        or len(audit.events) > 4
+    ):
+        raise ReleaseError("Private history audit is incomplete or unsafe.")
+    for event in audit.events:
+        try:
+            parsed_time = datetime.strptime(
+                event.timestamp, "%Y-%m-%dT%H:%M:%SZ"
+            ).replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError) as exc:
+            raise ReleaseError("Private history event metadata is malformed.") from exc
+        if (
+            not isinstance(event, PrivateHistoryEvent)
+            or not re.fullmatch(r"[0-9a-f]{40}", event.revision)
+            or not isinstance(event.parents, tuple)
+            or any(
+                not re.fullmatch(r"[0-9a-f]{40}", parent) for parent in event.parents
+            )
+            or not re.fullmatch(
+                r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", event.timestamp
+            )
+            or event.status not in {"A", "D", "M", "R", "C", "T"}
+            or not _safe_relative_path(event.path)
+            or not event.path.startswith("private/test_")
+            or not isinstance(event.subject, str)
+            or len(event.subject.encode("utf-8")) > 1024
+            or any(
+                ord(character) < 32 or ord(character) == 127
+                for character in event.subject
+            )
+            or event.revision not in audit.reachable
+            or audit.parent_map.get(event.revision) != event.parents
+            or parsed_time.strftime("%Y-%m-%dT%H:%M:%SZ") != event.timestamp
+        ):
+            raise ReleaseError("Private history event metadata is malformed.")
+
+    legacy = audit.events[:2]
+    has_legacy_shape = (
+        len(legacy) == 2
+        and legacy[0].status == "A"
+        and legacy[0].path == "private/test_labels.jsonl"
+        and legacy[0].parents == ()
+        and legacy[1].status == "D"
+        and legacy[1].path == "private/test_labels.jsonl"
+        and legacy[1].parents == (legacy[0].revision,)
+        and legacy[0].revision != legacy[1].revision
+        and legacy[0].timestamp < legacy[1].timestamp
+    )
+    has_legacy = (
+        has_legacy_shape
+        and _sha256(_canonical_json([_event_metadata(event) for event in legacy]))
+        == LEGACY_HISTORY_METADATA_SHA256
+    )
+    if legacy_policy is None:
+        if has_legacy:
+            raise ReleaseError(
+                "Retained legacy private test history requires the exact policy."
+            )
+        if current_status == "pending":
+            if audit.events:
+                raise ReleaseError(
+                    "A removed or superseded private test namespace exists in history."
+                )
+            return "matched-empty"
+        _validate_publication_events(
+            audit.events,
+            audit=audit,
+            expected_parent=expected_publication_parent,
+        )
+        return "matched-postpublish"
+    if legacy_policy != LEGACY_HISTORY_POLICY or not has_legacy:
+        raise ReleaseError(
+            "The retained legacy private history profile does not match."
+        )
+    if current_status == "pending":
+        if len(audit.events) != 2:
+            raise ReleaseError(
+                "The retained legacy private history event stream is not exact."
+            )
+        return "matched-prepublish"
+    if len(audit.events) != 4:
+        raise ReleaseError(
+            "The retained legacy private history event stream is not exact."
+        )
+    if audit.events[2].revision in {legacy[0].revision, legacy[1].revision}:
+        raise ReleaseError("The current publication revision reuses legacy history.")
+    _validate_publication_events(
+        audit.events[2:],
+        audit=audit,
+        expected_parent=expected_publication_parent,
+    )
+    return "matched-postpublish"
+
+
 def _audit_public_remote(
     hub,
     token: str,
@@ -740,7 +960,10 @@ def _inspect_private(
     hub,
     token: str,
     private: _PrivateSnapshot,
-) -> tuple[str, frozenset[str]]:
+    *,
+    legacy_policy: str | None,
+    expected_publication_parent: str | None = None,
+) -> tuple[str, frozenset[str], str]:
     try:
         _validate_identity(hub.identity(token))
         state = _validated_hf_state(
@@ -760,24 +983,17 @@ def _inspect_private(
                 PRIVATE_HF_REPOSITORY, state.revision, names, token
             ),
         )
-        historical_paths = frozenset(
-            hub.history_path_names(PRIVATE_HF_REPOSITORY, state.revision, token)
+        history_result = _validate_private_history(
+            hub.history_audit(PRIVATE_HF_REPOSITORY, state.revision, token),
+            expected_head=state.revision,
+            current_status=status,
+            legacy_policy=legacy_policy,
+            expected_publication_parent=expected_publication_parent,
         )
-        if any(not _safe_relative_path(path) for path in historical_paths):
-            raise ReleaseError("Private history contains an unsafe path.")
-        historical_namespace = {
-            path for path in historical_paths if path.startswith("private/test_")
-        }
-        if historical_namespace and (
-            status == "pending" or not historical_namespace <= set(_PRIVATE_PATHS)
-        ):
-            raise ReleaseError(
-                "A removed or superseded private test namespace exists in history."
-            )
         non_test = frozenset(
             path for path in paths if not path.startswith("private/test_")
         )
-        return status, non_test
+        return status, non_test, history_result
     except ReleaseError:
         raise
     except Exception as exc:
@@ -838,6 +1054,8 @@ def run_private_continuation(
     publish: bool = False,
     confirmation: str | None = None,
     public_auditor: Callable[[Path], Mapping[str, object]] | None = None,
+    legacy_history_policy: str | None = None,
+    legacy_history_confirmation: str | None = None,
 ) -> dict[str, object]:
     """Dry-run or exact-parent publish the two-file disabled private release."""
     _validate_remote_config(config)
@@ -847,30 +1065,64 @@ def run_private_continuation(
         raise ReleaseError(
             "Private publication requires the exact confirmation phrase."
         )
+    if legacy_history_policy not in {None, LEGACY_HISTORY_POLICY}:
+        raise ReleaseError("The retained legacy history policy is invalid.")
+    if legacy_history_policy is None and legacy_history_confirmation is not None:
+        raise ReleaseError("A legacy confirmation requires the exact closed policy.")
+    if (
+        legacy_history_confirmation is not None
+        and legacy_history_confirmation != LEGACY_HISTORY_CONFIRMATION
+    ):
+        raise ReleaseError("The retained legacy history confirmation is invalid.")
+    if (
+        publish
+        and legacy_history_policy == LEGACY_HISTORY_POLICY
+        and legacy_history_confirmation != LEGACY_HISTORY_CONFIRMATION
+    ):
+        raise ReleaseError(
+            "Legacy-history publication requires its exact confirmation."
+        )
     # Preparation already ran the full PDF auditor.  Dry-run/publication recheck
     # the immutable metadata, path/stat inventory, and remote PDF digests without
     # creating another local PDF-audit workspace.
     public = _audit_local_public(Path(config.public_stage), None)
     private = _load_private_stage(config, public)
     _audit_public_remote(hf_backend, token, public)
-    status, non_test = _inspect_private(config, hf_backend, token, private)
+    status, non_test, history_result = _inspect_private(
+        config,
+        hf_backend,
+        token,
+        private,
+        legacy_policy=legacy_history_policy,
+    )
     if not publish:
         return _receipt(
             status=status,
             private_base=config.private_hf_base,
+            legacy_result=(
+                history_result
+                if legacy_history_policy == LEGACY_HISTORY_POLICY
+                else None
+            ),
         )
     if status == "already-published":
         returned = config.private_hf_base
     else:
         # Recheck both immutable anchors immediately before the only write.
         _audit_public_remote(hf_backend, token, public)
-        _validate_identity(hf_backend.identity(token))
-        _validated_hf_state(
-            hf_backend.repository_state(PRIVATE_HF_REPOSITORY, token),
-            expected_revision=config.private_hf_base,
-            expected_private=True,
-            description="Private Hugging Face repository",
+        boundary_status, boundary_non_test, boundary_history = _inspect_private(
+            config,
+            hf_backend,
+            token,
+            private,
+            legacy_policy=legacy_history_policy,
         )
+        if (
+            boundary_status != "pending"
+            or boundary_non_test != non_test
+            or boundary_history != history_result
+        ):
+            raise ReleaseError("Private state changed at the publication boundary.")
         try:
             with _sealed_private_operations(private) as operations:
                 _validated_hf_state(
@@ -888,16 +1140,52 @@ def run_private_continuation(
                     expected_private=True,
                 )
             returned = _validate_revision(returned, "Private Hugging Face publication")
-        except Exception as exc:
+        except RemoteMovedError as exc:
             raise ReleaseError(
                 "The exact-parent private publication was refused without retry."
             ) from exc
-    _reconcile_private(hf_backend, token, returned, non_test, private, public)
-    _audit_public_remote(hf_backend, token, public)
+        except Exception as exc:
+            raise PublicationUncertainError(
+                "The private publication outcome is uncertain; do not retry or compensate."
+            ) from exc
+    try:
+        _reconcile_private(hf_backend, token, returned, non_test, private, public)
+        post_config = ReleaseConfig(
+            config.public_stage,
+            config.private_label_source,
+            config.private_stage,
+            returned,
+        )
+        post_status, post_non_test, post_history = _inspect_private(
+            post_config,
+            hf_backend,
+            token,
+            private,
+            legacy_policy=legacy_history_policy,
+            expected_publication_parent=(
+                config.private_hf_base if status == "pending" else None
+            ),
+        )
+        if post_status != "already-published" or post_non_test != non_test:
+            raise ReleaseError(
+                "Private state changed during post-publication history audit."
+            )
+        _audit_public_remote(hf_backend, token, public)
+    except Exception as exc:
+        if status == "pending":
+            raise PublicationUncertainError(
+                "The private publication may have landed; do not retry or compensate."
+            ) from exc
+        if isinstance(exc, ReleaseError):
+            raise
+        raise ReleaseError("Idempotent private verification failed safely.") from exc
     return _receipt(
         status="already-published" if status == "already-published" else "published",
         private_base=config.private_hf_base,
         private_revision=returned,
+        legacy_result=(
+            post_history if legacy_history_policy == LEGACY_HISTORY_POLICY else None
+        ),
     )
 
 
@@ -1203,9 +1491,9 @@ class HuggingFaceBackend(_GuardedHuggingFaceBackend):
                     "Private history fetch unexpectedly contained file contents."
                 )
 
-    def _history_path_names_from_remote(
+    def _history_snapshot_from_remote(
         self, remote: str, expected_head: str, token: str
-    ) -> frozenset[str]:
+    ) -> tuple[frozenset[str], PrivateHistoryAudit]:
         _validate_revision(expected_head, "Private history head")
         environment = self._git_environment(token)
         try:
@@ -1245,6 +1533,13 @@ class HuggingFaceBackend(_GuardedHuggingFaceBackend):
             if fetched != expected_head:
                 raise RemoteMovedError("Private history moved from its expected head.")
             self._verify_no_blob_objects(repository, environment)
+            shallow_value = self._run_history_git(
+                ("rev-parse", "--is-shallow-repository"),
+                cwd=repository,
+                environment=environment,
+            ).strip()
+            if shallow_value not in {b"true", b"false"}:
+                raise ReleaseError("Private history depth could not be verified.")
             count_text = (
                 self._run_history_git(
                     ("rev-list", "--count", "FETCH_HEAD"),
@@ -1264,7 +1559,10 @@ class HuggingFaceBackend(_GuardedHuggingFaceBackend):
             output = self._run_history_git(
                 (
                     "log",
+                    "--full-history",
+                    "-m",
                     "--no-renames",
+                    "--no-ext-diff",
                     "--format=",
                     "--name-only",
                     "-z",
@@ -1283,7 +1581,205 @@ class HuggingFaceBackend(_GuardedHuggingFaceBackend):
                 raise ReleaseError("Private history contains an unsafe path.") from exc
             if any(not _safe_relative_path(path) for path in paths):
                 raise ReleaseError("Private history contains an unsafe path.")
-            return paths
+
+            graph_output = self._run_history_git(
+                ("rev-list", "--parents", "--reverse", "--topo-order", "FETCH_HEAD"),
+                cwd=repository,
+                environment=environment,
+                max_output=MAX_GIT_PATH_OUTPUT_BYTES,
+            )
+            try:
+                graph_rows = tuple(
+                    tuple(line.decode("ascii").split())
+                    for line in graph_output.splitlines()
+                    if line
+                )
+            except UnicodeDecodeError as exc:
+                raise ReleaseError("Private history graph is malformed.") from exc
+            if len(graph_rows) != int(count_text):
+                raise ReleaseError("Private history graph is incomplete.")
+            parent_map: dict[str, tuple[str, ...]] = {}
+            order: list[str] = []
+            for row in graph_rows:
+                if not row or any(
+                    not re.fullmatch(r"[0-9a-f]{40}", item) for item in row
+                ):
+                    raise ReleaseError("Private history graph is malformed.")
+                revision, parents = row[0], tuple(row[1:])
+                if revision in parent_map:
+                    raise ReleaseError(
+                        "Private history graph contains a duplicate commit."
+                    )
+                parent_map[revision] = parents
+                order.append(revision)
+            reachable = frozenset(order)
+            if any(
+                parent not in reachable
+                for parents in parent_map.values()
+                for parent in parents
+            ):
+                raise ReleaseError("Private history graph is incomplete.")
+
+            namespace_paths = sorted(
+                path for path in paths if path.startswith("private/test_")
+            )
+            if any(path not in _PRIVATE_PATHS for path in namespace_paths):
+                raise ReleaseError(
+                    "Private history contains an unapproved test namespace path."
+                )
+            touched: dict[str, set[str]] = {}
+            for path in namespace_paths:
+                revisions = self._run_history_git(
+                    (
+                        "log",
+                        "--reverse",
+                        "--topo-order",
+                        "--full-history",
+                        "-m",
+                        "--no-renames",
+                        "--no-ext-diff",
+                        "--format=%H",
+                        "FETCH_HEAD",
+                        "--",
+                        path,
+                    ),
+                    cwd=repository,
+                    environment=environment,
+                    max_output=MAX_GIT_PATH_OUTPUT_BYTES,
+                )
+                for raw_revision in revisions.splitlines():
+                    try:
+                        revision = raw_revision.decode("ascii")
+                    except UnicodeDecodeError as exc:
+                        raise ReleaseError(
+                            "Private history event metadata is malformed."
+                        ) from exc
+                    if revision not in reachable:
+                        raise ReleaseError("Private history event is not reachable.")
+                    touched.setdefault(revision, set()).add(path)
+                    if sum(len(value) for value in touched.values()) > 16:
+                        raise ReleaseError(
+                            "Private history contains too many test events."
+                        )
+            if sum(len(value) for value in touched.values()) > 16:
+                raise ReleaseError("Private history contains too many test events.")
+
+            events: list[PrivateHistoryEvent] = []
+            for revision in order:
+                if revision not in touched:
+                    continue
+                metadata = self._run_history_git(
+                    ("log", "-1", "--format=%ct", revision),
+                    cwd=repository,
+                    environment=environment,
+                )
+                seconds = metadata.strip()
+                if not seconds.isdigit():
+                    raise ReleaseError("Private history commit metadata is malformed.")
+                try:
+                    timestamp = datetime.fromtimestamp(
+                        int(seconds), tz=timezone.utc
+                    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+                except (OverflowError, OSError, ValueError) as exc:
+                    raise ReleaseError(
+                        "Private history commit metadata is malformed."
+                    ) from exc
+                for path in sorted(touched[revision]):
+                    changes = self._run_history_git(
+                        (
+                            "diff-tree",
+                            "-m",
+                            "--root",
+                            "--no-commit-id",
+                            "--name-status",
+                            "-r",
+                            "--no-renames",
+                            "--no-ext-diff",
+                            "-z",
+                            revision,
+                            "--",
+                            path,
+                        ),
+                        cwd=repository,
+                        environment=environment,
+                    )
+                    parts = tuple(item for item in changes.split(b"\0") if item)
+                    if len(parts) != 2:
+                        raise ReleaseError(
+                            "Private history change metadata is malformed."
+                        )
+                    try:
+                        status = parts[0].decode("ascii")
+                        changed_path = parts[1].decode("utf-8")
+                    except UnicodeDecodeError as exc:
+                        raise ReleaseError(
+                            "Private history change metadata is malformed."
+                        ) from exc
+                    if changed_path != path:
+                        raise ReleaseError(
+                            "Private history change path is inconsistent."
+                        )
+                    events.append(
+                        PrivateHistoryEvent(
+                            revision=revision,
+                            parents=parent_map[revision],
+                            timestamp=timestamp,
+                            status=status,
+                            path=path,
+                            subject="",
+                        )
+                    )
+            if (
+                len(events) >= 2
+                and events[-2].revision == events[-1].revision
+                and events[-2].status == events[-1].status == "A"
+                and (events[-2].path, events[-1].path) == _PRIVATE_PATHS
+            ):
+                subject_bytes = self._run_history_git(
+                    ("log", "-1", "--format=%s", events[-1].revision),
+                    cwd=repository,
+                    environment=environment,
+                ).rstrip(b"\n")
+                try:
+                    subject = subject_bytes.decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    raise ReleaseError(
+                        "Private history publication metadata is malformed."
+                    ) from exc
+                events[-2:] = [
+                    PrivateHistoryEvent(
+                        event.revision,
+                        event.parents,
+                        event.timestamp,
+                        event.status,
+                        event.path,
+                        subject,
+                    )
+                    for event in events[-2:]
+                ]
+            self._verify_no_blob_objects(repository, environment)
+            self._verify_filter_capability(root, remote, expected_head, environment)
+            audit = PrivateHistoryAudit(
+                head=fetched,
+                events=tuple(events),
+                reachable=reachable,
+                shallow=shallow_value == b"true",
+                blob_objects_fetched=False,
+                parent_map=parent_map,
+            )
+            return paths, audit
+
+    def _history_path_names_from_remote(
+        self, remote: str, expected_head: str, token: str
+    ) -> frozenset[str]:
+        paths, _audit = self._history_snapshot_from_remote(remote, expected_head, token)
+        return paths
+
+    def _history_audit_from_remote(
+        self, remote: str, expected_head: str, token: str
+    ) -> PrivateHistoryAudit:
+        _paths, audit = self._history_snapshot_from_remote(remote, expected_head, token)
+        return audit
 
     def history_path_names(
         self, repository: str, expected_head: str, token: str
@@ -1291,6 +1787,15 @@ class HuggingFaceBackend(_GuardedHuggingFaceBackend):
         if repository != PRIVATE_HF_REPOSITORY:
             raise ReleaseError("The private history repository is invalid.")
         return self._history_path_names_from_remote(
+            f"https://huggingface.co/datasets/{repository}", expected_head, token
+        )
+
+    def history_audit(
+        self, repository: str, expected_head: str, token: str
+    ) -> PrivateHistoryAudit:
+        if repository != PRIVATE_HF_REPOSITORY:
+            raise ReleaseError("The private history repository is invalid.")
+        return self._history_audit_from_remote(
             f"https://huggingface.co/datasets/{repository}", expected_head, token
         )
 
@@ -1309,6 +1814,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     mode.add_argument("--prepare-stage", action="store_true")
     mode.add_argument("--publish", action="store_true")
     parser.add_argument("--confirm")
+    parser.add_argument("--legacy-history-policy")
+    parser.add_argument("--confirm-legacy-history")
     return parser.parse_args(argv)
 
 
@@ -1328,6 +1835,11 @@ def main(
     )
     try:
         if args.prepare_stage:
+            if (
+                args.legacy_history_policy is not None
+                or args.confirm_legacy_history is not None
+            ):
+                raise ReleaseError("Legacy history options are invalid for staging.")
             result = prepare_stage(config, public_auditor=public_auditor)
         else:
             hub = hf_backend or HuggingFaceBackend()
@@ -1349,7 +1861,12 @@ def main(
                 publish=args.publish,
                 confirmation=args.confirm,
                 public_auditor=public_auditor,
+                legacy_history_policy=args.legacy_history_policy,
+                legacy_history_confirmation=args.confirm_legacy_history,
             )
+    except PublicationUncertainError as exc:
+        print(json.dumps({"status": "uncertain", "error": str(exc)}), file=sys.stderr)
+        return 3
     except ReleaseError as exc:
         print(json.dumps({"status": "refused", "error": str(exc)}), file=sys.stderr)
         return 2

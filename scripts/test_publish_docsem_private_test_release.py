@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import contextlib
+from dataclasses import replace
 import hashlib
 import io
 import json
@@ -64,8 +65,11 @@ class FakeHub:
         }
         self.move_before_publish = False
         self.post_write_tamper = False
+        self.raise_after_commit = False
         self.identity_calls = 0
         self.public_visibility_flip_on_second_identity = False
+        self.history_events_override = None
+        self.history_reachable_override = None
 
     def identity(self, token):
         self.identity_calls += 1
@@ -129,6 +133,47 @@ class FakeHub:
             for path in self.trees[(repository, revision)]
         )
 
+    def history_audit(self, repository, expected_head, token):
+        if self.history_events_override is None:
+            events = tuple(
+                publisher.PrivateHistoryEvent(
+                    revision=revision,
+                    parents=(),
+                    timestamp="2026-01-01T00:00:00Z",
+                    status="M",
+                    path=path,
+                    subject="SYNTHETIC-HISTORICAL-EVENT",
+                )
+                for revision in reversed(self.private_history)
+                for path in sorted(self.trees[(repository, revision)])
+                if path.startswith("private/test_")
+            )
+        else:
+            events = tuple(self.history_events_override)
+        reachable = frozenset(
+            self.history_reachable_override
+            if self.history_reachable_override is not None
+            else {event.revision for event in events} | {expected_head}
+        )
+        parent_map = {event.revision: event.parents for event in events}
+        for revision in reachable:
+            if revision not in parent_map:
+                parent_map[revision] = (
+                    (self.LEGACY_DELETE,)
+                    if hasattr(self, "LEGACY_DELETE")
+                    and self.LEGACY_DELETE in reachable
+                    and revision == expected_head
+                    else ()
+                )
+        return publisher.PrivateHistoryAudit(
+            head=expected_head,
+            events=events,
+            reachable=reachable,
+            shallow=False,
+            blob_objects_fetched=False,
+            parent_map=parent_map,
+        )
+
     def publish(
         self,
         repository,
@@ -169,6 +214,32 @@ class FakeHub:
         self.private_revision = "d" * 40
         self.trees[(repository, self.private_revision)] = current
         self.private_history.insert(0, self.private_revision)
+        publication_events = (
+            publisher.PrivateHistoryEvent(
+                revision=self.private_revision,
+                parents=(expected_parent,),
+                timestamp="2026-09-05T20:00:00Z",
+                status="A",
+                path="private/test_labels.jsonl",
+                subject=message,
+            ),
+            publisher.PrivateHistoryEvent(
+                revision=self.private_revision,
+                parents=(expected_parent,),
+                timestamp="2026-09-05T20:00:00Z",
+                status="A",
+                path="private/test_release.json",
+                subject=message,
+            ),
+        )
+        self.history_events_override = (
+            tuple(self.history_events_override or ()) + publication_events
+        )
+        self.history_reachable_override = set(
+            self.history_reachable_override or {expected_parent}
+        ) | {self.private_revision}
+        if self.raise_after_commit:
+            raise publisher.ReleaseError("PRIVATE-UNCERTAIN-RESPONSE")
         return self.private_revision
 
 
@@ -178,9 +249,19 @@ class PinnedDefaultTests(unittest.TestCase):
             publisher.PRIVATE_LABEL_SOURCE,
             Path("/private/tmp/docsem-private-source-a4205880-r1/labels.jsonl"),
         )
+        self.assertFalse(hasattr(publisher, "LEGACY_ADD_REVISION"))
+        self.assertFalse(hasattr(publisher, "LEGACY_DELETE_REVISION"))
+        self.assertEqual(
+            publisher.LEGACY_HISTORY_POLICY, "legacy-private-label-cycle-v1"
+        )
 
 
 class PrivateContinuationTests(unittest.TestCase):
+    LEGACY_POLICY = "legacy-private-label-cycle-v1"
+    LEGACY_CONFIRM = "ACKNOWLEDGE_RETAINED_LEGACY_PRIVATE_LABEL_HISTORY"
+    LEGACY_ADD = "1" * 40
+    LEGACY_DELETE = "2" * 40
+
     def setUp(self):
         if publisher is None:
             self.fail("private-only continuation publisher is missing")
@@ -248,6 +329,27 @@ class PrivateContinuationTests(unittest.TestCase):
         (self.public_stage / "test/SHA256SUMS").write_bytes(self.checksum_bytes)
         self.private_source.write_bytes(self.label_bytes)
 
+        self.legacy_metadata_digest = digest(
+            canonical(
+                [
+                    {
+                        "revision": self.LEGACY_ADD,
+                        "parents": [],
+                        "timestamp": "2020-01-01T00:00:00Z",
+                        "status": "A",
+                        "path": "private/test_labels.jsonl",
+                    },
+                    {
+                        "revision": self.LEGACY_DELETE,
+                        "parents": [self.LEGACY_ADD],
+                        "timestamp": "2020-01-01T00:01:00Z",
+                        "status": "D",
+                        "path": "private/test_labels.jsonl",
+                    },
+                ]
+            )
+        )
+
         self.patches = [
             mock.patch.object(publisher, "PUBLIC_STAGE", self.public_stage),
             mock.patch.object(publisher, "PRIVATE_LABEL_SOURCE", self.private_source),
@@ -261,6 +363,11 @@ class PrivateContinuationTests(unittest.TestCase):
             mock.patch.object(publisher, "PDF_INVENTORY_SHA256", self.pdf_digest),
             mock.patch.object(
                 publisher, "PRIVATE_LABELS_SHA256", digest(self.label_bytes)
+            ),
+            mock.patch.object(
+                publisher,
+                "LEGACY_HISTORY_METADATA_SHA256",
+                self.legacy_metadata_digest,
             ),
         ]
         for patcher in self.patches:
@@ -308,6 +415,34 @@ class PrivateContinuationTests(unittest.TestCase):
             public_auditor=self.audit,
             **kwargs,
         )
+
+    def exact_legacy_events(self):
+        return (
+            publisher.PrivateHistoryEvent(
+                revision=self.LEGACY_ADD,
+                parents=(),
+                timestamp="2020-01-01T00:00:00Z",
+                status="A",
+                path="private/test_labels.jsonl",
+                subject="SYNTHETIC-LEGACY-SUBJECT-PRIVATE",
+            ),
+            publisher.PrivateHistoryEvent(
+                revision=self.LEGACY_DELETE,
+                parents=(self.LEGACY_ADD,),
+                timestamp="2020-01-01T00:01:00Z",
+                status="D",
+                path="private/test_labels.jsonl",
+                subject="SYNTHETIC-DELETE-SUBJECT-PRIVATE",
+            ),
+        )
+
+    def configure_exact_legacy_history(self):
+        self.hub.history_events_override = self.exact_legacy_events()
+        self.hub.history_reachable_override = {
+            self.LEGACY_ADD,
+            self.LEGACY_DELETE,
+            self.hub.private_revision,
+        }
 
     def test_prepare_stage_installs_only_exact_private_files_with_safe_modes(self):
         before = {
@@ -810,6 +945,234 @@ class PrivateContinuationTests(unittest.TestCase):
         with self.assertRaises(publisher.ReleaseError):
             self.release_call()
 
+    def test_legacy_history_defaults_to_reject_but_named_profile_matches_dry_run(self):
+        self.prepare()
+        self.configure_exact_legacy_history()
+        with self.assertRaises(publisher.ReleaseError):
+            self.release_call()
+        result = self.release_call(legacy_history_policy=self.LEGACY_POLICY)
+        self.assertEqual(result["status"], "pending")
+        self.assertEqual(
+            result["legacy_history"],
+            {
+                "policy_id": self.LEGACY_POLICY,
+                "result": "matched-prepublish",
+                "legacy_event_count": 2,
+                "metadata_sha256": publisher.LEGACY_HISTORY_METADATA_SHA256,
+                "blob_objects_fetched": False,
+                "blob_contents_read": False,
+                "legacy_content_compared": False,
+                "legacy_history_retained": True,
+            },
+        )
+        self.assertEqual(
+            result["operation"], {"overwrites": 0, "deletes": 0, "retries": 0}
+        )
+        self.assertEqual(self.hub.writes, [])
+        private_reads = [
+            path
+            for repository, _revision, paths in self.hub.reads
+            if repository == publisher.PRIVATE_HF_REPOSITORY
+            for path in paths
+        ]
+        self.assertEqual(private_reads, [])
+
+    def test_legacy_profile_rejects_every_event_stream_mutation(self):
+        self.prepare()
+        base = self.exact_legacy_events()
+        extra = publisher.PrivateHistoryEvent(
+            revision="5" * 40,
+            parents=(self.LEGACY_DELETE,),
+            timestamp="2020-01-01T00:02:00Z",
+            status="M",
+            path="private/test_labels.jsonl",
+            subject="PRIVATE-EXTRA-SUBJECT",
+        )
+        mutations = (
+            (replace(base[0], status="D"), base[1]),
+            (replace(base[0], path="private/test_release.json"), base[1]),
+            (replace(base[0], revision="3" * 40), base[1]),
+            (replace(base[0], parents=("2" * 40,)), base[1]),
+            (replace(base[0], parents=("3" * 40, "4" * 40)), base[1]),
+            (replace(base[0], timestamp="2020-01-01T00:00:01Z"), base[1]),
+            (replace(base[0], timestamp="2020-02-31T00:00:00Z"), base[1]),
+            (base[0], replace(base[1], revision="3" * 40)),
+            (base[0], replace(base[1], parents=("4" * 40,))),
+            (base[0], replace(base[1], parents=(self.LEGACY_ADD, "4" * 40))),
+            (base[0], replace(base[1], timestamp="2020-01-01T00:01:01Z")),
+            (base[0], replace(base[1], status="M")),
+            (base[0], replace(base[1], path="private/test_release.json")),
+            tuple(reversed(base)),
+            base[:1],
+            (*base, extra),
+        )
+        for events in mutations:
+            with self.subTest(events=events):
+                self.hub.history_events_override = tuple(events)
+                self.hub.history_reachable_override = {
+                    event.revision for event in events
+                } | {self.hub.private_revision}
+                with self.assertRaises(publisher.ReleaseError):
+                    self.release_call(legacy_history_policy=self.LEGACY_POLICY)
+        self.configure_exact_legacy_history()
+        self.hub.history_reachable_override.remove(self.LEGACY_ADD)
+        with self.assertRaises(publisher.ReleaseError):
+            self.release_call(legacy_history_policy=self.LEGACY_POLICY)
+        self.configure_exact_legacy_history()
+        self.hub.history_reachable_override.remove(self.LEGACY_DELETE)
+        with self.assertRaises(publisher.ReleaseError):
+            self.release_call(legacy_history_policy=self.LEGACY_POLICY)
+
+    def test_legacy_options_are_closed_and_publish_requires_both_confirmations(self):
+        self.prepare()
+        self.configure_exact_legacy_history()
+        with self.assertRaises(publisher.ReleaseError):
+            self.release_call(legacy_history_policy="allow")
+        with self.assertRaises(publisher.ReleaseError):
+            self.release_call(legacy_history_confirmation=self.LEGACY_CONFIRM)
+        with self.assertRaises(publisher.ReleaseError):
+            self.release_call(
+                publish=True,
+                confirmation="PUBLISH_DISABLED_PRIVATE_TEST_RELEASE",
+                legacy_history_policy=self.LEGACY_POLICY,
+            )
+        with self.assertRaises(publisher.ReleaseError):
+            self.release_call(
+                publish=True,
+                confirmation="PUBLISH_DISABLED_PRIVATE_TEST_RELEASE",
+                legacy_history_policy=self.LEGACY_POLICY,
+                legacy_history_confirmation="wrong",
+            )
+        self.assertEqual(self.hub.writes, [])
+        invalid_stage = self.root / "invalid-legacy-prepare"
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = publisher.main(
+                [
+                    "--public-stage",
+                    str(self.public_stage),
+                    "--private-label-source",
+                    str(self.private_source),
+                    "--private-stage",
+                    str(invalid_stage),
+                    "--prepare-stage",
+                    "--legacy-history-policy",
+                    self.LEGACY_POLICY,
+                ]
+            )
+        self.assertEqual(code, 2)
+        self.assertFalse(invalid_stage.exists())
+
+    def test_legacy_audit_rejects_head_depth_blob_and_graph_malformations(self):
+        self.configure_exact_legacy_history()
+        audit = self.hub.history_audit(
+            publisher.PRIVATE_HF_REPOSITORY, self.hub.private_revision, "token"
+        )
+        malformed = (
+            replace(audit, head="f" * 40),
+            replace(audit, shallow=True),
+            replace(audit, blob_objects_fetched=True),
+            replace(audit, parent_map={}),
+            replace(
+                audit,
+                reachable=frozenset(f"{index:040x}" for index in range(10_001)),
+            ),
+        )
+        for value in malformed:
+            with self.subTest(value=value):
+                with self.assertRaises(publisher.ReleaseError):
+                    publisher._validate_private_history(
+                        value,
+                        expected_head=self.hub.private_revision,
+                        current_status="pending",
+                        legacy_policy=self.LEGACY_POLICY,
+                    )
+
+    def test_legacy_publish_adds_two_files_then_postscan_and_idempotency_match(self):
+        self.prepare()
+        self.configure_exact_legacy_history()
+        result = self.release_call(
+            publish=True,
+            confirmation="PUBLISH_DISABLED_PRIVATE_TEST_RELEASE",
+            legacy_history_policy=self.LEGACY_POLICY,
+            legacy_history_confirmation=self.LEGACY_CONFIRM,
+        )
+        self.assertEqual(result["status"], "published")
+        self.assertEqual(result["legacy_history"]["result"], "matched-postpublish")
+        self.assertEqual(len(self.hub.writes), 1)
+        second_config = publisher.ReleaseConfig(
+            self.public_stage, self.private_source, self.private_stage, "d" * 40
+        )
+        second = publisher.run_private_continuation(
+            second_config,
+            hf_backend=self.hub,
+            token="token",
+            publish=True,
+            confirmation="PUBLISH_DISABLED_PRIVATE_TEST_RELEASE",
+            legacy_history_policy=self.LEGACY_POLICY,
+            legacy_history_confirmation=self.LEGACY_CONFIRM,
+        )
+        self.assertEqual(second["status"], "already-published")
+        self.assertEqual(second["legacy_history"]["result"], "matched-postpublish")
+        self.assertEqual(len(self.hub.writes), 1)
+        visible = json.dumps(second)
+        for secret in (
+            "SYNTHETIC-LEGACY-SUBJECT-PRIVATE",
+            "SYNTHETIC-DELETE-SUBJECT-PRIVATE",
+            "PRIVATE-ANSWER",
+        ):
+            self.assertNotIn(secret, visible)
+
+    def test_legacy_postpublish_rejects_message_change_or_later_test_event(self):
+        self.prepare()
+        self.configure_exact_legacy_history()
+        self.release_call(
+            publish=True,
+            confirmation="PUBLISH_DISABLED_PRIVATE_TEST_RELEASE",
+            legacy_history_policy=self.LEGACY_POLICY,
+            legacy_history_confirmation=self.LEGACY_CONFIRM,
+        )
+        post = tuple(self.hub.history_events_override)
+        second_config = publisher.ReleaseConfig(
+            self.public_stage, self.private_source, self.private_stage, "d" * 40
+        )
+        later = publisher.PrivateHistoryEvent(
+            revision="e" * 40,
+            parents=("d" * 40,),
+            timestamp="2026-09-05T20:01:00Z",
+            status="M",
+            path="private/test_release.json",
+            subject="PRIVATE-LATER-EVENT",
+        )
+        for events in (
+            post[:2],
+            (*post[:-1], replace(post[-1], subject="PRIVATE-WRONG-MESSAGE")),
+            (*post[:2], post[3], post[2]),
+            (
+                *post[:2],
+                replace(post[2], revision=self.LEGACY_ADD),
+                replace(post[3], revision=self.LEGACY_ADD),
+            ),
+            (
+                *post[:2],
+                replace(post[2], parents=("f" * 40,)),
+                replace(post[3], parents=("f" * 40,)),
+            ),
+            (*post, later),
+        ):
+            with self.subTest(events=events):
+                self.hub.history_events_override = events
+                self.hub.history_reachable_override = {
+                    event.revision for event in events
+                } | {"d" * 40}
+                with self.assertRaises(publisher.ReleaseError):
+                    publisher.run_private_continuation(
+                        second_config,
+                        hf_backend=self.hub,
+                        token="token",
+                        legacy_history_policy=self.LEGACY_POLICY,
+                    )
+
     def test_publish_is_exact_two_add_cas_preserves_non_test_inventory_and_is_idempotent(
         self,
     ):
@@ -879,12 +1242,64 @@ class PrivateContinuationTests(unittest.TestCase):
         self.hub.move_before_publish = False
         self.hub.private_revision = "b" * 40
         self.hub.post_write_tamper = True
-        with self.assertRaises(publisher.ReleaseError):
+        with self.assertRaises(publisher.PublicationUncertainError) as caught:
             self.release_call(
                 publish=True,
                 confirmation="PUBLISH_DISABLED_PRIVATE_TEST_RELEASE",
             )
         self.assertEqual(len(self.hub.writes), 1)
+        self.assertIn("may have landed", str(caught.exception))
+        self.assertNotIn("PRIVATE", str(caught.exception).replace("Private", ""))
+
+    def test_lost_publish_response_is_uncertain_and_never_retried(self):
+        self.prepare()
+        self.hub.raise_after_commit = True
+        with self.assertRaises(publisher.PublicationUncertainError) as caught:
+            self.release_call(
+                publish=True,
+                confirmation="PUBLISH_DISABLED_PRIVATE_TEST_RELEASE",
+            )
+        self.assertEqual(len(self.hub.writes), 1)
+        self.assertIn("outcome is uncertain", str(caught.exception))
+        self.assertNotIn("PRIVATE-UNCERTAIN-RESPONSE", str(caught.exception))
+
+    def test_cli_reports_uncertain_landed_write_distinctly_and_safely(self):
+        self.prepare()
+        self.configure_exact_legacy_history()
+        self.hub.raise_after_commit = True
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = publisher.main(
+                [
+                    "--public-stage",
+                    str(self.public_stage),
+                    "--private-label-source",
+                    str(self.private_source),
+                    "--private-stage",
+                    str(self.private_stage),
+                    "--private-hf-base",
+                    "b" * 40,
+                    "--publish",
+                    "--confirm",
+                    "PUBLISH_DISABLED_PRIVATE_TEST_RELEASE",
+                    "--legacy-history-policy",
+                    self.LEGACY_POLICY,
+                    "--confirm-legacy-history",
+                    self.LEGACY_CONFIRM,
+                ],
+                hf_backend=self.hub,
+                token="TOKEN-SENTINEL-K4p9Vr2M",
+            )
+        self.assertEqual(code, 3)
+        self.assertEqual(json.loads(stderr.getvalue())["status"], "uncertain")
+        self.assertEqual(len(self.hub.writes), 1)
+        visible = stdout.getvalue() + stderr.getvalue()
+        for secret in (
+            "PRIVATE-UNCERTAIN-RESPONSE",
+            "PRIVATE-ANSWER",
+            "TOKEN-SENTINEL",
+        ):
+            self.assertNotIn(secret, visible)
 
     def test_public_visibility_change_at_final_write_boundary_prevents_cas(self):
         self.prepare()
@@ -1072,14 +1487,14 @@ class PrivateContinuationTests(unittest.TestCase):
             check=True,
         )
         (work / "private").mkdir()
-        (work / "private/test_legacy.json").write_bytes(b"SYNTHETIC-OLD\n")
+        (work / "private/test_labels.jsonl").write_bytes(b"SYNTHETIC-OLD\n")
         subprocess.run(["git", "-C", str(work), "add", "."], check=True)
         subprocess.run(
             ["git", "-C", str(work), "commit", "-m", "old"],
             check=True,
             capture_output=True,
         )
-        (work / "private/test_legacy.json").unlink()
+        (work / "private/test_labels.jsonl").unlink()
         (work / "README.md").write_bytes(b"current\n")
         subprocess.run(["git", "-C", str(work), "add", "-A"], check=True)
         subprocess.run(
@@ -1107,8 +1522,63 @@ class PrivateContinuationTests(unittest.TestCase):
         paths = backend._history_path_names_from_remote(
             remote.as_uri(), head, "TOKEN-SENTINEL-V6q2"
         )
-        self.assertIn("private/test_legacy.json", paths)
+        self.assertIn("private/test_labels.jsonl", paths)
         self.assertIn("README.md", paths)
+        audit = backend._history_audit_from_remote(
+            remote.as_uri(), head, "TOKEN-SENTINEL-V6q2"
+        )
+        self.assertEqual(audit.head, head)
+        self.assertEqual(
+            [(event.status, event.path) for event in audit.events],
+            [
+                ("A", "private/test_labels.jsonl"),
+                ("D", "private/test_labels.jsonl"),
+            ],
+        )
+        self.assertEqual(audit.events[0].parents, ())
+        self.assertEqual(audit.events[1].parents, (audit.events[0].revision,))
+        self.assertFalse(audit.shallow)
+        self.assertFalse(audit.blob_objects_fetched)
+        self.assertEqual([event.subject for event in audit.events], ["", ""])
+        (work / "private/test_labels.jsonl").write_bytes(b"SYNTHETIC-NEW\n")
+        (work / "private/test_release.json").write_bytes(b"{}\n")
+        subprocess.run(["git", "-C", str(work), "add", "."], check=True)
+        message = f"Install {publisher.RELEASE_ID} disabled"
+        subprocess.run(
+            ["git", "-C", str(work), "commit", "-m", message],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(work), "push", str(remote), "main"],
+            check=True,
+            capture_output=True,
+        )
+        new_head = subprocess.run(
+            ["git", "-C", str(work), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        post = backend._history_audit_from_remote(
+            remote.as_uri(), new_head, "TOKEN-SENTINEL-V6q2"
+        )
+        self.assertEqual(
+            [(event.status, event.path) for event in post.events],
+            [
+                ("A", "private/test_labels.jsonl"),
+                ("D", "private/test_labels.jsonl"),
+                ("A", "private/test_labels.jsonl"),
+                ("A", "private/test_release.json"),
+            ],
+        )
+        self.assertEqual([event.subject for event in post.events[:2]], ["", ""])
+        self.assertEqual(
+            [event.subject for event in post.events[2:]], [message, message]
+        )
+        self.assertEqual(post.events[2].revision, post.events[3].revision)
+        self.assertEqual(post.events[2].parents, post.events[3].parents)
+        self.assertEqual(post.events[2].timestamp, post.events[3].timestamp)
         environment = backend._git_environment("TOKEN-SENTINEL-V6q2")
         self.assertNotIn("TOKEN-SENTINEL-V6q2", repr(environment))
         self.assertIn("Authorization: Basic ", environment["GIT_CONFIG_VALUE_2"])
@@ -1120,7 +1590,7 @@ class PrivateContinuationTests(unittest.TestCase):
         )
         with self.assertRaises(publisher.ReleaseError):
             backend._history_path_names_from_remote(
-                remote.as_uri(), head, "TOKEN-SENTINEL-V6q2"
+                remote.as_uri(), new_head, "TOKEN-SENTINEL-V6q2"
             )
 
 
