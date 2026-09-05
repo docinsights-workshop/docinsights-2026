@@ -1243,9 +1243,12 @@ def _final_test_leaderboard_heading():
 def _final_test_notice():
     return (
         '<section role="status" class="leaderboard-empty">'
-        "The final test leaderboard is not available yet. The official held-out "
-        "test release and final ranking remain closed while organizers complete "
-        "the release and integrity checks."
+        "The public test tasks and PDFs are available in the "
+        f'<a href="https://huggingface.co/datasets/{PUBLIC_DATASET_REPO}" '
+        'target="_blank" rel="noopener">public dataset</a>. '
+        "The final test leaderboard is not available yet. Test submissions are "
+        "not open yet; organizers will announce activation after the private "
+        "scoring key is installed and verified."
         "</section>"
     )
 
@@ -1491,7 +1494,12 @@ def split_ui(split_label):
         availability = (
             "Test submissions are open."
             if test_open
-            else "Test submissions are not open yet."
+            else (
+                "The public test tasks and PDFs are available in the "
+                f"[public dataset](https://huggingface.co/datasets/{PUBLIC_DATASET_REPO}). "
+                "Test submissions are not open yet. Organizers will announce "
+                "activation after the private scoring key is installed and verified."
+            )
         )
         return (
             gr.update(
@@ -1581,9 +1589,10 @@ with PortalBlocks(**blocks_options) as demo:
             </p>
             <p>
                 <strong>Final rankings will use a held-out test set.</strong>
-                The official held-out release is not available yet, and test submissions remain closed
-                while organizers complete the release and integrity checks. Participants will be notified
-                when it is available; those results will determine the final leaderboard.
+                The public test tasks and PDFs are available in the
+                <a href="https://huggingface.co/datasets/{PUBLIC_DATASET_REPO}" target="_blank" rel="noopener">public dataset</a>.
+                Test submissions are not open yet. Organizers will announce activation after the private
+                scoring key is installed and verified; those results will determine the final leaderboard.
             </p>
         </section>
         """

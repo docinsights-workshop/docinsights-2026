@@ -250,6 +250,36 @@ class PortalBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(validation_updates[2]["interactive"])
         self.assertFalse(validation_updates[3]["visible"])
 
+    async def test_public_test_inputs_notice_keeps_scoring_closed(self):
+        public_dataset_url = (
+            "https://huggingface.co/datasets/"
+            "amitbcp/docinsights-2026-shared-task-data"
+        )
+        initial_portal = "\n".join(
+            str(component["props"].get("value", ""))
+            for component in app.demo.get_config_file()["components"]
+        )
+
+        self.assertIn(public_dataset_url, initial_portal)
+        self.assertIn("public test tasks and PDFs are available", initial_portal)
+        self.assertIn("Test submissions are not open yet", initial_portal)
+        self.assertRegex(
+            initial_portal,
+            r"after the private\s+scoring key is installed and verified",
+        )
+
+        response = await self.invoke("select_split", [app.TEST_SPLIT_LABEL])
+        instructions, _, submit_button, _ = response["data"]
+
+        self.assertIn(public_dataset_url, instructions["value"])
+        self.assertIn("public test tasks and PDFs are available", instructions["value"])
+        self.assertIn("Test submissions are not open yet", instructions["value"])
+        self.assertIn(
+            "after the private scoring key is installed and verified",
+            instructions["value"],
+        )
+        self.assertFalse(submit_button["interactive"])
+
     async def test_test_ui_requires_write_token_and_current_open_server_window(self):
         policy = app.TestReleasePolicy(
             release_id="configured-release",
