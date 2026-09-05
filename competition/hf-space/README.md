@@ -28,6 +28,30 @@ The current leaderboard contains provisional validation results. A held-out test
 
 The test workflow is deployed disabled until the organizers publish and pin the official test tasks and private scoring release. When it opens, the first accepted test attempt returns answer accuracy and evidence F1; scores for attempts two and three are withheld until finalization. The public test leaderboard remains a placeholder until organizer finalization.
 
+## Disabled test-release configuration
+
+The checked-in deployment is safe to publish with both test controls disabled:
+
+```text
+TEST_SUBMISSIONS_ENABLED=false
+TEST_PUBLIC_LEADERBOARD_ENABLED=false
+```
+
+Do not enable either flag for a candidate or partially prepared release. Activation is fail-closed: a requested test surface remains disabled unless all of the following are explicit and valid. These values are deployment secrets/configuration, never participant inputs or rendered Space configuration.
+
+```text
+TEST_RELEASE_ID=<official identifier using letters, digits, dot, underscore, or hyphen>
+TEST_TASK_MANIFEST_SHA256=<64 lowercase hexadecimal SHA-256>
+TEST_GOLD_SHA256=<64 lowercase hexadecimal SHA-256>
+TEST_OPEN_AT=YYYY-MM-DDTHH:MM:SSZ
+TEST_CLOSE_AT=YYYY-MM-DDTHH:MM:SSZ
+TEST_MAX_ATTEMPTS=3
+```
+
+The timestamps must be RFC3339 UTC values ending in `Z`, and the open instant must precede the close instant. The release identifier and digests must agree with the organizer-pinned server release; the server independently verifies the private scoring material before accepting an upload. `TEST_MAX_ATTEMPTS` is fixed at three. A malformed/missing value, a non-UTC or reversed window, or any attempt-limit value other than `3` leaves test submission and the public-test flag disabled without changing anonymous validation or the validation leaderboard.
+
+Keep `TEST_PUBLIC_LEADERBOARD_ENABLED=false` until organizer finalization. Enabling it is not a substitute for finalization and never exposes private per-example results, participant emails, OAuth subjects, raw predictions, or later-attempt scores.
+
 The submission form requires participant name(s), team name, contact email, and submission name. Participant names and contact emails are stored only in the private submission repository and are never rendered on the public leaderboard.
 
 The public leaderboard shows the latest submission for each normalized team and contact-email identity, together with its total attempt count. Rankings use the latest attempt's answer accuracy first and evidence F1 as the tie-breaker. A new valid attempt replaces that identity's previously displayed result even when its score is lower. Legacy submissions without participant names remain valid. Evidence exact match is retained in the detailed submission result as a strict diagnostic, but it is not a separate public leaderboard column.

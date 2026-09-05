@@ -125,3 +125,16 @@ GOLD_FILE=private/val_labels.jsonl
 SUBMISSIONS_REPO_ID=amitbcp/docinsights-2026-shared-task-submissions
 HF_WRITE_TOKEN=<write token with access to private submissions repo>
 ```
+
+## Held-out test deployment gate
+
+No official test release is present in this checkout. Publish the Space with the test workflow disabled:
+
+```text
+TEST_SUBMISSIONS_ENABLED=false
+TEST_PUBLIC_LEADERBOARD_ENABLED=false
+```
+
+Only after organizers have published and pinned the official public task manifest and private scoring release may they request test activation. The deployment must then supply a `TEST_RELEASE_ID` made of letters, digits, dot, underscore, or hyphen; lowercase 64-character SHA-256 values for `TEST_TASK_MANIFEST_SHA256` and `TEST_GOLD_SHA256`; RFC3339 UTC (`Z`) `TEST_OPEN_AT` and `TEST_CLOSE_AT` values with `open < close`; and exactly `TEST_MAX_ATTEMPTS=3`. Any omission, malformed release ID/digest/window, reversed window, or non-three attempt value keeps both requested test surfaces disabled. The private server release remains the authority and is verified again at submission time.
+
+Validation remains anonymous and follows the established validation scoring and public-leaderboard behavior under every test-gate outcome. Do not place test gold paths, labels, answer/evidence values, OAuth subjects, email addresses, raw predictions, per-example metrics, or later-attempt scores in the public Space configuration, logs, site content, or deployment documentation.

@@ -2,8 +2,11 @@ import datetime as dt
 import html
 import json
 import os
+import re
 import threading
 import warnings
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 import gradio as gr
@@ -41,11 +44,92 @@ SUBMISSIONS_REPO_ID = os.getenv("SUBMISSIONS_REPO_ID", GOLD_REPO_ID)
 WRITE_TOKEN = os.getenv("HF_WRITE_TOKEN") or os.getenv("HF_TOKEN")
 GRADIO_MAJOR_VERSION = int(gr.__version__.split(".", maxsplit=1)[0])
 LEADERBOARD_LOCK = threading.Lock()
-TEST_SUBMISSIONS_ENABLED = os.getenv("TEST_SUBMISSIONS_ENABLED", "false").strip().casefold() in {
+_TRUE_VALUES = {
     "1",
     "true",
     "yes",
 }
+
+_RFC3339_UTC = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\Z"
+)
+_RELEASE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+
+
+@dataclass(frozen=True)
+class TestDeploymentConfig:
+    """Operator configuration that can only activate a complete pinned release."""
+
+    submissions_enabled: bool
+    public_leaderboard_enabled: bool
+    release_id: str | None
+    task_manifest_sha256: str | None
+    gold_sha256: str | None
+    open_at: dt.datetime | None
+    close_at: dt.datetime | None
+    max_attempts: int = 3
+
+
+def _enabled_value(value) -> bool:
+    return str(value or "").strip().casefold() in _TRUE_VALUES
+
+
+def _required_value(environment: Mapping[str, object], name: str) -> str | None:
+    value = environment.get(name)
+    value = str(value).strip() if value is not None else ""
+    return value or None
+
+
+def _parse_rfc3339_utc(value: str | None) -> dt.datetime | None:
+    if not value or not _RFC3339_UTC.fullmatch(value):
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(value.removesuffix("Z") + "+00:00")
+    except ValueError:
+        return None
+    return parsed if parsed.utcoffset() == dt.timedelta(0) else None
+
+
+def load_test_deployment_config(
+    environment: Mapping[str, object] | None = None,
+) -> TestDeploymentConfig:
+    """Parse test activation controls without ever defaulting into an open state."""
+
+    environment = os.environ if environment is None else environment
+    requested_submissions = _enabled_value(environment.get("TEST_SUBMISSIONS_ENABLED"))
+    requested_public_leaderboard = _enabled_value(
+        environment.get("TEST_PUBLIC_LEADERBOARD_ENABLED")
+    )
+    release_id = _required_value(environment, "TEST_RELEASE_ID")
+    task_manifest_sha256 = _required_value(environment, "TEST_TASK_MANIFEST_SHA256")
+    gold_sha256 = _required_value(environment, "TEST_GOLD_SHA256")
+    open_at = _parse_rfc3339_utc(_required_value(environment, "TEST_OPEN_AT"))
+    close_at = _parse_rfc3339_utc(_required_value(environment, "TEST_CLOSE_AT"))
+    configured_attempts = _required_value(environment, "TEST_MAX_ATTEMPTS") or "3"
+    valid = (
+        bool(release_id and _RELEASE_ID.fullmatch(release_id))
+        and bool(task_manifest_sha256 and _SHA256.fullmatch(task_manifest_sha256))
+        and bool(gold_sha256 and _SHA256.fullmatch(gold_sha256))
+        and open_at is not None
+        and close_at is not None
+        and open_at < close_at
+        and configured_attempts == "3"
+    )
+    return TestDeploymentConfig(
+        submissions_enabled=requested_submissions and valid,
+        public_leaderboard_enabled=requested_public_leaderboard and valid,
+        release_id=release_id,
+        task_manifest_sha256=task_manifest_sha256,
+        gold_sha256=gold_sha256,
+        open_at=open_at,
+        close_at=close_at,
+    )
+
+
+TEST_DEPLOYMENT = load_test_deployment_config()
+TEST_SUBMISSIONS_ENABLED = TEST_DEPLOYMENT.submissions_enabled
+TEST_PUBLIC_LEADERBOARD_ENABLED = TEST_DEPLOYMENT.public_leaderboard_enabled
 TEST_TASKS_FILE = os.getenv("TEST_TASKS_FILE", "test/tasks.jsonl")
 VALIDATION_SPLIT_LABEL = "Validation (development)"
 TEST_SPLIT_LABEL = "Test (final)"

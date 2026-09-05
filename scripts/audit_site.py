@@ -292,6 +292,25 @@ def main():
         "Shared task details will be announced soon" not in shared_task.text,
         "challenges page must not retain the stale shared-task placeholder",
     )
+    assert_true(
+        "Participants will be notified when it becomes available" in shared_task.text
+        and "asked to submit their test-set results" in shared_task.text,
+        "DocSem test workflow must remain described as a future organizer release",
+    )
+    assert_true(
+        "Test submissions are open." not in shared_task.text,
+        "public workshop content must not claim the disabled DocSem test workflow is open",
+    )
+    for private_test_detail in (
+        "TEST_GOLD_SHA256",
+        "TEST_TASK_MANIFEST_SHA256",
+        "private/test_labels.jsonl",
+        "projections/test/",
+    ):
+        assert_true(
+            private_test_detail not in shared_task_html,
+            f"public workshop content must not expose {private_test_detail}",
+        )
     for label, parser in [
         ("home", home),
         ("program", program),

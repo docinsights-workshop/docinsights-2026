@@ -165,6 +165,37 @@ def configured_service(store=None, loader=None):
 
 
 class LegacyValidationCharacterizationTests(unittest.TestCase):
+    def test_validation_leaderboard_fixture_preserves_exact_rendered_row(self):
+        rows = [
+            {
+                "team": "Fixture Team",
+                "contact": "lead@example.org",
+                "submission_name": "baseline",
+                "submitted_at": "2026-09-05T12:00:00Z",
+                "answer_accuracy": 1.0,
+                "evidence_exact_match": 1.0,
+                "evidence_f1": 1.0,
+                "examples": 1,
+                "attempts": 2,
+            }
+        ]
+
+        with patch.object(app, "_load_leaderboard_rows", return_value=rows):
+            rendered = app.leaderboard_html()
+
+        self.assertIn(
+            """<tr>
+                <td class=\"leaderboard-rank\">1</td>
+                <td>Fixture Team</td>
+                <td>baseline</td>
+                <td class=\"leaderboard-attempts\">2</td>
+                <td class=\"leaderboard-metric\">100.00%</td>
+                <td class=\"leaderboard-metric\">100.00%</td>
+                <td class=\"leaderboard-date\">2026-09-05 12:00:00</td>
+            </tr>""",
+            rendered,
+        )
+
     def test_validation_callback_preserves_metrics_identity_persistence_and_response(self):
         upload = tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False)
         self.addCleanup(Path(upload.name).unlink, missing_ok=True)
@@ -261,6 +292,39 @@ class LegacyValidationCharacterizationTests(unittest.TestCase):
 
 
 class SplitAwareServiceTests(unittest.TestCase):
+    def test_validation_service_compatibility_fixture_preserves_exact_public_metrics(self):
+        upload = test_file(VALIDATION_ROWS)
+        self.addCleanup(Path(upload.name).unlink, missing_ok=True)
+        metadata = {
+            "team": "Fixture Team",
+            "contact": "lead@example.org",
+            "submission_name": "baseline",
+            "participant_names": "Alice Example",
+        }
+
+        with (
+            patch.object(app, "_load_gold_rows", return_value=VALIDATION_LABELS),
+            patch.object(app, "_persist_submission", return_value="legacy persistence"),
+        ):
+            result = configured_service().submit_for_split(
+                "validation", upload, metadata, None
+            )
+
+        self.assertEqual(
+            result,
+            {
+                "value": {
+                    "answer_accuracy": 1.0,
+                    "evidence_exact_match": 1.0,
+                    "evidence_f1": 1.0,
+                    "examples": 1,
+                    "message": "legacy persistence",
+                },
+                "visible": True,
+                "__type__": "update",
+            },
+        )
+
     def test_validation_does_not_require_oauth(self):
         upload = test_file(VALIDATION_ROWS)
         self.addCleanup(Path(upload.name).unlink, missing_ok=True)
