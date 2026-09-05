@@ -394,9 +394,7 @@ def require_separate_tokens(
         not isinstance(token, str) or not token or len(token) > 4096
         for token in required_tokens
     ):
-        raise DeploymentError(
-            "Both organizer deploy and runtime tokens are required."
-        )
+        raise DeploymentError("Both organizer deploy and runtime tokens are required.")
     if deploy_token == runtime_token:
         raise DeploymentError(
             "separate deploy-write and runtime-read tokens are required."
