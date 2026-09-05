@@ -471,6 +471,18 @@ def _reconcile_private_dataset(
     except Exception as exc:
         raise DeploymentError("The private dataset inventory is unavailable.") from exc
     if "private/test_release.json" not in paths:
+        governed_prefixes = (
+            "attempts/test/",
+            "projections/test/",
+            "exclusions/test/",
+            "adjudications/test/",
+        )
+        if "private/test_labels.jsonl" in paths or any(
+            path.startswith(governed_prefixes) for path in paths
+        ):
+            raise DeploymentError(
+                "The private test ledger exists without its release policy."
+            )
         return SnapshotAudit("disabled/no-release", 0, 0)
     auditor = snapshot_auditor or _default_snapshot_auditor
     try:
@@ -1049,6 +1061,11 @@ class HuggingFaceBackend:
     def _api(self, token: str):
         return self._api_factory(token)
 
+    @staticmethod
+    def _require_target(repo_id: str) -> None:
+        if repo_id != SPACE_REPO_ID:
+            raise DeploymentError("The organizer Space mutation target is invalid.")
+
     def whoami(self, token: str) -> Mapping[str, object]:
         try:
             return self._api(token).whoami(token=token)
@@ -1118,6 +1135,7 @@ class HuggingFaceBackend:
             raise DeploymentError("Organizer Space variables are unavailable.") from exc
 
     def create_private_space(self, repo_id: str, token: str) -> SpaceState:
+        self._require_target(repo_id)
         try:
             self._api(token).create_repo(
                 repo_id=repo_id,
@@ -1198,6 +1216,7 @@ class HuggingFaceBackend:
         deletions: Sequence[str],
         token: str,
     ) -> str:
+        self._require_target(repo_id)
         if tuple(additions) != BUNDLE_PATHS or len(set(deletions)) != len(deletions):
             raise DeploymentError("The organizer Space commit inventory is invalid.")
         try:
@@ -1237,6 +1256,7 @@ class HuggingFaceBackend:
         return _exact_revision(getattr(info, "oid", None), "organizer Space commit")
 
     def set_space_secret(self, repo_id: str, name: str, value: str, token: str) -> None:
+        self._require_target(repo_id)
         if (
             name not in _RESERVED_SECRET_NAMES
             or not isinstance(value, str)

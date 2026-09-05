@@ -598,6 +598,20 @@ class DeploymentWorkflowTests(unittest.TestCase):
         self.assertEqual(result.organizer_account_count, 2)
         self.assertEqual(result.organizer_attempt_count, 3)
 
+    def test_absent_release_rejects_orphaned_test_ledger_state(self):
+        for path in (
+            "private/test_labels.jsonl",
+            "attempts/test/account/record.json",
+            "projections/test/accounts/account.json",
+            "projections/test/organizer_leaderboard.json",
+            "exclusions/test/example.json",
+            "adjudications/test/example.json",
+        ):
+            with self.subTest(path=path):
+                self.hub.dataset_files = (path,)
+                with self.assertRaisesRegex(publisher.DeploymentError, "release"):
+                    self.execute()
+
     def test_publish_updates_exact_tree_sets_only_two_secrets_and_verifies_access(self):
         request = valid_request(
             publish=True,
@@ -933,6 +947,25 @@ class HuggingFaceAdapterTests(unittest.TestCase):
                 publisher.SPACE_REPO_ID,
                 "HF_WRITE_TOKEN",
                 WRITE_TOKEN,
+                WRITE_TOKEN,
+            )
+
+    def test_adapter_refuses_every_mutation_outside_exact_organizer_space(self):
+        with self.assertRaisesRegex(publisher.DeploymentError, "target"):
+            self.backend.create_private_space("amitbcp/other-space", WRITE_TOKEN)
+        with self.assertRaisesRegex(publisher.DeploymentError, "target"):
+            self.backend.set_space_secret(
+                "amitbcp/other-space",
+                "ORGANIZER_READ_TOKEN",
+                READ_TOKEN,
+                WRITE_TOKEN,
+            )
+        with self.assertRaisesRegex(publisher.DeploymentError, "target"):
+            self.backend.commit_space(
+                "amitbcp/other-space",
+                SPACE_PARENT,
+                {name: f"bundle::{name}\n".encode() for name in publisher.BUNDLE_PATHS},
+                (),
                 WRITE_TOKEN,
             )
 
