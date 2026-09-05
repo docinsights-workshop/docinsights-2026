@@ -2,10 +2,34 @@ import json
 import re
 import unittest
 
+from fastapi.testclient import TestClient
+
 from app import PORTAL_CSS, demo
 
 
 class PortalLayoutTests(unittest.TestCase):
+    def test_root_config_and_api_info_routes_generate_without_schema_errors(self):
+        client = TestClient(demo.app, raise_server_exceptions=False)
+
+        root = client.get("/")
+        config = client.get("/config")
+        demo.app.api_info = None
+        api_info = client.get("/info")
+
+        self.assertEqual(
+            (root.status_code, config.status_code, api_info.status_code),
+            (200, 200, 200),
+            {
+                "root": root.text[:200],
+                "config": config.text[:200],
+                "api_info": api_info.text[:200],
+            },
+        )
+        self.assertIn("text/html", root.headers["content-type"])
+        self.assertEqual(config.json()["version"], "4.42.0")
+        self.assertIn("/submit_predictions", api_info.json()["named_endpoints"])
+        self.assertIn("/my_test_submissions", api_info.json()["named_endpoints"])
+
     def test_portal_exposes_validation_default_and_optional_test_workflow(self):
         config = demo.get_config_file()
         serialized = json.dumps(config)
