@@ -210,3 +210,11 @@ Create/update the private Space, set only required secrets, verify authorized or
 At the same private repository revision, confirm organizer reconstruction matches every immutable attempt while the public participant Space exposes only attempt-one owner feedback and no live test leaderboard.
 
 - [ ] **Step 5: Commit deployment receipt without secrets or private rows**
+
+2026-09-05 live note: the public participant Space was deployed and verified in
+disabled-test mode at revision `f4f157b77d74eac667f1a368a43083fec9520bb8`.
+The private organizer Space remains uncreated because the secure token store has
+only the owner write token; the required distinct owner read-only runtime token
+and authenticated non-owner denial-probe token are absent. See
+`competition/DOCSEM_DUAL_SPLIT_DEPLOYMENT_RECEIPT_2026-09-05.md`. Steps 3–5
+remain unchecked until that access boundary is verifiably complete.
