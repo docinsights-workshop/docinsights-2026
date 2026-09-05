@@ -574,6 +574,7 @@ assert client.get("/config").status_code == 200
                 operation()
 
     def test_runtime_dependencies_are_the_proven_exact_versions(self):
+        readme = (Path(__file__).parent / "README.md").read_text(encoding="utf-8")
         requirements = dict(
             line.split("==", maxsplit=1)
             for line in (Path(__file__).parent / "requirements.txt")
@@ -591,6 +592,8 @@ assert client.get("/config").status_code == 200
                 "pydantic": "2.10.6",
             },
         )
+        self.assertIn("sdk: gradio\n", readme)
+        self.assertIn("sdk_version: 4.42.0\n", readme)
 
 
 if __name__ == "__main__":

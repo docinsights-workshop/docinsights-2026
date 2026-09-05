@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 import re
 import unittest
 
@@ -8,6 +9,12 @@ from app import PORTAL_CSS, demo
 
 
 class PortalLayoutTests(unittest.TestCase):
+    def test_space_metadata_pins_the_proven_gradio_sdk(self):
+        readme = (Path(__file__).parent / "README.md").read_text(encoding="utf-8")
+
+        self.assertIn("sdk: gradio\n", readme)
+        self.assertIn("sdk_version: 4.42.0\n", readme)
+
     def test_root_config_and_api_info_routes_generate_without_schema_errors(self):
         client = TestClient(demo.app, raise_server_exceptions=False)
 

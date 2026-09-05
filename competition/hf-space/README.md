@@ -1,6 +1,7 @@
 ---
 title: "DocInsights 2026 Shared Task: DocSem"
 sdk: gradio
+sdk_version: 4.42.0
 app_file: app.py
 license: apache-2.0
 hf_oauth: true
