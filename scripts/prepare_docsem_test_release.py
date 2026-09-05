@@ -7,7 +7,7 @@ not discover, select, stage, publish, or activate any local test material.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 import json
 import math
@@ -75,6 +75,12 @@ MAX_EVIDENCE_IDS_PER_TASK = 1024
 MAX_PUBLIC_TASKS_BYTES = 16 * 1024 * 1024
 MAX_PUBLIC_MANIFEST_BYTES = 1024 * 1024
 MAX_PUBLIC_CHECKSUM_BYTES = 4 * 1024 * 1024
+MAX_SOURCE_TASKS_BYTES = 16 * 1024 * 1024
+MAX_PRIVATE_LABELS_BYTES = 16 * 1024 * 1024
+MAX_PDF_XREF_OBJECTS = 100_000
+MAX_PDF_KEYS_PER_OBJECT = 256
+MAX_PDF_STRUCTURE_VALUE_CHARS = 1024 * 1024
+MAX_PDF_STRUCTURE_TOTAL_CHARS = 8 * 1024 * 1024
 
 PUBLIC_MANIFEST_RELATIVE_PATH = "test/release.json"
 PUBLIC_TASKS_RELATIVE_PATH = "test/tasks.jsonl"
@@ -110,6 +116,46 @@ _ARCHIVE_MAGICS = (
     b"7z\xbc\xaf'\x1c",
     b"Rar!\x1a\x07",
 )
+_SHA256_HEX = re.compile(r"[0-9a-f]{64}\Z")
+_PDF_NAME_TOKEN = re.compile(r"/([A-Za-z0-9_.+#-]+)")
+_PDF_FORBIDDEN_KEYS = frozenset(
+    {
+        "AA",
+        "AcroForm",
+        "AF",
+        "Collection",
+        "EmbeddedFiles",
+        "ImportData",
+        "JavaScript",
+        "JS",
+        "Launch",
+        "OpenAction",
+        "RichMedia",
+        "RichMediaContent",
+        "SubmitForm",
+        "XFA",
+    }
+)
+_PDF_FORBIDDEN_TYPE_NAMES = frozenset(
+    {
+        "EmbeddedFile",
+        "FileAttachment",
+        "Filespec",
+        "GoToE",
+        "GoToR",
+        "Movie",
+        "Rendition",
+        "ResetForm",
+        "RichMediaExecute",
+        "Screen",
+        "Sound",
+        "Thread",
+        "Trans",
+        "UseAttachments",
+        "Widget",
+    }
+)
+_PDF_FORBIDDEN_NAME_TREE_KEYS = frozenset({"EmbeddedFiles", "JavaScript"})
 
 _PAGE_RESULT_HEADER = struct.Struct(">Q")
 _DOCUMENT_PROBE_RESULT = struct.Struct(">I")
@@ -120,14 +166,34 @@ class ValidationError(ValueError):
 
 
 @dataclass(frozen=True)
+class ValidatedPDF:
+    """One bounded source PDF sealed by its validation-time digest."""
+
+    source_path: Path
+    name: str
+    size: int
+    sha256: str
+
+
+@dataclass(frozen=True)
 class ValidatedTestSource:
     """Validated source values used by later explicit staging steps."""
 
     source_root: Path
     ids: tuple[str, ...]
-    task_rows: tuple[dict, ...]
-    label_rows: tuple[dict, ...]
-    pdf_paths: tuple[Path, ...]
+    task_rows: tuple[dict, ...] = field(repr=False)
+    label_rows: tuple[dict, ...] = field(repr=False)
+    pdfs: tuple[ValidatedPDF, ...]
+    canonical_task_bytes: bytes = field(repr=False)
+    canonical_label_bytes: bytes = field(repr=False)
+    tasks_sha256: str
+    private_labels_sha256: str
+    pdf_inventory_sha256: str
+
+    @property
+    def pdf_paths(self) -> tuple[Path, ...]:
+        """Preserve the read-only path view used by callers and tests."""
+        return tuple(pdf.source_path for pdf in self.pdfs)
 
 
 @dataclass(frozen=True)
@@ -144,11 +210,17 @@ def _fail(message: str) -> None:
 
 
 def _read_jsonl(path: Path, kind: str) -> list[dict]:
-    if not path.is_file():
-        _fail(f"Required {kind} file is absent.")
     rows = []
     try:
-        for line in path.read_text(encoding="utf-8").splitlines():
+        max_bytes = (
+            MAX_PRIVATE_LABELS_BYTES if kind == "private label" else MAX_SOURCE_TASKS_BYTES
+        )
+        payload = _read_bounded_regular_file(
+            path,
+            max_bytes,
+            f"Required {kind} file",
+        )
+        for line in payload.decode("utf-8", errors="strict").splitlines():
             if not line.strip():
                 _fail(f"{kind.capitalize()} file contains a blank row.")
             parsed = json.loads(line)
@@ -317,16 +389,41 @@ def _run_bounded_process(
 
 
 def _read_bounded_regular_file(path: Path, max_bytes: int, description: str) -> bytes:
+    """Read one stable, bounded regular file without following its final link."""
+    descriptor = None
     try:
-        file_stat = path.lstat()
+        descriptor = os.open(
+            path,
+            os.O_RDONLY
+            | os.O_CLOEXEC
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0),
+        )
+        initial = os.fstat(descriptor)
+        if not stat.S_ISREG(initial.st_mode) or initial.st_size > max_bytes:
+            _fail(f"{description} is malformed or exceeds its size limit.")
+        remaining = initial.st_size
+        chunks = []
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 1024 * 1024))
+            if not chunk:
+                _fail(f"{description} changed while being read.")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            _fail(f"{description} changed while being read.")
+        final = os.fstat(descriptor)
+        stable_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if any(getattr(initial, name) != getattr(final, name) for name in stable_fields):
+            _fail(f"{description} changed while being read.")
+        return b"".join(chunks)
+    except ValidationError:
+        raise
     except OSError as exc:
         raise ValidationError(f"{description} is absent or unreadable.") from exc
-    if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_size > max_bytes:
-        _fail(f"{description} is malformed or exceeds its size limit.")
-    try:
-        return path.read_bytes()
-    except OSError as exc:
-        raise ValidationError(f"{description} is absent or unreadable.") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 def _traineddata_source_path(binary: str) -> Path:
@@ -442,12 +539,7 @@ def _read_pinned_tesseract_binary(path: Path) -> bytes:
 
 @contextmanager
 def _resolve_ocr_runtime():
-    if fitz is None:
-        _fail("PDF renderer is unavailable.")
-    if getattr(fitz, "VersionBind", None) != PYMUPDF_VERSION:
-        _fail("PDF renderer version does not match the tested contract.")
-    if not hasattr(os, "fork") or not hasattr(os, "setsid"):
-        _fail("Bounded PDF page workers are unavailable.")
+    _require_pdf_renderer()
     source_binary = Path(TESSERACT_BINARY)
     binary_payload = _read_pinned_tesseract_binary(source_binary)
     traineddata = _read_pinned_traineddata(_traineddata_source_path(str(source_binary)))
@@ -498,6 +590,16 @@ def _resolve_ocr_runtime():
             tessdata_root=controlled_tessdata,
             traineddata_sha256=TESSERACT_TRAINEDDATA_SHA256,
         )
+
+
+def _require_pdf_renderer() -> None:
+    """Require the exact public PDF API used by bounded structural workers."""
+    if fitz is None:
+        _fail("PDF renderer is unavailable.")
+    if getattr(fitz, "VersionBind", None) != PYMUPDF_VERSION:
+        _fail("PDF renderer version does not match the tested contract.")
+    if not hasattr(os, "fork") or not hasattr(os, "setsid"):
+        _fail("Bounded PDF page workers are unavailable.")
 
 
 def _ocr_headers_from_raster(
@@ -597,11 +699,73 @@ def _write_all(descriptor: int, payload: bytes) -> None:
         offset += written
 
 
+def _decode_pdf_name(value: str) -> str:
+    """Decode PDF ``#xx`` name escapes used to disguise structural keys."""
+    output = bytearray()
+    index = 0
+    encoded = value.encode("ascii", errors="strict")
+    while index < len(encoded):
+        if index + 2 < len(encoded) and encoded[index] == ord("#"):
+            try:
+                output.append(int(encoded[index + 1 : index + 3], 16))
+                index += 3
+                continue
+            except ValueError:
+                pass
+        output.append(encoded[index])
+        index += 1
+    return output.decode("ascii", errors="strict")
+
+
+def _pdf_value_names(value: str) -> set[str]:
+    return {_decode_pdf_name(match.group(1)) for match in _PDF_NAME_TOKEN.finditer(value)}
+
+
+def _audit_pdf_structure(document) -> None:
+    """Reject attachments and active content using bounded public PyMuPDF APIs."""
+    embedded_names = document.embfile_names()
+    if not isinstance(embedded_names, list) or embedded_names:
+        _fail("PDF contains an embedded file or malformed attachment inventory.")
+
+    xref_count = document.xref_length()
+    if type(xref_count) is not int or not 0 < xref_count <= MAX_PDF_XREF_OBJECTS:
+        _fail("PDF object inventory exceeds its limit.")
+    total_value_chars = 0
+    for xref in range(1, xref_count):
+        keys = document.xref_get_keys(xref)
+        if not isinstance(keys, (list, tuple)) or len(keys) > MAX_PDF_KEYS_PER_OBJECT:
+            _fail("PDF object dictionary is malformed or exceeds its limit.")
+        for encoded_key in keys:
+            if not isinstance(encoded_key, str):
+                _fail("PDF object dictionary contains an invalid key.")
+            key = _decode_pdf_name(encoded_key)
+            if key in _PDF_FORBIDDEN_KEYS:
+                _fail("PDF contains an attachment or active-content structure.")
+            value_type, value = document.xref_get_key(xref, encoded_key)
+            if not isinstance(value_type, str) or not isinstance(value, str):
+                _fail("PDF object dictionary contains an invalid value.")
+            if len(value) > MAX_PDF_STRUCTURE_VALUE_CHARS:
+                _fail("PDF object dictionary value exceeds its limit.")
+            total_value_chars += len(value)
+            if total_value_chars > MAX_PDF_STRUCTURE_TOTAL_CHARS:
+                _fail("PDF structural metadata exceeds its limit.")
+            value_names = _pdf_value_names(value) if value_type in {"array", "dict", "name"} else set()
+            if (
+                key in {"PageMode", "S", "Subtype", "Type"}
+                and value_names & _PDF_FORBIDDEN_TYPE_NAMES
+            ) or (
+                key == "Names"
+                and value_names & _PDF_FORBIDDEN_NAME_TREE_KEYS
+            ):
+                _fail("PDF contains an attachment or active-content structure.")
+
+
 def _probe_pdf_document(path: Path) -> int:
     """Open a PDF and return its bounded page count inside a worker."""
     with fitz.open(str(path)) as document:
         if document.needs_pass:
             _fail("PDF is encrypted and cannot be inspected.")
+        _audit_pdf_structure(document)
         page_count = document.page_count
         if type(page_count) is not int or not 0 < page_count <= MAX_PAGES:
             _fail("PDF page count exceeds its limit.")
@@ -887,29 +1051,78 @@ def _render_visible_pdf_evidence_blocks(
         raise ValidationError("PDF is unreadable.") from exc
 
 
-def _validate_pdfs(source_root: Path, tasks: dict[str, dict], labels: dict[str, dict]) -> tuple[Path, ...]:
+def _validate_pdfs(
+    source_root: Path,
+    tasks: dict[str, dict],
+    labels: dict[str, dict],
+) -> tuple[ValidatedPDF, ...]:
     documents_root = source_root / "documents"
-    if not documents_root.is_dir():
-        _fail("Documents directory is absent.")
-    pdf_paths = tuple(sorted(documents_root.glob("*.pdf"), key=lambda path: path.name))
-    if len(pdf_paths) != len(list(documents_root.iterdir())):
-        _fail("Documents directory contains a non-PDF entry.")
+    try:
+        directory_stat = documents_root.lstat()
+        entries = tuple(os.scandir(documents_root))
+    except OSError as exc:
+        raise ValidationError("Documents directory is absent or unreadable.") from exc
+    if not stat.S_ISDIR(directory_stat.st_mode) or stat.S_ISLNK(directory_stat.st_mode):
+        _fail("Documents directory is not a real directory.")
+    pdf_paths = []
+    for entry in entries:
+        try:
+            entry_stat = entry.stat(follow_symlinks=False)
+        except OSError as exc:
+            raise ValidationError("Documents directory contains an unreadable entry.") from exc
+        if (
+            entry.is_symlink()
+            or not stat.S_ISREG(entry_stat.st_mode)
+            or not entry.name.endswith(".pdf")
+        ):
+            _fail("Documents directory contains a non-PDF entry.")
+        pdf_paths.append(documents_root / entry.name)
+    pdf_paths = tuple(sorted(pdf_paths, key=lambda path: path.name))
     pdf_ids = {path.stem for path in pdf_paths}
     if set(tasks) != pdf_ids:
         _fail("Task IDs and PDF stems are not a bijection.")
     paths_by_id = {path.stem: path for path in pdf_paths}
+    sealed_pdfs = []
     with _resolve_ocr_runtime() as runtime:
-        for instance_id in sorted(tasks):
-            required_blocks = set(labels[instance_id]["evidence"])
-            if not required_blocks.issubset(
-                _render_visible_pdf_evidence_blocks(
-                    paths_by_id[instance_id],
-                    runtime,
-                    required_blocks,
+        try:
+            temporary_directory = tempfile.TemporaryDirectory(prefix="docsem-validated-pdf-")
+        except OSError as exc:
+            raise ValidationError("PDF validation workspace could not be created safely.") from exc
+        with temporary_directory as temporary_root:
+            root = Path(temporary_root)
+            root.chmod(0o700)
+            for index, instance_id in enumerate(sorted(tasks)):
+                source_path = paths_by_id[instance_id]
+                payload = _read_bounded_regular_file(
+                    source_path,
+                    MAX_PDF_BYTES,
+                    "Source PDF",
                 )
-            ):
-                _fail("PDF does not visibly contain every evidence block ID.")
-    return pdf_paths
+                if not payload.startswith(b"%PDF-"):
+                    _fail("PDF is unreadable.")
+                digest = _sha256(payload)
+                exact_path = root / f"{index}.pdf"
+                _write_new_file(exact_path, payload, 0o600)
+                required_blocks = set(labels[instance_id]["evidence"])
+                if not required_blocks.issubset(
+                    _render_visible_pdf_evidence_blocks(
+                        exact_path,
+                        runtime,
+                        required_blocks,
+                    )
+                ):
+                    _fail("PDF does not visibly contain every evidence block ID.")
+                sealed_pdfs.append(
+                    ValidatedPDF(
+                        source_path=source_path.absolute(),
+                        name=source_path.name,
+                        size=len(payload),
+                        sha256=digest,
+                    )
+                )
+                exact_path.unlink()
+                del payload
+    return tuple(sealed_pdfs)
 
 
 def validate_source(
@@ -931,14 +1144,23 @@ def validate_source(
     if set(tasks) & existing_ids:
         _fail("Held-out IDs overlap train or validation IDs.")
 
-    pdf_paths = _validate_pdfs(root, tasks, labels)
+    pdfs = _validate_pdfs(root, tasks, labels)
     ids = tuple(sorted(tasks))
+    task_rows = tuple(tasks[instance_id] for instance_id in ids)
+    label_rows = tuple(labels[instance_id] for instance_id in ids)
+    task_bytes = _canonical_rows(task_rows)
+    label_bytes = _canonical_rows(label_rows)
     return ValidatedTestSource(
         source_root=root.resolve(),
         ids=ids,
-        task_rows=tuple(tasks[instance_id] for instance_id in ids),
-        label_rows=tuple(labels[instance_id] for instance_id in ids),
-        pdf_paths=pdf_paths,
+        task_rows=task_rows,
+        label_rows=label_rows,
+        pdfs=pdfs,
+        canonical_task_bytes=task_bytes,
+        canonical_label_bytes=label_bytes,
+        tasks_sha256=_sha256(task_bytes),
+        private_labels_sha256=_sha256(label_bytes),
+        pdf_inventory_sha256=_sealed_pdf_inventory_digest(pdfs),
     )
 
 
@@ -953,15 +1175,89 @@ def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _inventory_digest(entries: Iterable[tuple[str, str]]) -> str:
+    return _sha256(
+        b"".join(
+            f"{name}  {digest}\n".encode("ascii")
+            for name, digest in sorted(entries)
+        )
+    )
+
+
+def _sealed_pdf_inventory_digest(pdfs: Iterable[ValidatedPDF]) -> str:
+    return _inventory_digest((pdf.name, pdf.sha256) for pdf in pdfs)
+
+
 def _pdf_inventory_digest(paths: Iterable[Path]) -> str:
-    entries = []
-    for path in paths:
-        entries.append(f"{path.name}  {_sha256(path.read_bytes())}\n".encode("ascii"))
-    return _sha256(b"".join(entries))
+    return _inventory_digest(
+        (
+            path.name,
+            _sha256(_read_bounded_regular_file(path, MAX_PDF_BYTES, "PDF inventory entry")),
+        )
+        for path in paths
+    )
+
+
+def _verify_validated_snapshot(validated: ValidatedTestSource) -> None:
+    """Recompute all mutable rows and verify immutable validation-time seals."""
+    if (
+        not isinstance(validated, ValidatedTestSource)
+        or type(validated.ids) is not tuple
+        or type(validated.task_rows) is not tuple
+        or type(validated.label_rows) is not tuple
+        or type(validated.pdfs) is not tuple
+        or type(validated.canonical_task_bytes) is not bytes
+        or type(validated.canonical_label_bytes) is not bytes
+    ):
+        _fail("Validated source snapshot is malformed.")
+    try:
+        tasks = _validate_tasks(list(validated.task_rows))
+        labels = _validate_labels(list(validated.label_rows))
+    except (TypeError, KeyError) as exc:
+        raise ValidationError("Validated source rows are malformed.") from exc
+    ids = tuple(sorted(tasks))
+    if ids != validated.ids or set(tasks) != set(labels):
+        _fail("Validated source row IDs are inconsistent.")
+    task_bytes = _canonical_rows(tasks[instance_id] for instance_id in ids)
+    label_bytes = _canonical_rows(labels[instance_id] for instance_id in ids)
+    if (
+        task_bytes != validated.canonical_task_bytes
+        or label_bytes != validated.canonical_label_bytes
+        or type(validated.tasks_sha256) is not str
+        or not _SHA256_HEX.fullmatch(validated.tasks_sha256)
+        or type(validated.private_labels_sha256) is not str
+        or not _SHA256_HEX.fullmatch(validated.private_labels_sha256)
+        or _sha256(task_bytes) != validated.tasks_sha256
+        or _sha256(label_bytes) != validated.private_labels_sha256
+    ):
+        _fail("Validated source rows changed after validation.")
+
+    expected_names = tuple(f"{instance_id}.pdf" for instance_id in ids)
+    if tuple(pdf.name for pdf in validated.pdfs) != expected_names:
+        _fail("Validated source PDF inventory is inconsistent.")
+    for pdf in validated.pdfs:
+        if (
+            not isinstance(pdf, ValidatedPDF)
+            or not isinstance(pdf.source_path, Path)
+            or type(pdf.name) is not str
+            or type(pdf.size) is not int
+            or not 0 < pdf.size <= MAX_PDF_BYTES
+            or type(pdf.sha256) is not str
+            or not _SHA256_HEX.fullmatch(pdf.sha256)
+        ):
+            _fail("Validated source PDF seal is malformed.")
+    if (
+        type(validated.pdf_inventory_sha256) is not str
+        or not _SHA256_HEX.fullmatch(validated.pdf_inventory_sha256)
+        or _sealed_pdf_inventory_digest(validated.pdfs)
+        != validated.pdf_inventory_sha256
+    ):
+        _fail("Validated source PDF inventory seal is inconsistent.")
 
 
 def build_release_manifest(validated: ValidatedTestSource, release_id: str) -> dict:
     """Return a deterministic, sanitized manifest with private values only hashed."""
+    _verify_validated_snapshot(validated)
     if not isinstance(release_id, str) or not RELEASE_ID.fullmatch(release_id):
         raise ValidationError("Release ID is invalid.")
     return {
@@ -973,9 +1269,9 @@ def build_release_manifest(validated: ValidatedTestSource, release_id: str) -> d
             "labels": len(validated.label_rows),
         },
         "sorted_ids_sha256": _sha256("".join(f"{instance_id}\n" for instance_id in validated.ids).encode("utf-8")),
-        "tasks_sha256": _sha256(_canonical_rows(validated.task_rows)),
-        "pdf_inventory_sha256": _pdf_inventory_digest(validated.pdf_paths),
-        "private_labels_sha256": _sha256(_canonical_rows(validated.label_rows)),
+        "tasks_sha256": validated.tasks_sha256,
+        "pdf_inventory_sha256": validated.pdf_inventory_sha256,
+        "private_labels_sha256": validated.private_labels_sha256,
         "visibility_audit": _visibility_audit_contract(),
     }
 
@@ -1070,6 +1366,43 @@ def _contains_forbidden_field(value: object) -> bool:
     return False
 
 
+def _public_manifest_schema_is_exact(manifest: object) -> bool:
+    if not isinstance(manifest, dict) or set(manifest) != _PUBLIC_MANIFEST_KEYS:
+        return False
+    counts = manifest.get("counts")
+    if (
+        type(manifest.get("schema_version")) is not int
+        or manifest["schema_version"] != SCHEMA_VERSION
+        or type(manifest.get("release_id")) is not str
+        or not RELEASE_ID.fullmatch(manifest["release_id"])
+        or not isinstance(counts, dict)
+        or set(counts) != {"tasks", "pdfs"}
+        or any(type(counts.get(key)) is not int or counts[key] <= 0 for key in counts)
+    ):
+        return False
+    return all(
+        type(manifest.get(key)) is str and bool(_SHA256_HEX.fullmatch(manifest[key]))
+        for key in (
+            "sorted_ids_sha256",
+            "task_manifest_sha256",
+            "pdf_inventory_sha256",
+        )
+    )
+
+
+def _normalize_high_entropy_sentinels(values: Iterable[str | bytes]) -> tuple[bytes, ...]:
+    """Accept only explicit canaries unlikely to collide with normal task text."""
+    sentinels = []
+    for value in values:
+        if not isinstance(value, (str, bytes)):
+            _fail("Public audit sentinel is malformed.")
+        encoded = value if isinstance(value, bytes) else value.encode("utf-8")
+        if len(encoded) < 16 or len(set(encoded)) < 8:
+            _fail("Public audit sentinel is not sufficiently distinctive.")
+        sentinels.append(encoded)
+    return tuple(sentinels)
+
+
 def _public_pdf_inventory_digest(paths: Iterable[Path]) -> str:
     return _pdf_inventory_digest(sorted(paths, key=lambda path: path.name))
 
@@ -1081,13 +1414,12 @@ def audit_public_payload(
 ) -> dict:
     """Fail closed unless a staged public payload is exact and label-free.
 
-    ``forbidden_values`` lets the staging caller prove that organizer-only
-    scalar values were not copied into public metadata. PDF pages are not
-    searched for those values because a grounded answer may legitimately be
-    visible in the source document; they are still scanned for embedded label
-    records and archive/polyglot payloads.
+    ``forbidden_values`` accepts optional high-entropy release canaries only.
+    Normal answer and evidence scalars are intentionally not substring-scanned
+    because they can legitimately occur in public queries or source PDFs.
     """
     root = Path(path)
+    sentinels = _normalize_high_entropy_sentinels(forbidden_values)
     files, directories = _walk_payload(root)
     if directories != {"test", PUBLIC_DOCUMENTS_RELATIVE_PATH}:
         _fail("Public payload directory inventory is not exact.")
@@ -1159,25 +1491,37 @@ def audit_public_payload(
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValidationError("Public release manifest is malformed.") from exc
     if (
-        not isinstance(public_manifest, dict)
-        or set(public_manifest) != _PUBLIC_MANIFEST_KEYS
-        or not isinstance(public_manifest.get("release_id"), str)
-        or not RELEASE_ID.fullmatch(public_manifest["release_id"])
+        not _public_manifest_schema_is_exact(public_manifest)
         or _contains_forbidden_field(public_manifest)
         or public_manifest_bytes != _canonical_json_document(public_manifest)
     ):
         _fail("Public release manifest schema is not exact.")
 
     pdf_paths = [root / name for name in sorted(pdf_files)]
-    for pdf_path in pdf_paths:
-        payload = _read_bounded_regular_file(pdf_path, MAX_PDF_BYTES, "Public PDF")
-        if (
-            not payload.startswith(b"%PDF-")
-            or not payload.rstrip().endswith(b"%%EOF")
-            or payload.startswith(_ARCHIVE_MAGICS)
-            or _EMBEDDED_FORBIDDEN_FIELD.search(payload)
-        ):
-            _fail("Public PDF contains an unsafe embedded payload.")
+    _require_pdf_renderer()
+    pdf_digests = {}
+    try:
+        temporary_directory = tempfile.TemporaryDirectory(prefix="docsem-public-pdf-audit-")
+    except OSError as exc:
+        raise ValidationError("Public PDF audit workspace could not be created safely.") from exc
+    with temporary_directory as temporary_root:
+        audit_root = Path(temporary_root)
+        audit_root.chmod(0o700)
+        for index, pdf_path in enumerate(pdf_paths):
+            payload = _read_bounded_regular_file(pdf_path, MAX_PDF_BYTES, "Public PDF")
+            if (
+                not payload.startswith(b"%PDF-")
+                or not payload.rstrip().endswith(b"%%EOF")
+                or payload.startswith(_ARCHIVE_MAGICS)
+                or _EMBEDDED_FORBIDDEN_FIELD.search(payload)
+            ):
+                _fail("Public PDF contains an unsafe embedded payload.")
+            exact_path = audit_root / f"{index}.pdf"
+            _write_new_file(exact_path, payload, 0o600)
+            _run_bounded_document_probe(exact_path)
+            pdf_digests[pdf_path.name] = _sha256(payload)
+            exact_path.unlink()
+            del payload
 
     expected_public_manifest = {
         "schema_version": SCHEMA_VERSION,
@@ -1187,7 +1531,7 @@ def audit_public_payload(
             "".join(f"{instance_id}\n" for instance_id in task_ids).encode("utf-8")
         ),
         "task_manifest_sha256": _sha256(task_bytes),
-        "pdf_inventory_sha256": _public_pdf_inventory_digest(pdf_paths),
+        "pdf_inventory_sha256": _inventory_digest(pdf_digests.items()),
     }
     if public_manifest != expected_public_manifest:
         _fail("Public release manifest hashes do not match the payload.")
@@ -1201,23 +1545,23 @@ def audit_public_payload(
     checksum_targets = sorted(
         {PUBLIC_TASKS_RELATIVE_PATH, PUBLIC_MANIFEST_RELATIVE_PATH} | pdf_files
     )
+    fixed_digests = {
+        PUBLIC_TASKS_RELATIVE_PATH: _sha256(task_bytes),
+        PUBLIC_MANIFEST_RELATIVE_PATH: _sha256(public_manifest_bytes),
+    }
     expected_checksums = b"".join(
-        f"{_sha256((root / name).read_bytes())}  {name.removeprefix('test/')}\n".encode(
-            "ascii"
-        )
+        (
+            f"{fixed_digests[name] if name in fixed_digests else pdf_digests[Path(name).name]}  "
+            f"{name.removeprefix('test/')}\n"
+        ).encode("ascii")
         for name in checksum_targets
     )
     if checksum_bytes != expected_checksums:
         _fail("Public checksum inventory does not match the payload.")
 
-    forbidden = []
-    for value in forbidden_values:
-        encoded = value if isinstance(value, bytes) else str(value).encode("utf-8")
-        if encoded:
-            forbidden.append(encoded)
     public_metadata = task_bytes + public_manifest_bytes + checksum_bytes
-    if any(value in public_metadata for value in forbidden):
-        _fail("Public metadata contains an organizer-only value.")
+    if any(value in public_metadata for value in sentinels):
+        _fail("Public metadata contains a private release sentinel.")
 
     return public_manifest
 
@@ -1296,10 +1640,10 @@ def stage_release(
         _fail("Validated source rows are inconsistent.")
     normalized_tasks = _normalized_public_tasks(validated)
     task_bytes = _canonical_rows(normalized_tasks)
-    label_bytes = _canonical_rows(validated.label_rows)
-    pdfs_by_name = {path.name: path for path in validated.pdf_paths}
+    label_bytes = validated.canonical_label_bytes
+    pdfs_by_name = {pdf.name: pdf for pdf in validated.pdfs}
     expected_pdf_names = {f"{instance_id}.pdf" for instance_id in validated.ids}
-    if set(pdfs_by_name) != expected_pdf_names:
+    if set(pdfs_by_name) != expected_pdf_names or len(pdfs_by_name) != len(validated.pdfs):
         _fail("Validated source PDF inventory is inconsistent.")
 
     public_manifest = {
@@ -1331,15 +1675,17 @@ def stage_release(
             parent.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         raise ValidationError("Staging parent directories could not be prepared safely.") from exc
-    public_temporary = Path(
-        tempfile.mkdtemp(prefix=".docsem-public-stage-", dir=public_destination.parent)
-    )
-    private_temporary = Path(
-        tempfile.mkdtemp(prefix=".docsem-private-stage-", dir=private_destination.parent)
-    )
+    public_temporary = None
+    private_temporary = None
     public_committed = False
     private_committed = False
     try:
+        public_temporary = Path(
+            tempfile.mkdtemp(prefix=".docsem-public-stage-", dir=public_destination.parent)
+        )
+        private_temporary = Path(
+            tempfile.mkdtemp(prefix=".docsem-private-stage-", dir=private_destination.parent)
+        )
         public_temporary.chmod(0o700)
         private_temporary.chmod(0o700)
         public_test = public_temporary / "test"
@@ -1351,18 +1697,30 @@ def stage_release(
 
         _write_new_file(public_test / "tasks.jsonl", task_bytes, 0o644)
         _write_new_file(public_test / "release.json", public_manifest_bytes, 0o644)
+        staged_digests = {
+            "tasks.jsonl": _sha256(task_bytes),
+            "release.json": _sha256(public_manifest_bytes),
+        }
         for name in sorted(pdfs_by_name):
+            sealed_pdf = pdfs_by_name[name]
             pdf_bytes = _read_bounded_regular_file(
-                pdfs_by_name[name], MAX_PDF_BYTES, "Validated source PDF"
+                sealed_pdf.source_path,
+                MAX_PDF_BYTES,
+                "Validated source PDF",
             )
+            digest = _sha256(pdf_bytes)
+            if len(pdf_bytes) != sealed_pdf.size or digest != sealed_pdf.sha256:
+                _fail("Validated source PDF changed after validation.")
             _write_new_file(public_documents / name, pdf_bytes, 0o644)
+            staged_digests[f"documents/{name}"] = digest
+            del pdf_bytes
 
         checksum_targets = sorted(
             ["tasks.jsonl", "release.json"]
             + [f"documents/{name}" for name in pdfs_by_name]
         )
         checksum_bytes = b"".join(
-            f"{_sha256((public_test / name).read_bytes())}  {name}\n".encode("ascii")
+            f"{staged_digests[name]}  {name}\n".encode("ascii")
             for name in checksum_targets
         )
         _write_new_file(public_test / "SHA256SUMS", checksum_bytes, 0o644)
@@ -1373,17 +1731,7 @@ def stage_release(
             _canonical_json_document(private_manifest),
             0o600,
         )
-        audit_public_payload(
-            public_temporary,
-            forbidden_values=tuple(
-                [row["answer"] for row in validated.label_rows]
-                + [
-                    evidence_id
-                    for row in validated.label_rows
-                    for evidence_id in row["evidence"]
-                ]
-            ),
-        )
+        audit_public_payload(public_temporary)
 
         public_temporary.chmod(0o755)
         os.replace(private_temporary, private_destination)
@@ -1395,9 +1743,9 @@ def stage_release(
     except OSError as exc:
         raise ValidationError("Staging payloads could not be committed safely.") from exc
     finally:
-        if not public_committed:
+        if public_temporary is not None and not public_committed:
             shutil.rmtree(public_temporary, ignore_errors=True)
-        if not private_committed:
+        if private_temporary is not None and not private_committed:
             shutil.rmtree(private_temporary, ignore_errors=True)
         if private_committed and not public_committed:
             shutil.rmtree(private_destination, ignore_errors=True)

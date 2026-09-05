@@ -12,6 +12,7 @@ import stat
 import time
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 from pathlib import Path
 
@@ -40,16 +41,22 @@ def write_pdf_with_visible_text(
     y=720,
     fill_color=None,
     underlay_content="",
+    font_name="F1",
 ):
     """Write a tiny self-contained PDF whose text extractor sees ``text``."""
     color = "" if fill_color is None else f"{fill_color[0]} {fill_color[1]} {fill_color[2]} rg "
     content = (
-        f"{underlay_content}{color}BT /F1 {font_size} Tf {rendering_mode} Tr {x} {y} Td ({text}) Tj ET"
+        f"{underlay_content}{color}BT /{font_name} {font_size} Tf "
+        f"{rendering_mode} Tr {x} {y} Td ({text}) Tj ET"
     ).encode("ascii")
     objects = (
         b"<< /Type /Catalog /Pages 2 0 R >>",
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+        (
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            + f"/Resources << /Font << /{font_name} 4 0 R >> >> ".encode("ascii")
+            + b"/Contents 5 0 R >>"
+        ),
         b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
         b"<< /Length " + str(len(content)).encode("ascii") + b" >>\nstream\n" + content + b"\nendstream",
     )
@@ -107,6 +114,59 @@ def duplicate_pdf_page(path):
         finally:
             output.close()
     replacement.replace(path)
+
+
+def add_embedded_file(path, name, payload):
+    """Attach compressed organizer-only bytes through PyMuPDF's public API."""
+    fitz = release_module.fitz
+    replacement = path.with_name(f"{path.stem}-with-attachment.pdf")
+    with fitz.open(path) as document:
+        document.embfile_add(name, payload, filename=name)
+        document.save(replacement, deflate=True)
+    replacement.replace(path)
+
+
+def add_catalog_javascript(path):
+    """Add an active catalog action through PyMuPDF's public API."""
+    fitz = release_module.fitz
+    replacement = path.with_name(f"{path.stem}-with-action.pdf")
+    with fitz.open(path) as document:
+        document.xref_set_key(
+            document.pdf_catalog(),
+            "OpenAction",
+            "<</S/JavaScript/JS(app.alert\\(1\\))>>",
+        )
+        document.save(replacement, deflate=True)
+    replacement.replace(path)
+
+
+def refresh_public_release_hashes(public_root):
+    """Reconcile public hashes so structural PDF tests cannot fail on drift alone."""
+    test_root = public_root / "test"
+    pdf_paths = sorted((test_root / "documents").glob("*.pdf"), key=lambda item: item.name)
+    manifest_path = test_root / "release.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["pdf_inventory_sha256"] = release_module._public_pdf_inventory_digest(pdf_paths)
+    manifest_path.write_bytes(release_module._canonical_json_document(manifest))
+    refresh_public_checksums(public_root)
+
+
+def refresh_public_checksums(public_root):
+    """Reconcile checksums without changing the release manifest under test."""
+    test_root = public_root / "test"
+    pdf_paths = sorted((test_root / "documents").glob("*.pdf"), key=lambda item: item.name)
+    targets = sorted(
+        ["tasks.jsonl", "release.json"]
+        + [f"documents/{pdf_path.name}" for pdf_path in pdf_paths]
+    )
+    (test_root / "SHA256SUMS").write_bytes(
+        b"".join(
+            (
+                f"{hashlib.sha256((test_root / name).read_bytes()).hexdigest()}  {name}\n"
+            ).encode("ascii")
+            for name in targets
+        )
+    )
 
 
 @contextmanager
@@ -410,6 +470,16 @@ class PrepareDocsemTestReleaseTests(unittest.TestCase):
         )
         self.assertNotIn("b01", serialized)
 
+    def test_validated_snapshot_repr_does_not_expose_private_rows(self):
+        """Catches private label bytes or rows leaking through dataclass repr."""
+        source = self.make_source()
+
+        validated = validate_source(source.root, (), ())
+
+        rendered = repr(validated)
+        self.assertNotIn("private-synthetic-answer", rendered)
+        self.assertNotIn("'evidence'", rendered)
+
     def test_rejects_duplicate_task_ids(self):
         """Catches a release whose task identifiers are not unique."""
         source = self.make_source()
@@ -624,6 +694,19 @@ class PrepareDocsemTestReleaseTests(unittest.TestCase):
             "b01:",
             font_size=8,
             fill_color=(0.5, 0.5, 0.5),
+        )
+
+        validated = validate_source(source.root, (), ())
+
+        self.assertEqual(validated.ids, ("synthetic-1", "synthetic-2", "synthetic-3"))
+
+    def test_accepts_a_benign_resource_name_that_matches_an_active_key(self):
+        """Catches mistaking an ordinary resource name for associated-file metadata."""
+        source = self.make_source()
+        write_pdf_with_visible_text(
+            source.root / "documents" / "synthetic-1.pdf",
+            "b01: ordinary resource name",
+            font_name="AF",
         )
 
         validated = validate_source(source.root, (), ())
@@ -964,6 +1047,119 @@ class PrepareDocsemTestReleaseTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             validate_source(archive, (), ())
 
+    def test_rejects_compressed_embedded_files_and_active_pdf_actions(self):
+        """Catches hidden attachments and executable PDF structures at validation."""
+        cases = (
+            ("json", "private-labels.json", b'{"answer":"organizer-only"}'),
+            ("zip", "private-labels.zip", b"PK\x03\x04compressed-private-payload"),
+        )
+        for name, attachment_name, payload in cases:
+            with self.subTest(attachment=name):
+                source = self.make_source()
+                add_embedded_file(
+                    source.root / "documents/synthetic-1.pdf",
+                    attachment_name,
+                    payload,
+                )
+                self.assert_rejected(source)
+
+        source = self.make_source()
+        add_catalog_javascript(source.root / "documents/synthetic-1.pdf")
+        self.assert_rejected(source)
+
+    def test_staging_rejects_mutation_after_validation(self):
+        """Catches staging rows or PDF bytes different from the validated snapshot."""
+        mutations = (
+            (
+                "nested-label-row",
+                lambda validated: validated.label_rows[0]["evidence"].__setitem__(0, "b99"),
+            ),
+            (
+                "task-row",
+                lambda validated: validated.task_rows[0].__setitem__(
+                    "user_query", "Changed after validation"
+                ),
+            ),
+            (
+                "pdf-bytes",
+                lambda validated: write_pdf_with_visible_text(
+                    validated.pdf_paths[0],
+                    "b01: Valid-looking but changed after validation",
+                ),
+            ),
+        )
+        for name, mutate in mutations:
+            with self.subTest(mutation=name):
+                source = self.make_source()
+                validated = validate_source(source.root, (), ())
+                mutate(validated)
+                temporary = tempfile.TemporaryDirectory()
+                self.addCleanup(temporary.cleanup)
+                root = Path(temporary.name)
+                with self.assertRaises(ValidationError):
+                    release_module.stage_release(
+                        validated,
+                        root / "public",
+                        root / "private",
+                        "synthetic-release-v1",
+                    )
+
+    def test_stages_short_grounded_answer_and_evidence_strings(self):
+        """Catches treating ordinary answer/evidence substrings as metadata leaks."""
+        source = self.make_source()
+        source.tasks[0]["user_query"] = "Does b01 support answer 1?"
+        source.labels[0]["answer"] = "1"
+        source.write_tasks()
+        source.write_labels()
+        validated = validate_source(source.root, (), ())
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+
+        manifest = release_module.stage_release(
+            validated,
+            root / "public",
+            root / "private",
+            "synthetic-release-v1",
+        )
+
+        self.assertEqual(manifest["counts"]["tasks"], 3)
+        release_module.audit_public_payload(root / "public")
+
+    def test_second_temporary_directory_failure_is_clean_and_normalized(self):
+        """Catches a leaked public temp tree when private temp allocation fails."""
+        source = self.make_source()
+        validated = validate_source(source.root, (), ())
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        real_mkdtemp = tempfile.mkdtemp
+        created = []
+
+        def fail_second_mkdtemp(*args, **kwargs):
+            if not created:
+                result = real_mkdtemp(*args, **kwargs)
+                created.append(Path(result))
+                return result
+            raise OSError("synthetic private temp allocation failure")
+
+        with patch.object(
+            release_module.tempfile,
+            "mkdtemp",
+            side_effect=fail_second_mkdtemp,
+        ), self.assertRaises(ValidationError):
+            release_module.stage_release(
+                validated,
+                root / "public",
+                root / "private",
+                "synthetic-release-v1",
+            )
+
+        self.assertEqual(len(created), 1)
+        self.assertFalse(created[0].exists())
+        self.assertFalse((root / "public").exists())
+        self.assertFalse((root / "private").exists())
+
     def test_stages_exact_deterministic_public_and_private_payloads(self):
         """Catches nondeterminism, private metadata leakage, and altered PDFs."""
         source = self.make_source()
@@ -1164,6 +1360,78 @@ class PrepareDocsemTestReleaseTests(unittest.TestCase):
         for name, public, keyword_arguments in mutations:
             with self.subTest(leakage_case=name), self.assertRaises(ValidationError):
                 release_module.audit_public_payload(public, **keyword_arguments)
+
+    def test_public_audit_rejects_embedded_files_after_hashes_are_reconciled(self):
+        """Catches structural attachments even when every public digest matches."""
+        source = self.make_source()
+        validated = validate_source(source.root, (), ())
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        public = root / "public"
+        release_module.stage_release(
+            validated,
+            public,
+            root / "private",
+            "synthetic-release-v1",
+        )
+
+        for name, attachment_name, payload in (
+            ("json", "private-labels.json", b'{"answer":"organizer-only"}'),
+            ("zip", "private-labels.zip", b"PK\x03\x04compressed-private-payload"),
+        ):
+            with self.subTest(attachment=name):
+                mutated = root / f"public-{name}"
+                shutil.copytree(public, mutated)
+                add_embedded_file(
+                    mutated / "test/documents/synthetic-1.pdf",
+                    attachment_name,
+                    payload,
+                )
+                refresh_public_release_hashes(mutated)
+                with self.assertRaises(ValidationError):
+                    release_module.audit_public_payload(mutated)
+
+    def test_public_manifest_rejects_nonexact_types_keys_and_digests(self):
+        """Catches bool-as-int and malformed nested or digest manifest values."""
+        source = self.make_source()
+        validated = validate_source(source.root, (), ())
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        good_public = root / "good-public"
+        release_module.stage_release(
+            validated,
+            good_public,
+            root / "private",
+            "synthetic-release-v1",
+        )
+
+        mutations = (
+            ("bool schema version", lambda manifest: manifest.__setitem__("schema_version", True)),
+            ("nested count key", lambda manifest: manifest["counts"].__setitem__("labels", 3)),
+            (
+                "uppercase digest",
+                lambda manifest: manifest.__setitem__(
+                    "sorted_ids_sha256", manifest["sorted_ids_sha256"].upper()
+                ),
+            ),
+            (
+                "non-string digest",
+                lambda manifest: manifest.__setitem__("task_manifest_sha256", 7),
+            ),
+        )
+        for name, mutate in mutations:
+            with self.subTest(manifest_case=name):
+                public = root / f"manifest-{name.replace(' ', '-')}"
+                shutil.copytree(good_public, public)
+                manifest_path = public / "test/release.json"
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                mutate(manifest)
+                manifest_path.write_bytes(release_module._canonical_json_document(manifest))
+                refresh_public_checksums(public)
+                with self.assertRaises(ValidationError):
+                    release_module.audit_public_payload(public)
 
     def test_staging_is_quiet_and_does_not_modify_existing_public_splits(self):
         """Catches staging that logs private rows or rewrites train/validation."""
