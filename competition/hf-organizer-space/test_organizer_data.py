@@ -77,19 +77,19 @@ def attempt(
         "metrics": {
             "answer_accuracy": answer,
             "evidence_f1": evidence,
-            "evidence_exact_match": evidence,
+            "evidence_exact_match": 1.0 if evidence > 0.0 else 0.0,
             "examples": 2,
             "per_example": [
                 {
                     "instance_id": "task-1",
                     "answer_exact_match": answer,
-                    "evidence_exact_match": evidence,
+                    "evidence_exact_match": 1.0 if evidence > 0.0 else 0.0,
                     "evidence_f1": evidence,
                 },
                 {
                     "instance_id": "task-2",
                     "answer_exact_match": answer,
-                    "evidence_exact_match": evidence,
+                    "evidence_exact_match": 1.0 if evidence > 0.0 else 0.0,
                     "evidence_f1": evidence,
                 },
             ],
@@ -168,9 +168,9 @@ def organizer_projection(grouped):
 
 
 def fixture_files():
-    a1 = attempt(ACCOUNT_A, 1, ID_A1, HASH_A1, 0.50, 0.80)
-    a2 = attempt(ACCOUNT_A, 2, ID_A2, HASH_A2, 0.75, 0.60)
-    b1 = attempt(ACCOUNT_B, 1, ID_B1, HASH_B1, 0.70, 0.90)
+    a1 = attempt(ACCOUNT_A, 1, ID_A1, HASH_A1, 0.0, 0.80)
+    a2 = attempt(ACCOUNT_A, 2, ID_A2, HASH_A2, 1.0, 0.60)
+    b1 = attempt(ACCOUNT_B, 1, ID_B1, HASH_B1, 1.0, 0.90)
     grouped = {ACCOUNT_A: [a1, a2], ACCOUNT_B: [b1]}
     release = {
         "schema_version": 1,
@@ -184,6 +184,8 @@ def fixture_files():
         "open_at": "2026-09-01T00:00:00Z",
         "close_at": "2026-10-01T00:00:00Z",
         "public_revision": "4" * 40,
+        "public_repo_id": "public/docsem",
+        "task_manifest_path": "test/tasks.jsonl",
     }
     files = {
         "private/test_release.json": json_bytes(release),
@@ -230,6 +232,7 @@ class FakeHub:
         self.files = dict(files or fixture_files())
         self.revision = revision
         self.private = private
+        self.commits = (REVISION, "3" * 40)
         self.forbidden_downloads = {
             "private/test_labels.jsonl",
             "leaderboard/leaderboard.json",
@@ -245,6 +248,11 @@ class FakeHub:
         if revision != REVISION or token != PRIVATE_TOKEN:
             raise RuntimeError("unpinned or unauthorized")
         return sorted(self.files)
+
+    def list_repo_commits(self, repo_id, *, repo_type, revision, token):
+        if revision != REVISION or token != PRIVATE_TOKEN:
+            raise RuntimeError("unpinned or unauthorized")
+        return [SimpleNamespace(commit_id=commit) for commit in self.commits]
 
     def hf_hub_download(
         self,
@@ -518,6 +526,12 @@ class OrganizerSnapshotTests(unittest.TestCase):
         private_detail[path] = json_bytes(value)
         mutations.append(private_detail)
 
+        fractional_exact = fixture_files()
+        value = json.loads(fractional_exact[path])
+        value["metrics"]["per_example"][0]["answer_exact_match"] = 0.5
+        fractional_exact[path] = json_bytes(value)
+        mutations.append(fractional_exact)
+
         for files in mutations:
             snapshot = self.load(FakeHub(files))
             report = verify_snapshot(snapshot)
@@ -543,8 +557,11 @@ class OrganizerSnapshotTests(unittest.TestCase):
         path = f"attempts/test/{ACCOUNT_A}/{ID_A1}.json"
         for field, replacement in (
             ("scoring_private_revision", "main"),
+            ("scoring_private_revision", "9" * 40),
             ("scoring_public_revision", "not-a-sha"),
+            ("scoring_public_repo_id", "attacker/other-dataset"),
             ("scoring_task_manifest_path", "../../private/test_labels.jsonl"),
+            ("submitted_at", "2027-01-01T00:00:00Z"),
         ):
             files = fixture_files()
             value = json.loads(files[path])
@@ -566,6 +583,33 @@ class OrganizerSnapshotTests(unittest.TestCase):
         report = verify_snapshot(self.load(FakeHub(files)))
         self.assertFalse(report.valid)
         self.assertIn("account_projection_mismatch", report.issue_codes)
+
+    def test_projection_counts_and_attempt_numbers_are_exact_integers(self):
+        """Catches JSON floats masquerading as projection ordinals or counts."""
+        mutations = []
+
+        account_reference = fixture_files()
+        path = f"projections/test/accounts/{ACCOUNT_A}.json"
+        value = json.loads(account_reference[path])
+        value["attempts"][0]["attempt_number"] = 1.0
+        account_reference[path] = json_bytes(value)
+        mutations.append(account_reference)
+
+        organizer_count = fixture_files()
+        path = "projections/test/organizer_leaderboard.json"
+        value = json.loads(organizer_count[path])
+        value["accounts"][0]["attempt_count"] = 2.0
+        organizer_count[path] = json_bytes(value)
+        mutations.append(organizer_count)
+
+        organizer_number = fixture_files()
+        value = json.loads(organizer_number[path])
+        value["accounts"][0]["attempt_number"] = 2.0
+        organizer_number[path] = json_bytes(value)
+        mutations.append(organizer_number)
+
+        for files in mutations:
+            self.assertFalse(verify_snapshot(self.load(FakeHub(files))).valid)
 
     def test_malformed_account_keys_return_a_generic_failed_audit(self):
         """Catches unhashable private JSON values escaping as TypeError."""

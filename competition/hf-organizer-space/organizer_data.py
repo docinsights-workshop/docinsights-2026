@@ -46,6 +46,7 @@ MAX_SNAPSHOT_FILES = 4096
 MAX_SELECTED_FILES = 4096
 MAX_FILE_BYTES = 16 * 1024 * 1024
 MAX_SNAPSHOT_BYTES = 128 * 1024 * 1024
+MAX_SNAPSHOT_COMMITS = 10_000
 MAX_ATTEMPTS = 3
 MAX_ROWS_PER_ATTEMPT = 10_000
 MAX_INSTANCE_ID_CHARACTERS = 256
@@ -91,6 +92,7 @@ class OrganizerSnapshot:
 
     repo_id: str
     revision: str
+    ancestor_revisions: tuple[str, ...] = field(repr=False, compare=False)
     release: object = field(repr=False, compare=False)
     attempts: tuple[_LoadedRecord, ...] = field(repr=False, compare=False)
     account_projections: tuple[_LoadedRecord, ...] = field(repr=False, compare=False)
@@ -102,6 +104,7 @@ class OrganizerSnapshot:
         return (
             "OrganizerSnapshot("
             f"revision={self.revision!r}, "
+            f"ancestor_count={len(self.ancestor_revisions)}, "
             f"attempt_count={len(self.attempts)}, "
             f"account_projection_count={len(self.account_projections)}, "
             f"exclusion_count={len(self.exclusions)}, "
@@ -150,6 +153,25 @@ def load_snapshot(repo_id, revision, token, *, api=None) -> OrganizerSnapshot:
             or getattr(info, "private", None) is not True
         ):
             raise OrganizerDataError("Organizer snapshot is unavailable.")
+        commit_infos = list(
+            hub.list_repo_commits(
+                repository,
+                repo_type="dataset",
+                revision=pinned_revision,
+                token=read_token,
+            )
+        )
+        ancestor_revisions = tuple(
+            getattr(commit, "commit_id", None) for commit in commit_infos
+        )
+        if (
+            not ancestor_revisions
+            or len(ancestor_revisions) > MAX_SNAPSHOT_COMMITS
+            or len(set(ancestor_revisions)) != len(ancestor_revisions)
+            or pinned_revision not in ancestor_revisions
+            or any(not _revision_digest(item) for item in ancestor_revisions)
+        ):
+            raise OrganizerDataError("Organizer snapshot is unavailable.")
 
         paths = list(
             hub.list_repo_files(
@@ -192,6 +214,7 @@ def load_snapshot(repo_id, revision, token, *, api=None) -> OrganizerSnapshot:
         return OrganizerSnapshot(
             repo_id=repository,
             revision=pinned_revision,
+            ancestor_revisions=ancestor_revisions,
             release=release,
             attempts=tuple(
                 record
@@ -257,7 +280,14 @@ def _verify_snapshot(snapshot: OrganizerSnapshot) -> AuditReport:
             continue
         account = path_match.group("account")
         submission_id = path_match.group("record")
-        if not _valid_attempt(record, state, snapshot.release, account, submission_id):
+        if not _valid_attempt(
+            record,
+            state,
+            snapshot.release,
+            snapshot.ancestor_revisions,
+            account,
+            submission_id,
+        ):
             issues.add("attempt_invalid")
         if submission_id in submission_ids:
             issues.add("attempt_duplicate_id")
@@ -577,7 +607,8 @@ def _release_state(release, issues: set[str]) -> dict | None:
     ):
         issues.add("release_invalid")
         return None
-    if release.get("enabled") is True:
+    has_window = any(release.get(name) is not None for name in ("open_at", "close_at"))
+    if release.get("enabled") is True or release.get("finalized") is True or has_window:
         open_at = _parse_timestamp(release.get("open_at"))
         close_at = _parse_timestamp(release.get("close_at"))
         if (
@@ -585,6 +616,8 @@ def _release_state(release, issues: set[str]) -> dict | None:
             or close_at is None
             or close_at <= open_at
             or not _revision_digest(release.get("public_revision"))
+            or not _valid_repository_id(release.get("public_repo_id"))
+            or release.get("task_manifest_path") != "test/tasks.jsonl"
         ):
             issues.add("release_invalid")
             return None
@@ -601,7 +634,9 @@ def _matches_state(value, state) -> bool:
     )
 
 
-def _valid_attempt(record, state, release, account, submission_id) -> bool:
+def _valid_attempt(
+    record, state, release, ancestor_revisions, account, submission_id
+) -> bool:
     if not _matches_state(record, state):
         return False
     number = record.get("attempt_number")
@@ -617,14 +652,25 @@ def _valid_attempt(record, state, release, account, submission_id) -> bool:
         or not _digest(record.get("submission_hash"))
         or record.get("scoring_gold_sha256") != state["gold_sha256"]
         or not _revision_digest(record.get("scoring_private_revision"))
+        or record.get("scoring_private_revision") not in ancestor_revisions
         or not _revision_digest(record.get("scoring_public_revision"))
         or not isinstance(release, Mapping)
         or record.get("scoring_public_revision") != release.get("public_revision")
-        or not _valid_repository_id(record.get("scoring_public_repo_id"))
-        or record.get("scoring_task_manifest_path") != "test/tasks.jsonl"
+        or record.get("scoring_public_repo_id") != release.get("public_repo_id")
+        or record.get("scoring_task_manifest_path") != release.get("task_manifest_path")
         or not _valid_timestamp(record.get("submitted_at"))
         or not _valid_metrics(metrics)
         or not _valid_predictions(predictions, metrics)
+    ):
+        return False
+    submitted_at = _parse_timestamp(record.get("submitted_at"))
+    open_at = _parse_timestamp(release.get("open_at"))
+    close_at = _parse_timestamp(release.get("close_at"))
+    if (
+        submitted_at is None
+        or open_at is None
+        or close_at is None
+        or not open_at <= submitted_at < close_at
     ):
         return False
     for name in (
@@ -669,7 +715,7 @@ def _valid_metrics(metrics) -> bool:
         return False
     for name in ("answer_accuracy", "evidence_exact_match", "evidence_f1"):
         value = metrics.get(name)
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
+        if type(value) is not float:
             return False
         if not math.isfinite(float(value)) or not 0.0 <= float(value) <= 1.0:
             return False
@@ -709,11 +755,12 @@ def _valid_metrics(metrics) -> bool:
         for name in ("answer_exact_match", "evidence_exact_match", "evidence_f1"):
             value = row.get(name)
             if (
-                isinstance(value, bool)
-                or not isinstance(value, (int, float))
+                type(value) is not float
                 or not math.isfinite(float(value))
                 or not 0.0 <= float(value) <= 1.0
             ):
+                return False
+            if name != "evidence_f1" and value not in (0.0, 1.0):
                 return False
             aggregate_name = "answer_accuracy" if name == "answer_exact_match" else name
             sums[aggregate_name] += float(value)
@@ -811,6 +858,7 @@ def _account_projection_matches(account, entries, projection, state) -> bool:
         if (
             not _matches_state(reference, state)
             or reference.get("submission_id") != attempt.get("submission_id")
+            or type(reference.get("attempt_number")) is not int
             or reference.get("attempt_number") != attempt.get("attempt_number")
         ):
             return False
@@ -846,6 +894,12 @@ def _organizer_projection_matches(grouped, projection, state) -> bool:
         if best is None:
             return False
         row = by_account[account]
+        if (
+            type(row.get("attempt_count")) is not int
+            or type(row.get("attempt_number")) is not int
+            or not _valid_metrics(row.get("metrics"))
+        ):
+            return False
         expected = {
             "attempt_count": len(entries),
             "best_submission_id": best.get("submission_id"),
