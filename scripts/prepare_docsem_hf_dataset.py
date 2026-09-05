@@ -879,8 +879,8 @@ def _install_generated_outputs(staged_public, staged_val_labels, staged_leaderbo
         if not keep_file.exists():
             with keep_file.open("xb"):
                 pass
-            keep_file.chmod(0o600)
             created_files.append(keep_file)
+            keep_file.chmod(0o600)
 
         public_backup = Path(
             tempfile.mkdtemp(

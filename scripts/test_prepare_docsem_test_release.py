@@ -1544,6 +1544,40 @@ class PrepareDocsemHFDatasetTests(unittest.TestCase):
         self.assertEqual(self.tree_snapshot(environment["target_root"]), before_public)
         self.assertEqual(self.tree_snapshot(environment["private_root"]), before_private)
 
+    def test_gitkeep_chmod_failure_removes_new_private_output_tree(self):
+        """Catches registering a created file for rollback only after chmod succeeds."""
+        environment = self.make_generation_environment()
+        target = environment["target_root"]
+        private = environment["private_root"]
+        keep_file = private / "submissions/.gitkeep"
+        before_public = self.tree_snapshot(target)
+        before_private = self.tree_snapshot(private)
+        real_chmod = Path.chmod
+        observed = {"injected": False, "file_existed": False}
+
+        def fail_created_keep_file_chmod(path, mode, *, follow_symlinks=True):
+            if not observed["injected"] and Path(path) == keep_file and mode == 0o600:
+                observed["injected"] = True
+                observed["file_existed"] = Path(path).is_file()
+                raise OSError("synthetic .gitkeep chmod failure")
+            return real_chmod(path, mode, follow_symlinks=follow_symlinks)
+
+        with (
+            self.generation_roots(environment),
+            patch.object(Path, "chmod", new=fail_created_keep_file_chmod),
+            self.assertRaises(ValidationError),
+        ):
+            hf_dataset_module.generate_dataset()
+
+        self.assertTrue(observed["injected"])
+        self.assertTrue(observed["file_existed"])
+        self.assertEqual(self.tree_snapshot(target), before_public)
+        self.assertEqual(self.tree_snapshot(private), before_private)
+        self.assertFalse(keep_file.exists())
+        self.assertFalse((private / "submissions").exists())
+        self.assertFalse((private / "private").exists())
+        self.assertFalse(private.exists())
+
     def test_generation_secures_existing_private_directories_without_rewriting_state(self):
         """Catches accepting world-readable private output directories."""
         environment = self.make_generation_environment()
