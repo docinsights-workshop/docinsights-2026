@@ -22,9 +22,9 @@ def write_jsonl(path, rows):
     )
 
 
-def write_pdf_with_visible_text(path, text, *, rendering_mode=0):
+def write_pdf_with_visible_text(path, text, *, rendering_mode=0, x=72, y=720):
     """Write a tiny self-contained PDF whose text extractor sees ``text``."""
-    content = f"BT /F1 12 Tf {rendering_mode} Tr 72 720 Td ({text}) Tj ET".encode("ascii")
+    content = f"BT /F1 12 Tf {rendering_mode} Tr {x} {y} Td ({text}) Tj ET".encode("ascii")
     objects = (
         b"<< /Type /Catalog /Pages 2 0 R >>",
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
@@ -242,6 +242,16 @@ class PrepareDocsemTestReleaseTests(unittest.TestCase):
             source.root / "documents" / "synthetic-1.pdf",
             "Synthetic fixture hidden block b01",
             rendering_mode=3,
+        )
+        self.assert_rejected(source)
+
+    def test_rejects_evidence_text_rendered_outside_the_page(self):
+        """Catches a visible-mode trace whose evidence bbox never reaches page pixels."""
+        source = self.make_source()
+        write_pdf_with_visible_text(
+            source.root / "documents" / "synthetic-1.pdf",
+            "Synthetic fixture off-page block b01",
+            y=900,
         )
         self.assert_rejected(source)
 

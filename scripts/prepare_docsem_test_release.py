@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import math
 from pathlib import Path
 import re
 from typing import Iterable
@@ -121,6 +122,60 @@ def _validate_labels(rows: list[dict]) -> dict[str, dict]:
     return labels
 
 
+def _numeric_rect(value: object, description: str) -> tuple[float, float, float, float]:
+    if not isinstance(value, (tuple, list)) or len(value) != 4:
+        _fail(f"PDF {description} is malformed.")
+    try:
+        left, top, right, bottom = (float(part) for part in value)
+    except (TypeError, ValueError) as exc:
+        raise ValidationError(f"PDF {description} is malformed.") from exc
+    if not all(math.isfinite(part) for part in (left, top, right, bottom)) or left >= right or top >= bottom:
+        _fail(f"PDF {description} is malformed.")
+    return left, top, right, bottom
+
+
+def _trace_has_rendered_pixels(trace: dict, page_rect: object, pixmap: object) -> bool:
+    left, top, right, bottom = _numeric_rect(trace.get("bbox"), "text bounding box")
+    page_left, page_top, page_right, page_bottom = _numeric_rect(tuple(page_rect), "page bounds")
+    if (
+        not isinstance(pixmap.width, int)
+        or not isinstance(pixmap.height, int)
+        or not isinstance(pixmap.n, int)
+        or not isinstance(pixmap.stride, int)
+        or pixmap.width <= 0
+        or pixmap.height <= 0
+        or pixmap.n <= 0
+        or pixmap.stride < pixmap.width * pixmap.n
+        or len(pixmap.samples) < pixmap.stride * pixmap.height
+    ):
+        _fail("PDF renderer produced an invalid page image.")
+
+    left = max(left, page_left)
+    top = max(top, page_top)
+    right = min(right, page_right)
+    bottom = min(bottom, page_bottom)
+    if left >= right or top >= bottom:
+        return False
+
+    scale_x = pixmap.width / (page_right - page_left)
+    scale_y = pixmap.height / (page_bottom - page_top)
+    start_x = max(0, math.floor((left - page_left) * scale_x))
+    start_y = max(0, math.floor((top - page_top) * scale_y))
+    end_x = min(pixmap.width, math.ceil((right - page_left) * scale_x))
+    end_y = min(pixmap.height, math.ceil((bottom - page_top) * scale_y))
+    if start_x >= end_x or start_y >= end_y:
+        return False
+
+    samples = pixmap.samples
+    for y in range(start_y, end_y):
+        row_offset = y * pixmap.stride
+        for x in range(start_x, end_x):
+            offset = row_offset + x * pixmap.n
+            if any(samples[offset + component] != 255 for component in range(pixmap.n)):
+                return True
+    return False
+
+
 def _render_visible_pdf_text(path: Path) -> str:
     if fitz is None:
         _fail("PDF renderer is unavailable.")
@@ -134,12 +189,11 @@ def _render_visible_pdf_text(path: Path) -> str:
                 _fail("PDF is encrypted and cannot be inspected.")
             for page in document:
                 pixmap = page.get_pixmap(alpha=False)
-                if pixmap.width <= 0 or pixmap.height <= 0:
-                    _fail("PDF renderer produced an invalid page image.")
                 for trace in page.get_texttrace():
                     if trace.get("type") not in {0, 1, 2} or float(trace.get("opacity", 0)) <= 0:
                         continue
-                    visible_runs.append("".join(chr(character[0]) for character in trace["chars"]))
+                    if _trace_has_rendered_pixels(trace, page.rect, pixmap):
+                        visible_runs.append("".join(chr(character[0]) for character in trace["chars"]))
         if not visible_runs:
             _fail("PDF contains no renderer-visible text.")
         return "\n".join(visible_runs)
