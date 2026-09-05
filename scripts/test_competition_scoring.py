@@ -60,10 +60,41 @@ def _assert_only_public_component_emails(*artifacts):
         raise AssertionError("test deployment leakage detected: email")
 
 
-def assert_no_test_leakage(source, rendered_config, api_schema, response, failure_log):
+def configured_test_secret_paths(deployment=app.TEST_DEPLOYMENT):
+    return tuple(
+        path
+        for path in (
+            getattr(deployment, "release_config_path", None),
+            getattr(deployment, "gold_config_path", None),
+        )
+        if isinstance(path, str) and path
+    )
+
+
+def assert_no_test_leakage(
+    source,
+    rendered_config,
+    api_schema,
+    response,
+    failure_log,
+    *,
+    configured_secret_paths=None,
+):
     """Apply class-aware rules without rejecting participant input schema terms."""
 
-    _assert_no_private_path(source, rendered_config, api_schema, response, failure_log)
+    artifacts = (source, rendered_config, api_schema, response, failure_log)
+    _assert_no_private_path(*artifacts)
+    configured_secret_paths = (
+        configured_test_secret_paths()
+        if configured_secret_paths is None
+        else tuple(path for path in configured_secret_paths if isinstance(path, str) and path)
+    )
+    if any(
+        secret_path in str(artifact)
+        for secret_path in configured_secret_paths
+        for artifact in artifacts
+    ):
+        raise AssertionError("test deployment leakage detected: configured path")
     _assert_only_public_component_emails(rendered_config, api_schema)
     if not isinstance(response, dict):
         raise AssertionError("test deployment leakage detected: malformed response")
@@ -220,6 +251,23 @@ def test_test_leakage_scanner_rejects_every_forbidden_class():
             assert label in str(exc)
         else:
             raise AssertionError(f"scanner accepted leaked {label}")
+
+    configured_paths = ("organizer/release.json", "organizer/gold.jsonl")
+    for configured_path in configured_paths:
+        try:
+            assert_no_test_leakage(
+                "source",
+                json.dumps({"leak": configured_path}),
+                "{}",
+                {"attempt": 2, "score": "withheld"},
+                "failure",
+                configured_secret_paths=configured_paths,
+            )
+        except AssertionError as exc:
+            assert "configured path" in str(exc)
+            assert configured_path not in str(exc)
+        else:
+            raise AssertionError("scanner accepted an exact configured secret path")
 
 
 def main():
