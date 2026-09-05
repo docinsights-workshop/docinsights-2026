@@ -70,8 +70,11 @@ _FORBIDDEN_PUBLIC_PATH = re.compile(
 _CONTROL_CHARACTER = re.compile(r"[\x00-\x1f\x7f]")
 
 FINAL_TEST_RELEASE_PATH = "private/test_release.json"
+FINAL_TEST_GOLD_PATH = "private/test_labels.jsonl"
 FINAL_TEST_PROJECTION_PATH = "projections/test/public_final.json"
 FINAL_TEST_AUDIT_PATH = "private/test_finalization_audit.json"
+FINAL_TEST_TASK_MANIFEST_PATH = "test/tasks.jsonl"
+FINAL_TEST_FEEDBACK_POLICY = "first-attempt-only"
 FINAL_TEST_ARTIFACT_MAX_BYTES = 16 * 1024 * 1024
 FINAL_TEST_MAX_ROWS = 30_000
 FINAL_TEST_PUBLIC_ROW_FIELDS = frozenset(
@@ -109,6 +112,8 @@ class TestDeploymentConfig:
     release_config_path: str | None
     gold_config_path: str | None
     max_attempts: int = 3
+    feedback_policy: str = FINAL_TEST_FEEDBACK_POLICY
+    task_manifest_path: str = FINAL_TEST_TASK_MANIFEST_PATH
 
     @property
     def expected_policy(self) -> TestReleasePolicy | None:
@@ -174,7 +179,12 @@ def load_test_deployment_config(
     release_config_path = _safe_server_path(
         _required_value(environment, "TEST_RELEASE_CONFIG_PATH")
     )
-    gold_config_path = _safe_server_path(_required_value(environment, "TEST_GOLD_CONFIG_PATH"))
+    gold_config_path = _safe_server_path(
+        _required_value(environment, "TEST_GOLD_CONFIG_PATH")
+    )
+    task_manifest_path = _safe_server_path(
+        _required_value(environment, "TEST_TASKS_FILE") or FINAL_TEST_TASK_MANIFEST_PATH
+    )
     configured_attempts = _required_value(environment, "TEST_MAX_ATTEMPTS") or "3"
     valid = (
         bool(release_id and _RELEASE_ID.fullmatch(release_id))
@@ -183,8 +193,9 @@ def load_test_deployment_config(
         and open_at is not None
         and close_at is not None
         and open_at < close_at
-        and release_config_path is not None
-        and gold_config_path is not None
+        and release_config_path == FINAL_TEST_RELEASE_PATH
+        and gold_config_path == FINAL_TEST_GOLD_PATH
+        and task_manifest_path == FINAL_TEST_TASK_MANIFEST_PATH
         and configured_attempts == "3"
     )
     return TestDeploymentConfig(
@@ -197,13 +208,15 @@ def load_test_deployment_config(
         close_at=close_at,
         release_config_path=release_config_path,
         gold_config_path=gold_config_path,
+        feedback_policy=FINAL_TEST_FEEDBACK_POLICY,
+        task_manifest_path=task_manifest_path,
     )
 
 
 TEST_DEPLOYMENT = load_test_deployment_config()
 TEST_SUBMISSIONS_ENABLED = TEST_DEPLOYMENT.submissions_enabled
 TEST_PUBLIC_LEADERBOARD_ENABLED = TEST_DEPLOYMENT.public_leaderboard_enabled
-TEST_TASKS_FILE = os.getenv("TEST_TASKS_FILE", "test/tasks.jsonl")
+TEST_TASKS_FILE = TEST_DEPLOYMENT.task_manifest_path
 VALIDATION_SPLIT_LABEL = "Validation (development)"
 TEST_SPLIT_LABEL = "Test (final)"
 VALIDATION_LEADERBOARD_LABEL = "Validation leaderboard"
@@ -919,6 +932,47 @@ def _validate_final_projection(projection, release):
                 )
 
 
+def _normalized_utc(value):
+    if not isinstance(value, dt.datetime) or value.tzinfo is None:
+        return None
+    try:
+        if value.utcoffset() is None:
+            return None
+        return value.astimezone(dt.timezone.utc)
+    except (OverflowError, ValueError):
+        return None
+
+
+def _validate_final_deployment(deployment):
+    opened = _normalized_utc(getattr(deployment, "open_at", None))
+    closed = _normalized_utc(getattr(deployment, "close_at", None))
+    release_id = getattr(deployment, "release_id", None)
+    task_digest = getattr(deployment, "task_manifest_sha256", None)
+    gold_digest = getattr(deployment, "gold_sha256", None)
+    max_attempts = getattr(deployment, "max_attempts", None)
+    feedback_policy = getattr(deployment, "feedback_policy", None)
+    task_manifest_path = getattr(deployment, "task_manifest_path", None)
+    if (
+        not isinstance(release_id, str)
+        or _RELEASE_ID.fullmatch(release_id) is None
+        or not isinstance(task_digest, str)
+        or _SHA256.fullmatch(task_digest) is None
+        or not isinstance(gold_digest, str)
+        or _SHA256.fullmatch(gold_digest) is None
+        or opened is None
+        or closed is None
+        or opened >= closed
+        or type(max_attempts) is not int
+        or max_attempts != 3
+        or feedback_policy != FINAL_TEST_FEEDBACK_POLICY
+        or task_manifest_path != FINAL_TEST_TASK_MANIFEST_PATH
+        or getattr(deployment, "release_config_path", None) != FINAL_TEST_RELEASE_PATH
+        or getattr(deployment, "gold_config_path", None) != FINAL_TEST_GOLD_PATH
+    ):
+        raise FinalLeaderboardError("The final test leaderboard is not available.")
+    return opened, closed
+
+
 def _validate_final_release(release, deployment):
     required = {
         "schema_version",
@@ -956,6 +1010,10 @@ def _validate_final_release(release, deployment):
         if isinstance(release, Mapping)
         else None
     )
+    configured_opened, configured_closed = _validate_final_deployment(deployment)
+    configured_attempts = getattr(deployment, "max_attempts", None)
+    configured_feedback = getattr(deployment, "feedback_policy", None)
+    configured_task_path = getattr(deployment, "task_manifest_path", None)
     if (
         not isinstance(release, Mapping)
         or not required.issubset(release)
@@ -970,15 +1028,20 @@ def _validate_final_release(release, deployment):
         or release.get("enabled") is not False
         or release.get("finalized") is not True
         or type(release.get("max_attempts")) is not int
-        or release.get("max_attempts") != 3
-        or release.get("feedback_policy") != "first-attempt-only"
+        or release.get("max_attempts") != configured_attempts
+        or configured_attempts != 3
+        or release.get("feedback_policy") != configured_feedback
+        or configured_feedback != FINAL_TEST_FEEDBACK_POLICY
         or opened is None
         or closed is None
         or finalized is None
+        or opened != configured_opened
+        or closed != configured_closed
         or not opened < closed <= finalized
         or _REVISION.fullmatch(str(release.get("public_revision", ""))) is None
         or _REPOSITORY_ID.fullmatch(str(release.get("public_repo_id", ""))) is None
-        or release.get("task_manifest_path") != "test/tasks.jsonl"
+        or release.get("task_manifest_path") != configured_task_path
+        or configured_task_path != FINAL_TEST_TASK_MANIFEST_PATH
         or _REVISION.fullmatch(str(release.get("finalization_source_revision", "")))
         is None
         or _REVISION.fullmatch(str(release.get("finalization_scorer_revision", "")))
@@ -1045,6 +1108,7 @@ def _load_final_test_projection(
     deployment = TEST_DEPLOYMENT if deployment is None else deployment
     repo_id = SUBMISSIONS_REPO_ID if repo_id is None else repo_id
     token = WRITE_TOKEN if token is None else token
+    _validate_final_deployment(deployment)
     if (
         not isinstance(repo_id, str)
         or _REPOSITORY_ID.fullmatch(repo_id) is None

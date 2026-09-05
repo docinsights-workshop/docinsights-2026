@@ -48,11 +48,12 @@ TEST_GOLD_SHA256=<64 lowercase hexadecimal SHA-256>
 TEST_OPEN_AT=YYYY-MM-DDTHH:MM:SSZ
 TEST_CLOSE_AT=YYYY-MM-DDTHH:MM:SSZ
 TEST_MAX_ATTEMPTS=3
-TEST_RELEASE_CONFIG_PATH=<server-only release policy path>
-TEST_GOLD_CONFIG_PATH=<server-only test gold path>
+TEST_RELEASE_CONFIG_PATH=private/test_release.json
+TEST_GOLD_CONFIG_PATH=private/test_labels.jsonl
+TEST_TASKS_FILE=test/tasks.jsonl
 ```
 
-The timestamps must be RFC3339 UTC values ending in `Z`, and the open instant must precede the close instant. The paths have no public default and are configured only as server secrets. The release identifier, digests, window, and attempt limit must agree exactly with the organizer-pinned server release; the server independently verifies the private scoring material before accepting an upload. `TEST_MAX_ATTEMPTS` is fixed at three. A malformed/missing value, a non-UTC or reversed window, missing path, or any attempt-limit value other than `3` leaves test submission and the public-test flag disabled without changing anonymous validation or the validation leaderboard.
+The timestamps must be RFC3339 UTC values ending in `Z`, and the open instant must precede the close instant. The three paths are fixed, server-selected canonical paths; any alternate path fails closed and is never accepted from a participant request. The release identifier, digests, exact normalized UTC window, attempt limit, first-attempt-only feedback policy, and task path must agree exactly with the organizer-pinned server release. The server independently verifies the private scoring material before accepting an upload. `TEST_MAX_ATTEMPTS` is fixed at three. A malformed/missing value, a non-UTC or reversed window, noncanonical path, or any attempt-limit value other than `3` leaves test submission and the public-test flag disabled without changing anonymous validation or the validation leaderboard.
 
 Keep `TEST_PUBLIC_LEADERBOARD_ENABLED=false` until organizer finalization. Enabling it is not a substitute for finalization: the server also requires a private exact-SHA repository snapshot, a finalized and disabled release, matching configured release/task/gold digests, and matching final-projection and audit hashes. It downloads only the fixed server-selected release, sanitized final projection, and finalization audit paths. It never accepts a client-provided split or path and never exposes private per-example results, participant emails, OAuth subjects, raw predictions, unselected attempts, or later-attempt scores.
 

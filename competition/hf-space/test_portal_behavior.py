@@ -191,6 +191,25 @@ def configured_service(*, validation_submitter=lambda file_obj, metadata: {"ok":
     return service, store
 
 
+def final_deployment(**overrides):
+    values = {
+        "submissions_enabled": False,
+        "public_leaderboard_enabled": True,
+        "release_id": "docsem-test-2026",
+        "task_manifest_sha256": TASK_DIGEST,
+        "gold_sha256": GOLD_DIGEST,
+        "open_at": dt.datetime(2026, 9, 5, tzinfo=dt.timezone.utc),
+        "close_at": dt.datetime(2026, 9, 10, tzinfo=dt.timezone.utc),
+        "release_config_path": "private/test_release.json",
+        "gold_config_path": "private/test_labels.jsonl",
+        "max_attempts": 3,
+        "feedback_policy": "first-attempt-only",
+        "task_manifest_path": "test/tasks.jsonl",
+    }
+    values.update(overrides)
+    return app.TestDeploymentConfig(**values)
+
+
 class PortalBehaviorTests(unittest.IsolatedAsyncioTestCase):
     def endpoint(self, api_name):
         matches = [
@@ -421,11 +440,7 @@ class PortalBehaviorTests(unittest.IsolatedAsyncioTestCase):
             reads.append((path, revision))
             return artifacts[path]
 
-        deployment = SimpleNamespace(
-            release_id="docsem-test-2026",
-            task_manifest_sha256=TASK_DIGEST,
-            gold_sha256=GOLD_DIGEST,
-        )
+        deployment = final_deployment()
         projection = app._load_final_test_projection(
             api=hub,
             artifact_reader=reader,
@@ -447,6 +462,74 @@ class PortalBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(hub.calls[0]["repo_id"], "private/docsem")
         self.assertEqual(hub.calls[0]["repo_type"], "dataset")
         self.assertEqual(hub.calls[0]["token"], "private-token-sentinel")
+
+    def test_final_loader_rejects_every_release_setting_mismatch_without_client_paths(
+        self,
+    ):
+        cases = (
+            (
+                "future configured window",
+                {
+                    "open_at": dt.datetime(2026, 9, 12, tzinfo=dt.timezone.utc),
+                    "close_at": dt.datetime(2026, 9, 17, tzinfo=dt.timezone.utc),
+                },
+                True,
+            ),
+            ("two-attempt deployment", {"max_attempts": 2}, False),
+            (
+                "different safe release path",
+                {"release_config_path": "sealed/release.json"},
+                False,
+            ),
+            (
+                "different safe gold path",
+                {"gold_config_path": "sealed/gold.jsonl"},
+                False,
+            ),
+            (
+                "different feedback policy",
+                {"feedback_policy": "all-attempts"},
+                False,
+            ),
+            (
+                "different task path",
+                {"task_manifest_path": "test/other-tasks.jsonl"},
+                False,
+            ),
+        )
+
+        for label, overrides, needs_release_read in cases:
+            with self.subTest(label=label):
+                hub = FinalLeaderboardHub()
+                reads = []
+                artifacts = finalized_artifacts()
+
+                def reader(path, revision):
+                    reads.append((path, revision))
+                    return artifacts[path]
+
+                with self.assertRaises(app.FinalLeaderboardError):
+                    app._load_final_test_projection(
+                        api=hub,
+                        artifact_reader=reader,
+                        deployment=final_deployment(**overrides),
+                        repo_id="private/docsem",
+                        token="private-token-sentinel",
+                    )
+
+                if needs_release_read:
+                    self.assertEqual(len(hub.calls), 1)
+                    self.assertEqual(
+                        reads,
+                        [
+                            ("private/test_release.json", PRIVATE_HEAD),
+                            ("projections/test/public_final.json", PRIVATE_HEAD),
+                            ("private/test_finalization_audit.json", PRIVATE_HEAD),
+                        ],
+                    )
+                else:
+                    self.assertEqual(hub.calls, [])
+                    self.assertEqual(reads, [])
 
     def test_final_test_table_escapes_rows_and_contains_only_public_fields(self):
         projection_bytes = finalized_artifacts()["projections/test/public_final.json"]
@@ -489,11 +572,7 @@ class PortalBehaviorTests(unittest.IsolatedAsyncioTestCase):
 
     def test_final_loader_fails_closed_on_visibility_state_digest_or_schema_drift(self):
         base = finalized_artifacts()
-        deployment = SimpleNamespace(
-            release_id="docsem-test-2026",
-            task_manifest_sha256=TASK_DIGEST,
-            gold_sha256=GOLD_DIGEST,
-        )
+        deployment = final_deployment()
 
         cases = []
         cases.append(("public repository", FinalLeaderboardHub(private=False), base))

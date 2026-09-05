@@ -24,6 +24,7 @@ PRIVATE_TEST_PATH = re.compile(r"(?:private|sealed)/[A-Za-z0-9._/-]+")
 ALLOWED_SERVER_SOURCE_PATHS = {
     "private/val_labels.jsonl",
     "private/test_release.json",
+    "private/test_labels.jsonl",
     "private/test_finalization_audit.json",
 }
 EMAIL_VALUE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
@@ -298,7 +299,7 @@ def test_test_leakage_scanner_rejects_every_forbidden_class():
             raise AssertionError("scanner accepted a server path in rendered config")
 
 
-def test_nondefault_secret_paths_stay_out_of_real_module_and_api_rendering():
+def test_noncanonical_secret_paths_fail_closed_and_stay_out_of_rendering():
     release_path = "vault-release/control/release-override.json"
     gold_path = "vault-gold/control/labels-override.jsonl"
     environment = os.environ.copy()
@@ -356,7 +357,7 @@ print(json.dumps({
     if probe.returncode != 0:
         raise AssertionError(f"configured rendering probe failed: {probe.stderr[-500:]}")
     rendered = json.loads(probe.stdout)
-    assert rendered["enabled"] is True
+    assert rendered["enabled"] is False
     assert rendered["paths"] == [release_path, gold_path]
     assert rendered["statuses"] == [200, 200, 200]
 
@@ -387,7 +388,7 @@ def main():
     test_missing_ids_are_rejected()
     test_disabled_test_deployment_has_no_release_specific_leakage()
     test_test_leakage_scanner_rejects_every_forbidden_class()
-    test_nondefault_secret_paths_stay_out_of_real_module_and_api_rendering()
+    test_noncanonical_secret_paths_fail_closed_and_stay_out_of_rendering()
     print("competition scoring tests passed")
 
 

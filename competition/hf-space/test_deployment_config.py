@@ -19,8 +19,9 @@ VALID_RELEASE = {
     "TEST_OPEN_AT": "2026-09-05T00:00:00Z",
     "TEST_CLOSE_AT": "2026-09-10T00:00:00Z",
     "TEST_MAX_ATTEMPTS": "3",
-    "TEST_RELEASE_CONFIG_PATH": "sealed/release.json",
-    "TEST_GOLD_CONFIG_PATH": "sealed/gold.jsonl",
+    "TEST_RELEASE_CONFIG_PATH": "private/test_release.json",
+    "TEST_GOLD_CONFIG_PATH": "private/test_labels.jsonl",
+    "TEST_TASKS_FILE": "test/tasks.jsonl",
 }
 
 
@@ -104,6 +105,19 @@ class TestDeploymentConfigTests(unittest.TestCase):
                 self.assertFalse(config.public_leaderboard_enabled)
                 assert_anonymous_validation_fixture(self)
 
+    def test_noncanonical_safe_server_paths_disable_test_and_preserve_validation(self):
+        for key, value in (
+            ("TEST_RELEASE_CONFIG_PATH", "sealed/release.json"),
+            ("TEST_GOLD_CONFIG_PATH", "sealed/gold.jsonl"),
+            ("TEST_TASKS_FILE", "test/other-tasks.jsonl"),
+        ):
+            with self.subTest(key=key, value=value):
+                config = load_test_deployment_config({**VALID_RELEASE, key: value})
+
+                self.assertFalse(config.submissions_enabled)
+                self.assertFalse(config.public_leaderboard_enabled)
+                assert_anonymous_validation_fixture(self)
+
     def test_malformed_or_non_utc_windows_disable_requested_test_surfaces(self):
         for key, value in (
             ("TEST_OPEN_AT", "2026-09-05 00:00:00Z"),
@@ -155,6 +169,8 @@ class TestDeploymentConfigTests(unittest.TestCase):
         self.assertTrue(config.public_leaderboard_enabled)
         self.assertEqual(config.release_id, "docsem-test-2026-09")
         self.assertEqual(config.max_attempts, 3)
+        self.assertEqual(config.feedback_policy, "first-attempt-only")
+        self.assertEqual(config.task_manifest_path, "test/tasks.jsonl")
 
 
 if __name__ == "__main__":
