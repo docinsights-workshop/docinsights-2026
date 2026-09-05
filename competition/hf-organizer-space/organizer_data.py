@@ -23,16 +23,19 @@ from huggingface_hub import HfApi
 
 
 from organizer_contract import (
+    ADJUDICATION_ACTIONS,
     MAX_INSTANCE_ID_CHARACTERS,
     MAX_LEDGER_FILE_BYTES,
-    MAX_PRIVATE_TEXT_CHARACTERS,
     MAX_TEST_ROWS,
     OAuthIdentity,
+    TestContractError,
     TestPolicyError,
     canonical_submission_hash,
     is_bounded_private_text,
+    ordered_decision_state,
     repository_id,
     select_best_attempt,
+    validate_adjudication_target,
     validate_test_predictions,
 )
 
@@ -336,8 +339,8 @@ def _verify_snapshot(snapshot: OrganizerSnapshot) -> AuditReport:
     ):
         issues.add("organizer_projection_mismatch")
 
-    exclusion_accounts: set[str] = set()
     exclusion_ids: set[str] = set()
+    decision_events: list[dict] = []
     for loaded in snapshot.exclusions:
         match = _EXCLUSION_PATH.fullmatch(loaded.path)
         record = loaded.value
@@ -345,14 +348,22 @@ def _verify_snapshot(snapshot: OrganizerSnapshot) -> AuditReport:
             match is None
             or not _valid_audit_record(record, state, match.group("record"), grouped)
             or not isinstance(record, Mapping)
-            or not _nonempty(record.get("reason_code"))
+            or not is_bounded_private_text(record.get("reason_code"), "reason_code")
         ):
             issues.add("exclusion_invalid")
             continue
         if match.group("record") in exclusion_ids:
             issues.add("exclusion_duplicate")
         exclusion_ids.add(match.group("record"))
-        exclusion_accounts.add(str(record["account_key"]))
+        decision_events.append(
+            {
+                "record_id": match.group("record"),
+                "created_at": record["created_at"],
+                "action": "exclude_account",
+                "account_key": str(record["account_key"]),
+                "submission_id": None,
+            }
+        )
 
     adjudication_ids: set[str] = set()
     for loaded in snapshot.adjudications:
@@ -365,13 +376,23 @@ def _verify_snapshot(snapshot: OrganizerSnapshot) -> AuditReport:
             grouped,
         )
         if valid and isinstance(record, Mapping):
-            valid = _nonempty(record.get("action")) and _nonempty(
-                record.get("reason_code")
-            )
+            action = record.get("action")
             submission_id = record.get("submission_id")
-            if submission_id is not None:
-                account_entries = grouped.get(str(record.get("account_key")), ())
-                valid = valid and any(
+            try:
+                valid = (
+                    isinstance(action, str)
+                    and action in ADJUDICATION_ACTIONS
+                    and is_bounded_private_text(
+                        record.get("reason_code"), "reason_code"
+                    )
+                )
+                if valid:
+                    validate_adjudication_target(action, submission_id)
+            except TestContractError:
+                valid = False
+            account_entries = grouped.get(str(record.get("account_key")), ())
+            if valid and submission_id is not None:
+                valid = any(
                     entry.get("submission_id") == submission_id
                     for _, entry in account_entries
                 )
@@ -382,6 +403,20 @@ def _verify_snapshot(snapshot: OrganizerSnapshot) -> AuditReport:
         if record_id in adjudication_ids:
             issues.add("adjudication_duplicate")
         adjudication_ids.add(record_id)
+        decision_events.append(
+            {
+                "record_id": record_id,
+                "created_at": record["created_at"],
+                "action": record["action"],
+                "account_key": str(record["account_key"]),
+                "submission_id": record.get("submission_id"),
+            }
+        )
+
+    try:
+        ordered_decision_state(decision_events)
+    except TestContractError:
+        issues.add("adjudication_invalid")
 
     return AuditReport(
         valid=not issues,
@@ -406,11 +441,32 @@ def organizer_rows(snapshot) -> list[dict]:
         match = _ATTEMPT_PATH.fullmatch(loaded.path)
         grouped[match.group("account")].append(loaded.value)
 
-    excluded = {
-        str(loaded.value["account_key"])
+    decision_events = [
+        {
+            "record_id": str(loaded.value["record_id"]),
+            "created_at": loaded.value["created_at"],
+            "action": "exclude_account",
+            "account_key": str(loaded.value["account_key"]),
+            "submission_id": None,
+        }
         for loaded in snapshot.exclusions
-        if isinstance(loaded.value, Mapping)
-    }
+    ]
+    decision_events.extend(
+        {
+            "record_id": str(loaded.value["record_id"]),
+            "created_at": loaded.value["created_at"],
+            "action": loaded.value["action"],
+            "account_key": str(loaded.value["account_key"]),
+            "submission_id": loaded.value.get("submission_id"),
+        }
+        for loaded in snapshot.adjudications
+    )
+    try:
+        account_excluded, attempt_excluded, _ = ordered_decision_state(decision_events)
+    except TestContractError:
+        raise OrganizerDataError(
+            "Organizer snapshot failed integrity verification."
+        ) from None
     exclusion_counts = defaultdict(int)
     adjudication_counts = defaultdict(int)
     for loaded in snapshot.exclusions:
@@ -423,7 +479,13 @@ def organizer_rows(snapshot) -> list[dict]:
         attempts = sorted(
             grouped[account], key=lambda item: int(item["attempt_number"])
         )
-        best = select_best_attempt(attempts)
+        eligible = [
+            attempt
+            for attempt in attempts
+            if account not in account_excluded
+            and (account, attempt["submission_id"]) not in attempt_excluded
+        ]
+        best = select_best_attempt(eligible) if eligible else None
         for attempt in attempts:
             metrics = attempt["metrics"]
             per_example = [
@@ -435,14 +497,22 @@ def organizer_rows(snapshot) -> list[dict]:
                 }
                 for row in metrics["per_example"]
             ]
+            account_is_excluded = account in account_excluded
+            attempt_is_excluded = (
+                account,
+                attempt["submission_id"],
+            ) in attempt_excluded
             rows.append(
                 {
                     "account_key": account,
                     "submission_id": attempt["submission_id"],
                     "submission_hash": attempt["submission_hash"],
                     "attempt_number": attempt["attempt_number"],
-                    "selected_best": attempt["submission_id"] == best["submission_id"],
-                    "excluded": account in excluded,
+                    "selected_best": best is not None
+                    and attempt["submission_id"] == best["submission_id"],
+                    "account_excluded": account_is_excluded,
+                    "attempt_excluded": attempt_is_excluded,
+                    "excluded": account_is_excluded or attempt_is_excluded,
                     "exclusion_count": exclusion_counts[account],
                     "adjudication_count": adjudication_counts[account],
                     "hf_subject": attempt["hf_subject"],
@@ -905,14 +975,6 @@ def _valid_audit_record(record, state, record_id, grouped) -> bool:
         and _ACCOUNT.fullmatch(account) is not None
         and account in grouped
         and _valid_timestamp(record.get("created_at"))
-    )
-
-
-def _nonempty(value) -> bool:
-    return (
-        isinstance(value, str)
-        and bool(value.strip())
-        and len(value) <= MAX_PRIVATE_TEXT_CHARACTERS
     )
 
 

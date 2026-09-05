@@ -299,7 +299,7 @@ assert client.get("/config").status_code == 200
         )
         self.assertEqual(
             {row["submission_id"] for row in filter_rows(state.rows, best="selected")},
-            {ID_A2, ID_B1},
+            {ID_B1},
         )
         self.assertEqual(
             {

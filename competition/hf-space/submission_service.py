@@ -303,7 +303,8 @@ def _test_metadata(metadata, config: TrustedTestConfig) -> dict:
         raise ValueError()
     team = bounded_private_text(metadata.get("team"), "team")
     participant_names = bounded_private_text(
-        metadata.get("participant_names"), "participant_names"
+        normalize_participant_names(metadata.get("participant_names")),
+        "participant_names",
     )
     submission_name = bounded_private_text(
         metadata.get("submission_name"), "submission_name"
@@ -320,7 +321,7 @@ def _test_metadata(metadata, config: TrustedTestConfig) -> dict:
         "scoring_public_repo_id": repository_id(config.public_repo_id),
         "scoring_task_manifest_path": task_manifest_path,
         "team": team,
-        "participant_names": normalize_participant_names(participant_names),
+        "participant_names": participant_names,
         "submission_name": submission_name,
     }
 

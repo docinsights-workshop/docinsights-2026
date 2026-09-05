@@ -27,21 +27,28 @@ from scoring import (
     score_predictions,
 )
 from submission_service import HubTestConfigLoader, SubmissionService
+from test_contract import is_valid_public_text
 from test_policy import TestReleasePolicy
 from test_store import HubTestStore
 
 
-PUBLIC_DATASET_REPO = os.getenv("PUBLIC_DATASET_REPO", "amitbcp/docinsights-2026-shared-task-data")
+PUBLIC_DATASET_REPO = os.getenv(
+    "PUBLIC_DATASET_REPO", "amitbcp/docinsights-2026-shared-task-data"
+)
 WORKSHOP_URL = os.getenv(
     "WORKSHOP_URL",
     "https://docinsights-workshop.github.io/docinsights-2026/shared-task/",
 )
-SOURCE_REPO_URL = os.getenv("SOURCE_REPO_URL", "https://github.com/oracle-samples/gsm-sem")
+SOURCE_REPO_URL = os.getenv(
+    "SOURCE_REPO_URL", "https://github.com/oracle-samples/gsm-sem"
+)
 PARTICIPANT_GUIDE_URL = os.getenv(
     "PARTICIPANT_GUIDE_URL",
     "https://github.com/oracle-samples/gsm-sem/blob/main/docsem/PARTICIPANT_INSTRUCTIONS.md",
 )
-GOLD_REPO_ID = os.getenv("GOLD_REPO_ID", "amitbcp/docinsights-2026-shared-task-submissions")
+GOLD_REPO_ID = os.getenv(
+    "GOLD_REPO_ID", "amitbcp/docinsights-2026-shared-task-submissions"
+)
 GOLD_FILE = os.getenv("GOLD_FILE", "private/val_labels.jsonl")
 SUBMISSIONS_REPO_ID = os.getenv("SUBMISSIONS_REPO_ID", GOLD_REPO_ID)
 WRITE_TOKEN = os.getenv("HF_WRITE_TOKEN") or os.getenv("HF_TOKEN")
@@ -53,22 +60,13 @@ _TRUE_VALUES = {
     "yes",
 }
 
-_RFC3339_UTC = re.compile(
-    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\Z"
-)
+_RFC3339_UTC = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\Z")
 _RELEASE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _REVISION = re.compile(r"[0-9a-f]{40}\Z")
 _REPOSITORY_ID = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z"
 )
-_FORBIDDEN_PUBLIC_PATH = re.compile(
-    r"(?:^|/)(?:private|attempts/test|projections/test/accounts|"
-    r"exclusions/test|adjudications/test)(?:/|$)",
-    re.IGNORECASE,
-)
-_CONTROL_CHARACTER = re.compile(r"[\x00-\x1f\x7f]")
-
 FINAL_TEST_RELEASE_PATH = "private/test_release.json"
 FINAL_TEST_GOLD_PATH = "private/test_labels.jsonl"
 FINAL_TEST_PROJECTION_PATH = "projections/test/public_final.json"
@@ -95,7 +93,6 @@ FINAL_TEST_PROJECTION_FIELDS = frozenset(
 
 class FinalLeaderboardError(RuntimeError):
     """Sanitized refusal when a public final projection cannot be proven."""
-
 
 
 @dataclass(frozen=True)
@@ -693,7 +690,9 @@ def _load_gold_rows():
     return load_jsonl_text(_read_hub_file(GOLD_REPO_ID, GOLD_FILE, token=WRITE_TOKEN))
 
 
-def _persist_submission(rows, team, contact, submission_name, metrics, participant_names=None):
+def _persist_submission(
+    rows, team, contact, submission_name, metrics, participant_names=None
+):
     if not SUBMISSIONS_REPO_ID or not WRITE_TOKEN:
         return "Score computed. Persistence is disabled until SUBMISSIONS_REPO_ID and HF_WRITE_TOKEN are configured."
 
@@ -759,7 +758,9 @@ def _update_leaderboard(row):
         rows.append(row)
         rows.sort(key=lambda item: str(item.get("submitted_at", "")))
         tmp_path = Path("/tmp") / "leaderboard.json"
-        tmp_path.write_text(json.dumps(rows, indent=2, sort_keys=True), encoding="utf-8")
+        tmp_path.write_text(
+            json.dumps(rows, indent=2, sort_keys=True), encoding="utf-8"
+        )
         upload_file(
             path_or_fileobj=str(tmp_path),
             path_in_repo="leaderboard/leaderboard.json",
@@ -770,7 +771,9 @@ def _update_leaderboard(row):
         )
         identity = leaderboard_identity(row)
         latest = next(
-            item for item in rank_leaderboard(rows) if leaderboard_identity(item) == identity
+            item
+            for item in rank_leaderboard(rows)
+            if leaderboard_identity(item) == identity
         )
         return latest["attempts"]
 
@@ -830,7 +833,7 @@ def leaderboard_html():
                 </tr>
             </thead>
             <tbody>
-                {''.join(body_rows)}
+                {"".join(body_rows)}
             </tbody>
         </table>
     </div>
@@ -884,13 +887,7 @@ def _artifact_bytes(raw):
 
 
 def _valid_public_text(value):
-    return (
-        isinstance(value, str)
-        and bool(value.strip())
-        and len(value) <= 4096
-        and _CONTROL_CHARACTER.search(value) is None
-        and _FORBIDDEN_PUBLIC_PATH.search(value.replace("\\", "/")) is None
-    )
+    return is_valid_public_text(value)
 
 
 def _validate_final_projection(projection, release):
@@ -1286,7 +1283,9 @@ def leaderboard_view(selection):
     )
 
 
-def evaluate_submission(file_obj, team, contact, submission_name, participant_names=None):
+def evaluate_submission(
+    file_obj, team, contact, submission_name, participant_names=None
+):
     if file_obj is None:
         raise gr.Error("Upload a JSONL submission file.")
     if not team.strip():
@@ -1363,7 +1362,9 @@ _SUBMISSION_SERVICE = SubmissionService(
 
 def submit_for_split(split, file_obj, metadata, oauth_profile):
     try:
-        return _SUBMISSION_SERVICE.submit_for_split(split, file_obj, metadata, oauth_profile)
+        return _SUBMISSION_SERVICE.submit_for_split(
+            split, file_obj, metadata, oauth_profile
+        )
     except SubmissionError as exc:
         raise gr.Error(str(exc)) from None
 
@@ -1453,7 +1454,7 @@ def _test_history_html(attempts, masked_email):
                     <th scope="col">Feedback</th>
                 </tr>
             </thead>
-            <tbody>{''.join(rows)}</tbody>
+            <tbody>{"".join(rows)}</tbody>
         </table>
     </div>
     """
@@ -1618,7 +1619,9 @@ with PortalBlocks(**blocks_options) as demo:
                 placeholder="A. Researcher, B. Researcher",
             )
             contact = gr.Textbox(label="Contact email", placeholder="lead@example.org")
-            submission_name = gr.Textbox(label="Submission name", placeholder="baseline-v1")
+            submission_name = gr.Textbox(
+                label="Submission name", placeholder="baseline-v1"
+            )
         with gr.Row(elem_id="submission-actions"):
             file_input = gr.File(
                 label="Submission file",

@@ -37,11 +37,16 @@ if str(SPACE_ROOT) not in sys.path:
 
 from scoring import score_predictions  # noqa: E402
 from test_contract import (  # noqa: E402
+    ADJUDICATION_ACTIONS,
     MAX_LEDGER_FILE_BYTES,
+    TestContractError,
     bounded_private_text,
+    is_valid_public_text,
+    ordered_decision_state,
     repository_id,
     revision_digest,
     sha256_digest,
+    validate_adjudication_target,
     validate_test_predictions,
 )
 from test_policy import (  # noqa: E402
@@ -96,11 +101,6 @@ _EXCLUSION_PATH = re.compile(
 _ADJUDICATION_PATH = re.compile(
     r"adjudications/test/(?P<record>[A-Za-z0-9][A-Za-z0-9._-]{0,127})\.json\Z"
 )
-_FORBIDDEN_PUBLIC_PATH = re.compile(
-    r"(?:^|/)(?:private|attempts/test|projections/test/accounts|"
-    r"exclusions/test|adjudications/test)(?:/|$)",
-    re.IGNORECASE,
-)
 _FINALIZATION_RELEASE_FIELDS = frozenset(
     {
         "finalized_at",
@@ -109,15 +109,6 @@ _FINALIZATION_RELEASE_FIELDS = frozenset(
         "finalization_scorer_sha256",
         "final_projection_sha256",
         "finalization_audit_sha256",
-    }
-)
-_ADJUDICATION_ACTIONS = frozenset(
-    {
-        "note",
-        "exclude_account",
-        "reinstate_account",
-        "exclude_attempt",
-        "reinstate_attempt",
     }
 )
 
@@ -645,12 +636,7 @@ def audit_public_projection(value) -> bool:
             )
         for field_name in ("hf_username", "team", "submission_name"):
             text = row.get(field_name)
-            if (
-                not isinstance(text, str)
-                or not text.strip()
-                or len(text) > 4096
-                or _FORBIDDEN_PUBLIC_PATH.search(text.replace("\\", "/"))
-            ):
+            if not is_valid_public_text(text):
                 raise FinalizationError(
                     "The public final projection failed its privacy audit."
                 )
@@ -1035,7 +1021,6 @@ def _valid_metrics_shape(metrics, expected_examples):
 
 def _audit_decisions(snapshot, release, now):
     events = []
-    seen_ids = set()
     known_accounts = {
         item.value.get("account_key")
         for item in snapshot.attempts
@@ -1053,38 +1038,29 @@ def _audit_decisions(snapshot, release, now):
         record_id, created = _validate_audit_record(item, release, now, "exclusion")
         if item.value.get("account_key") not in known_accounts:
             raise FinalizationError("A private exclusion target is invalid.")
-        if record_id in seen_ids:
-            raise FinalizationError("Private audit records contain a duplicate ID.")
-        seen_ids.add(record_id)
         events.append(
-            (
-                created,
-                record_id,
-                "exclude_account",
-                str(item.value["account_key"]),
-                None,
-                str(item.value["reason_code"]),
-                item.sha256,
-            )
+            {
+                "record_id": record_id,
+                "record_sha256": item.sha256,
+                "created_at": _format_utc(created),
+                "action": "exclude_account",
+                "account_key": str(item.value["account_key"]),
+                "submission_id": None,
+                "reason_code": str(item.value["reason_code"]),
+            }
         )
     for item in snapshot.adjudications:
         record_id, created = _validate_audit_record(item, release, now, "adjudication")
-        if record_id in seen_ids:
-            raise FinalizationError("Private audit records contain a duplicate ID.")
-        seen_ids.add(record_id)
         action = item.value.get("action")
         submission_id = item.value.get("submission_id")
-        if action not in _ADJUDICATION_ACTIONS:
+        if not isinstance(action, str) or action not in ADJUDICATION_ACTIONS:
             raise FinalizationError("A private adjudication action is invalid.")
-        if action.endswith("attempt") and not _uuid4(submission_id):
-            raise FinalizationError("A private adjudication target is invalid.")
-        if action == "note" and submission_id is not None and not _uuid4(submission_id):
-            raise FinalizationError("A private adjudication target is invalid.")
-        if (
-            action not in {"note", "exclude_attempt", "reinstate_attempt"}
-            and submission_id is not None
-        ):
-            raise FinalizationError("A private adjudication target is invalid.")
+        try:
+            validate_adjudication_target(action, submission_id)
+        except TestContractError:
+            raise FinalizationError(
+                "A private adjudication target is invalid."
+            ) from None
         account_key = item.value.get("account_key")
         if account_key not in known_accounts or (
             submission_id is not None
@@ -1092,49 +1068,23 @@ def _audit_decisions(snapshot, release, now):
         ):
             raise FinalizationError("A private adjudication target is invalid.")
         events.append(
-            (
-                created,
-                record_id,
-                action,
-                str(item.value["account_key"]),
-                submission_id,
-                str(item.value["reason_code"]),
-                item.sha256,
-            )
-        )
-    events.sort(key=lambda item: (item[0], item[1]))
-    account_excluded = set()
-    attempt_excluded = set()
-    applied = []
-    for (
-        created,
-        record_id,
-        action,
-        account,
-        submission_id,
-        reason,
-        record_sha,
-    ) in events:
-        if action == "exclude_account":
-            account_excluded.add(account)
-        elif action == "reinstate_account":
-            account_excluded.discard(account)
-        elif action == "exclude_attempt":
-            attempt_excluded.add((account, submission_id))
-        elif action == "reinstate_attempt":
-            attempt_excluded.discard((account, submission_id))
-        applied.append(
             {
                 "record_id": record_id,
-                "record_sha256": record_sha,
+                "record_sha256": item.sha256,
                 "created_at": _format_utc(created),
                 "action": action,
-                "account_key": account,
+                "account_key": str(item.value["account_key"]),
                 "submission_id": submission_id,
-                "reason_code": reason,
+                "reason_code": str(item.value["reason_code"]),
             }
         )
-    return (account_excluded, attempt_excluded), applied
+    try:
+        account_excluded, attempt_excluded, ordered_ids = ordered_decision_state(events)
+    except TestContractError:
+        raise FinalizationError("Private audit decisions are invalid.") from None
+    by_id = {event["record_id"]: event for event in events}
+    applied = [by_id[record_id] for record_id in ordered_ids]
+    return (set(account_excluded), set(attempt_excluded)), applied
 
 
 def _validate_audit_record(item, release, now, kind):
@@ -1145,6 +1095,10 @@ def _validate_audit_record(item, release, now, kind):
         raise FinalizationError("A private audit record is malformed.")
     record_id = value.get("record_id")
     created = _parse_utc(value.get("created_at"))
+    try:
+        bounded_private_text(value.get("reason_code"), "reason_code")
+    except TestContractError:
+        raise FinalizationError("A private audit record is malformed.") from None
     if (
         record_id != match.group("record")
         or _IDENTIFIER.fullmatch(str(record_id or "")) is None
@@ -1155,9 +1109,6 @@ def _validate_audit_record(item, release, now, kind):
         or value.get("task_manifest_sha256") != release["task_manifest_sha256"]
         or value.get("gold_sha256") != release["gold_sha256"]
         or _SHA256.fullmatch(str(value.get("account_key", ""))) is None
-        or not isinstance(value.get("reason_code"), str)
-        or not value["reason_code"].strip()
-        or len(value["reason_code"]) > 4096
         or created is None
         or created > now
     ):

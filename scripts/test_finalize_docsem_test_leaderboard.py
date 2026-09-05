@@ -24,6 +24,7 @@ from finalize_docsem_test_leaderboard import (
 )
 from scoring import score_predictions as fixture_score_predictions
 from test_policy import OAuthIdentity, canonical_submission_hash
+import app as participant_app
 
 
 UTC = dt.timezone.utc
@@ -475,6 +476,110 @@ class FinalizationPlanTests(unittest.TestCase):
             record.value["submission_id"],
         )
 
+    def test_ordered_reinstatements_and_attempt_exclusion_select_next_best(self):
+        """Catches finalizer/organizer drift in eligible best-attempt fallback."""
+
+        first = attempt(
+            "account-a",
+            1,
+            "11111111-1111-4111-8111-111111111111",
+            "2026-09-02T12:00:00Z",
+            predictions(second="wrong"),
+            submission_name="fallback",
+        )
+        best = attempt(
+            "account-a",
+            2,
+            "22222222-2222-4222-8222-222222222222",
+            "2026-09-03T12:00:00Z",
+            predictions(),
+            submission_name="excluded-best",
+        )
+        common = {
+            "schema_version": 2,
+            "split": "test",
+            "release_id": "docsem-test-2026",
+            "task_manifest_sha256": TASK_SHA,
+            "gold_sha256": GOLD_SHA,
+            "account_key": first.value["account_key"],
+        }
+        exclude_account = SnapshotRecord.from_value(
+            "exclusions/test/exclude-account.json",
+            {
+                **common,
+                "record_id": "exclude-account",
+                "created_at": "2026-10-01T01:00:00Z",
+                "reason_code": "temporary-review",
+            },
+        )
+        event_values = (
+            (
+                "reinstate-account",
+                "2026-10-01T02:00:00Z",
+                "reinstate_account",
+                None,
+            ),
+            (
+                "exclude-best-first",
+                "2026-10-01T03:00:00Z",
+                "exclude_attempt",
+                best.value["submission_id"],
+            ),
+            (
+                "reinstate-best",
+                "2026-10-01T04:00:00Z",
+                "reinstate_attempt",
+                best.value["submission_id"],
+            ),
+            (
+                "exclude-best-final",
+                "2026-10-01T05:00:00Z",
+                "exclude_attempt",
+                best.value["submission_id"],
+            ),
+        )
+        adjudications = []
+        for record_id, created_at, action, submission_id in event_values:
+            value = {
+                **common,
+                "record_id": record_id,
+                "created_at": created_at,
+                "action": action,
+                "reason_code": "ordered-review",
+            }
+            if submission_id is not None:
+                value["submission_id"] = submission_id
+            adjudications.append(
+                SnapshotRecord.from_value(
+                    f"adjudications/test/{record_id}.json",
+                    value,
+                )
+            )
+
+        plan = build_finalization(
+            snapshot(
+                (first, best),
+                exclusions=(exclude_account,),
+                adjudications=tuple(reversed(adjudications)),
+            ),
+            NOW,
+        )
+
+        self.assertEqual(plan.public_projection["rows"][0]["selected_attempt"], 1)
+        self.assertEqual(
+            plan.public_projection["rows"][0]["submission_name"], "fallback"
+        )
+        self.assertEqual(
+            [row["record_id"] for row in plan.audit_manifest["applied_audit_records"]],
+            [
+                "exclude-account",
+                "reinstate-account",
+                "exclude-best-first",
+                "reinstate-best",
+                "exclude-best-final",
+            ],
+        )
+
     def test_adjudication_must_target_an_existing_account_and_attempt(self):
         record = attempt(
             "account-a",
@@ -578,6 +683,19 @@ class FinalizationPlanTests(unittest.TestCase):
         private_path["rows"][0]["team"] = "private/test_labels.jsonl"
         with self.assertRaises(FinalizationError):
             audit_public_projection(private_path)
+
+        self.assertIn(
+            "DocSem final test leaderboard",
+            participant_app.final_test_leaderboard_html(clean),
+        )
+        for control in ("\0", "\n", "\t", "\r", "\x7f"):
+            mutated = copy.deepcopy(clean)
+            mutated["rows"][0]["submission_name"] = f"clean{control}spoof"
+            with self.subTest(control=repr(control)):
+                with self.assertRaises(FinalizationError):
+                    audit_public_projection(mutated)
+                with self.assertRaises(participant_app.FinalLeaderboardError):
+                    participant_app.final_test_leaderboard_html(mutated)
 
     def test_dry_run_summary_contains_only_counts_hashes_and_revisions(self):
         record = attempt(

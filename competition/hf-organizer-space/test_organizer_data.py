@@ -678,7 +678,7 @@ class OrganizerSnapshotTests(unittest.TestCase):
             [(ACCOUNT_A, 1), (ACCOUNT_A, 2), (ACCOUNT_B, 1)],
         )
         a_rows = [row for row in rows if row["account_key"] == ACCOUNT_A]
-        self.assertEqual([row["selected_best"] for row in a_rows], [False, True])
+        self.assertEqual([row["selected_best"] for row in a_rows], [False, False])
         self.assertTrue(all(row["excluded"] for row in a_rows))
         self.assertTrue(all(row["exclusion_count"] == 1 for row in a_rows))
         self.assertTrue(all(row["adjudication_count"] == 1 for row in a_rows))
@@ -688,6 +688,132 @@ class OrganizerSnapshotTests(unittest.TestCase):
         )
         self.assertFalse(rows[-1]["excluded"])
         self.assertNotIn("predictions", rows[0])
+
+    def test_adjudications_recompute_eligibility_and_best_attempt_in_shared_order(self):
+        """Catches the organizer view disagreeing with finalization decisions."""
+
+        files = fixture_files()
+        events = (
+            {
+                **RELEASE_STATE,
+                "record_id": "reinstate-account-a",
+                "account_key": ACCOUNT_A,
+                "created_at": "2026-09-05T13:00:00Z",
+                "action": "reinstate_account",
+                "reason_code": "appeal-granted",
+            },
+            {
+                **RELEASE_STATE,
+                "record_id": "a-reinstate-best",
+                "account_key": ACCOUNT_A,
+                "submission_id": ID_A2,
+                "created_at": "2026-09-05T14:00:00Z",
+                "action": "reinstate_attempt",
+                "reason_code": "ordered-first",
+            },
+            {
+                **RELEASE_STATE,
+                "record_id": "z-exclude-best",
+                "account_key": ACCOUNT_A,
+                "submission_id": ID_A2,
+                "created_at": "2026-09-05T14:00:00Z",
+                "action": "exclude_attempt",
+                "reason_code": "ordered-last",
+            },
+            {
+                **RELEASE_STATE,
+                "record_id": "exclude-account-b",
+                "account_key": ACCOUNT_B,
+                "created_at": "2026-09-05T13:00:00Z",
+                "action": "exclude_account",
+                "reason_code": "temporary-review",
+            },
+            {
+                **RELEASE_STATE,
+                "record_id": "reinstate-account-b",
+                "account_key": ACCOUNT_B,
+                "created_at": "2026-09-05T15:00:00Z",
+                "action": "reinstate_account",
+                "reason_code": "review-complete",
+            },
+        )
+        for event in events:
+            files[f"{ADJUDICATION_PREFIX}{event['record_id']}.json"] = json_bytes(event)
+
+        snapshot = self.load(FakeHub(files))
+        report = verify_snapshot(snapshot)
+        rows = organizer_rows(snapshot)
+
+        self.assertTrue(report.valid)
+        a1, a2 = [row for row in rows if row["account_key"] == ACCOUNT_A]
+        b1 = [row for row in rows if row["account_key"] == ACCOUNT_B][0]
+        self.assertFalse(a1["account_excluded"])
+        self.assertFalse(a1["attempt_excluded"])
+        self.assertFalse(a1["excluded"])
+        self.assertTrue(a1["selected_best"])
+        self.assertFalse(a2["account_excluded"])
+        self.assertTrue(a2["attempt_excluded"])
+        self.assertTrue(a2["excluded"])
+        self.assertFalse(a2["selected_best"])
+        self.assertFalse(b1["account_excluded"])
+        self.assertFalse(b1["attempt_excluded"])
+        self.assertFalse(b1["excluded"])
+        self.assertTrue(b1["selected_best"])
+        self.assertEqual(a1["exclusion_count"], 1)
+        self.assertEqual(a1["adjudication_count"], 4)
+        self.assertEqual(b1["adjudication_count"], 2)
+
+    def test_adjudication_action_and_target_shape_match_finalizer_contract(self):
+        """Catches invalid organizer audit records that finalization must refuse."""
+
+        invalid_records = (
+            {
+                "record_id": "unknown-action",
+                "action": "unknown",
+                "submission_id": None,
+            },
+            {
+                "record_id": "non-string-action",
+                "action": [],
+                "submission_id": None,
+            },
+            {
+                "record_id": "account-with-attempt",
+                "action": "exclude_account",
+                "submission_id": ID_A1,
+            },
+            {
+                "record_id": "attempt-without-target",
+                "action": "exclude_attempt",
+                "submission_id": None,
+            },
+            {
+                "record_id": "note-with-bad-target",
+                "action": "note",
+                "submission_id": "not-a-uuid",
+            },
+        )
+        for overrides in invalid_records:
+            with self.subTest(record_id=overrides["record_id"]):
+                files = fixture_files()
+                record = {
+                    **RELEASE_STATE,
+                    "record_id": overrides["record_id"],
+                    "account_key": ACCOUNT_A,
+                    "created_at": "2026-09-06T12:00:00Z",
+                    "action": overrides["action"],
+                    "reason_code": "invalid-fixture",
+                }
+                if overrides["submission_id"] is not None:
+                    record["submission_id"] = overrides["submission_id"]
+                files[f"{ADJUDICATION_PREFIX}{record['record_id']}.json"] = json_bytes(
+                    record
+                )
+
+                report = verify_snapshot(self.load(FakeHub(files)))
+
+                self.assertFalse(report.valid)
+                self.assertIn("adjudication_invalid", report.issue_codes)
 
     def test_sensitive_dataclass_repr_is_aggregate_only(self):
         """Catches tokens, emails, or private predictions leaking through repr."""

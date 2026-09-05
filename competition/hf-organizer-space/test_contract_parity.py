@@ -52,6 +52,10 @@ class OrganizerContractParityTests(unittest.TestCase):
             "MAX_REPOSITORY_ID_CHARACTERS",
             "MAX_LEDGER_FILE_BYTES",
             "PRIVATE_TEXT_LIMITS",
+            "PUBLIC_TEXT_FIELDS",
+            "ADJUDICATION_ACTIONS",
+            "ACCOUNT_ADJUDICATION_ACTIONS",
+            "ATTEMPT_ADJUDICATION_ACTIONS",
         )
         self.assertEqual(
             {name: getattr(organizer, name) for name in names},
@@ -105,6 +109,117 @@ class OrganizerContractParityTests(unittest.TestCase):
                     _outcome(organizer.validate_test_predictions, rows),
                     _outcome(participant_contract.validate_test_predictions, rows),
                 )
+
+    def test_private_and_public_text_safety_match_participant_contract(self):
+        """Catches controls or private paths accepted by only one deployed copy."""
+
+        organizer = self.organizer_contract()
+        cases = (
+            "safe display name",
+            " leading and trailing ",
+            "line\nbreak",
+            "tab\tspoof",
+            "nul\0spoof",
+            "delete\x7fspoof",
+            "private/test_labels.jsonl",
+            "attempts/test/account/record.json",
+            "x" * 4_097,
+        )
+        for value in cases:
+            with self.subTest(value=repr(value[:40])):
+                self.assertEqual(
+                    organizer.is_valid_public_text(value),
+                    participant_contract.is_valid_public_text(value),
+                )
+        for field in participant_contract.PRIVATE_TEXT_LIMITS:
+            with self.subTest(field=field):
+                value = "safe\nspoof"
+                self.assertEqual(
+                    _outcome(organizer.bounded_private_text, value, field),
+                    _outcome(participant_contract.bounded_private_text, value, field),
+                )
+                self.assertEqual(
+                    _outcome(organizer.bounded_private_text, value, field)[0],
+                    "error",
+                )
+
+    def test_adjudication_target_and_ordered_state_match_participant_contract(self):
+        """Catches organizer/finalizer drift in audit-action state transitions."""
+
+        organizer = self.organizer_contract()
+        attempt_id = "11111111-1111-4111-8111-111111111111"
+        cases = (
+            ("note", None),
+            ("note", attempt_id),
+            ("exclude_account", None),
+            ("reinstate_account", None),
+            ("exclude_attempt", attempt_id),
+            ("reinstate_attempt", attempt_id),
+            ("unknown", None),
+            ([], None),
+            ("exclude_account", attempt_id),
+            ("exclude_attempt", None),
+            ("note", "not-a-uuid"),
+        )
+        for action, submission_id in cases:
+            with self.subTest(action=action, submission_id=submission_id):
+                self.assertEqual(
+                    _outcome(
+                        organizer.validate_adjudication_target,
+                        action,
+                        submission_id,
+                    ),
+                    _outcome(
+                        participant_contract.validate_adjudication_target,
+                        action,
+                        submission_id,
+                    ),
+                )
+
+        events = (
+            {
+                "record_id": "z-exclude",
+                "created_at": "2026-10-01T02:00:00Z",
+                "action": "exclude_attempt",
+                "account_key": "account-a",
+                "submission_id": attempt_id,
+            },
+            {
+                "record_id": "a-reinstate",
+                "created_at": "2026-10-01T02:00:00Z",
+                "action": "reinstate_attempt",
+                "account_key": "account-a",
+                "submission_id": attempt_id,
+            },
+            {
+                "record_id": "account-exclude",
+                "created_at": "2026-10-01T01:00:00Z",
+                "action": "exclude_account",
+                "account_key": "account-a",
+                "submission_id": None,
+            },
+            {
+                "record_id": "account-reinstate",
+                "created_at": "2026-10-01T01:30:00Z",
+                "action": "reinstate_account",
+                "account_key": "account-a",
+                "submission_id": None,
+            },
+        )
+        organizer_state = organizer.ordered_decision_state(events)
+        participant_state = participant_contract.ordered_decision_state(events)
+        self.assertEqual(organizer_state, participant_state)
+        self.assertEqual(organizer_state[0], frozenset())
+        self.assertEqual(organizer_state[1], frozenset({("account-a", attempt_id)}))
+        self.assertEqual(
+            organizer_state[2],
+            (
+                "account-exclude",
+                "account-reinstate",
+                "a-reinstate",
+                "z-exclude",
+            ),
+        )
 
     def test_normalization_and_canonical_submission_hash_match_participant_policy(self):
         """Catches a standalone organizer accepting a different immutable hash."""

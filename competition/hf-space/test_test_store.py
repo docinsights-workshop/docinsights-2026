@@ -300,6 +300,63 @@ class HubTestStoreTests(unittest.TestCase):
                 self.assertEqual(hub.repo_info_calls, 0)
                 self.assertEqual(hub.create_calls, [])
 
+    def test_direct_store_rejects_ascii_controls_in_persisted_metadata_before_io(self):
+        """Catches control characters crossing the immutable-ledger boundary."""
+
+        identity_cases = {
+            "subject NUL": OAuthIdentity(
+                f"{IDENTITY.sub}\0x", IDENTITY.username, IDENTITY.email
+            ),
+            "username newline": OAuthIdentity(
+                IDENTITY.sub, f"{IDENTITY.username}\nspoof", IDENTITY.email
+            ),
+            "email tab": OAuthIdentity(
+                IDENTITY.sub, IDENTITY.username, f"{IDENTITY.email}\tspoof"
+            ),
+        }
+        metadata_cases = {
+            "release id": {**META, "release_id": "release\nspoof"},
+            "team": {**META, "team": "Team\tSpoof"},
+            "participant names": {
+                **META,
+                "participant_names": "Participant\rSpoof",
+            },
+            "submission name": {
+                **META,
+                "submission_name": "submission\x7fspoof",
+            },
+        }
+
+        for name, identity in identity_cases.items():
+            with self.subTest(identity=name):
+                hub = InMemoryHub()
+                store = HubTestStore(
+                    hub,
+                    repo_id="private/repo",
+                    release_config_path="sealed/release.json",
+                    gold_config_path="sealed/gold.jsonl",
+                    now_provider=lambda: NOW,
+                )
+                with self.assertRaisesRegex(TestStoreError, "could not be accepted"):
+                    store.submit(identity, META, PREDICTIONS, METRICS)
+                self.assertEqual(hub.repo_info_calls, 0)
+                self.assertEqual(hub.create_calls, [])
+
+        for name, metadata in metadata_cases.items():
+            with self.subTest(metadata=name):
+                hub = InMemoryHub()
+                store = HubTestStore(
+                    hub,
+                    repo_id="private/repo",
+                    release_config_path="sealed/release.json",
+                    gold_config_path="sealed/gold.jsonl",
+                    now_provider=lambda: NOW,
+                )
+                with self.assertRaisesRegex(TestStoreError, "could not be accepted"):
+                    store.submit(IDENTITY, metadata, PREDICTIONS, METRICS)
+                self.assertEqual(hub.repo_info_calls, 0)
+                self.assertEqual(hub.create_calls, [])
+
     def test_three_concurrent_attempts_commit_and_fourth_is_rejected(self):
         hub = InMemoryHub(create_barrier=threading.Barrier(4))
         store = HubTestStore(
