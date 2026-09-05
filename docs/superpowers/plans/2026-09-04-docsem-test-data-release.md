@@ -238,7 +238,7 @@ git commit -m "Add guarded DocSem test release publication"
 - Consumes: organizer-selected official test source path and release ID.
 - Produces: verified public/private staged payloads and a sanitized release receipt.
 
-- [ ] **Step 1: Recheck authoritative source and branch**
+- [x] **Step 1: Recheck authoritative source and branch**
 
 Fetch without switching or cleaning. Require a clean named source and explicit organizer selection; do not infer from directory names.
 
@@ -257,9 +257,15 @@ Expected: a sanitized count/hash receipt with no label rows or answers printed.
 
 Record only counts, schemas, hashes, and pass/fail results in visible output.
 
-- [ ] **Step 3: Stop safely if data is absent or ambiguous**
+- [x] **Step 3: Stop safely if data is absent or ambiguous**
 
 Leave `TEST_SUBMISSIONS_ENABLED=false`, do not publish any candidate, and report the exact missing authority/data selection.
+
+2026-09-05 execution note: a fresh fetch left canonical `oracle-samples/gsm-sem`
+`main` clean and unchanged at `feb256e108afca98f24d58b5f9019b6c36ca31ea`;
+the remote tree contains no `docsem/test` path. Preparation and publication were
+therefore not run, and similarly named local candidate directories remain
+ineligible without explicit organizer provenance.
 
 - [ ] **Step 4: If data is authoritative, execute guarded publication and verify all revisions**
 
