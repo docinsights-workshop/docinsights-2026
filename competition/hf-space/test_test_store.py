@@ -28,7 +28,7 @@ META = {
     "release_id": "docsem-test-2026",
     "task_manifest_sha256": TASK_DIGEST,
     "scoring_gold_sha256": GOLD_DIGEST,
-    "scoring_private_revision": "sha-before-scoring",
+    "scoring_private_revision": "e" * 40,
     "scoring_public_revision": "f" * 40,
     "scoring_public_repo_id": "public/repo",
     "scoring_task_manifest_path": "test/tasks.jsonl",
@@ -220,6 +220,85 @@ class HubTestStoreTests(unittest.TestCase):
         self.downloads = tempfile.TemporaryDirectory()
         self.addCleanup(self.downloads.cleanup)
         InMemoryHub.download_root = Path(self.downloads.name)
+
+    def test_direct_store_rejects_noncanonical_or_oversized_predictions_before_io(self):
+        """Catches callers bypassing the participant service's test payload gate."""
+        cases = {
+            "empty rows": [],
+            "too many rows": [PREDICTIONS[0]] * 10_001,
+            "extra row field": [{**PREDICTIONS[0], "gold_answer": "untrusted"}],
+            "empty instance id": [{**PREDICTIONS[0], "instance_id": ""}],
+            "long instance id": [{**PREDICTIONS[0], "instance_id": "i" * 257}],
+            "duplicate instance id": [PREDICTIONS[0], dict(PREDICTIONS[0])],
+            "long answer": [{**PREDICTIONS[0], "answer": "a" * 4_097}],
+            "empty evidence": [{**PREDICTIONS[0], "evidence": []}],
+            "too many evidence ids": [
+                {**PREDICTIONS[0], "evidence": [f"b{index}" for index in range(129)]}
+            ],
+            "empty evidence id": [{**PREDICTIONS[0], "evidence": [""]}],
+            "long evidence id": [{**PREDICTIONS[0], "evidence": ["b" * 257]}],
+        }
+
+        for name, predictions in cases.items():
+            with self.subTest(name=name):
+                hub = InMemoryHub()
+                store = HubTestStore(
+                    hub,
+                    repo_id="private/repo",
+                    release_config_path="sealed/release.json",
+                    gold_config_path="sealed/gold.jsonl",
+                    now_provider=lambda: NOW,
+                )
+
+                with self.assertRaisesRegex(TestStoreError, "could not be accepted"):
+                    store.submit(IDENTITY, META, predictions, METRICS)
+
+                self.assertEqual(hub.repo_info_calls, 0)
+                self.assertEqual(hub.create_calls, [])
+
+    def test_direct_store_bounds_identity_and_private_metadata_before_io(self):
+        """Catches unbounded OAuth or participant metadata reaching JSON persistence."""
+        identity_cases = {
+            "subject": OAuthIdentity("s" * 4_097, IDENTITY.username, IDENTITY.email),
+            "username": OAuthIdentity(IDENTITY.sub, "u" * 4_097, IDENTITY.email),
+            "email": OAuthIdentity(IDENTITY.sub, IDENTITY.username, "e" * 4_097),
+        }
+        metadata_cases = {
+            "team": {**META, "team": "t" * 4_097},
+            "participant names": {**META, "participant_names": "p" * 501},
+            "submission name": {**META, "submission_name": "n" * 4_097},
+            "release id": {**META, "release_id": "r" * 4_097},
+        }
+
+        for name, identity in identity_cases.items():
+            with self.subTest(identity=name):
+                hub = InMemoryHub()
+                store = HubTestStore(
+                    hub,
+                    repo_id="private/repo",
+                    release_config_path="sealed/release.json",
+                    gold_config_path="sealed/gold.jsonl",
+                    now_provider=lambda: NOW,
+                )
+                with self.assertRaisesRegex(TestStoreError, "could not be accepted"):
+                    store.submit(identity, META, PREDICTIONS, METRICS)
+                self.assertEqual(hub.repo_info_calls, 0)
+                self.assertEqual(hub.create_calls, [])
+
+        for name, metadata in metadata_cases.items():
+            with self.subTest(metadata=name):
+                hub = InMemoryHub()
+                store = HubTestStore(
+                    hub,
+                    repo_id="private/repo",
+                    release_config_path="sealed/release.json",
+                    gold_config_path="sealed/gold.jsonl",
+                    now_provider=lambda: NOW,
+                )
+                with self.assertRaisesRegex(TestStoreError, "could not be accepted"):
+                    store.submit(IDENTITY, metadata, PREDICTIONS, METRICS)
+                self.assertEqual(hub.repo_info_calls, 0)
+                self.assertEqual(hub.create_calls, [])
 
     def test_three_concurrent_attempts_commit_and_fourth_is_rejected(self):
         hub = InMemoryHub(create_barrier=threading.Barrier(4))
@@ -575,7 +654,7 @@ class HubTestStoreTests(unittest.TestCase):
             },
             {
                 "scoring_gold_sha256": GOLD_DIGEST,
-                "scoring_private_revision": "sha-before-scoring",
+                "scoring_private_revision": "e" * 40,
                 "scoring_public_revision": "f" * 40,
                 "scoring_public_repo_id": "public/repo",
                 "scoring_task_manifest_path": "test/tasks.jsonl",

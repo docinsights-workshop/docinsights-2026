@@ -13,6 +13,13 @@ from pathlib import Path
 from huggingface_hub import CommitOperationAdd
 from huggingface_hub.errors import EntryNotFoundError, HfHubHTTPError
 
+from test_contract import (
+    bounded_private_text,
+    repository_id,
+    revision_digest,
+    sha256_digest,
+    validate_test_predictions,
+)
 from test_policy import (
     OAuthIdentity,
     TestPolicyError,
@@ -84,6 +91,7 @@ class HubTestStore:
         try:
             key = _complete_identity_key(identity)
             normalized_metadata = _submission_metadata(metadata)
+            validate_test_predictions(predictions)
             normalized_predictions = _json_copy(predictions)
             normalized_metrics = _json_copy(metrics)
         except Exception:
@@ -208,6 +216,7 @@ class HubTestStore:
         try:
             key = _complete_identity_key(identity)
             normalized_metadata = _submission_metadata(metadata)
+            validate_test_predictions(predictions)
             normalized_predictions = _json_copy(predictions)
         except Exception:
             raise TestStoreError("Test submission could not be accepted.") from None
@@ -287,6 +296,7 @@ class HubTestStore:
             record = _decode_json(record_raw)
             _validate_release_state(record, policy)
             _validate_scoring_state(record, policy)
+            _validate_attempt_contract(record)
             if (
                 not isinstance(record, dict)
                 or record.get("account_key") != key
@@ -331,10 +341,11 @@ class HubTestStore:
 def _complete_identity_key(identity) -> str:
     if not isinstance(identity, OAuthIdentity):
         raise _InvalidSubmission()
-    if any(
-        not isinstance(value, str) or not value.strip()
-        for value in (identity.sub, identity.username, identity.email)
-    ):
+    try:
+        bounded_private_text(identity.sub, "hf_subject")
+        bounded_private_text(identity.username, "hf_username")
+        bounded_private_text(identity.email, "verified_email")
+    except ValueError:
         raise _InvalidSubmission()
     return account_key(identity)
 
@@ -342,25 +353,53 @@ def _complete_identity_key(identity) -> str:
 def _submission_metadata(metadata) -> dict:
     if not isinstance(metadata, Mapping):
         raise _InvalidSubmission()
-    fields = (
-        "release_id",
-        "task_manifest_sha256",
-        "scoring_gold_sha256",
-        "scoring_private_revision",
-        "scoring_public_revision",
-        "scoring_public_repo_id",
-        "scoring_task_manifest_path",
-        "team",
-        "participant_names",
-        "submission_name",
-    )
-    result = {}
-    for name in fields:
-        value = metadata.get(name)
-        if not isinstance(value, str) or not value.strip():
-            raise _InvalidSubmission()
-        result[name] = value.strip()
-    return result
+    try:
+        task_manifest_path = metadata.get("scoring_task_manifest_path")
+        if task_manifest_path != "test/tasks.jsonl":
+            raise ValueError()
+        return {
+            "release_id": bounded_private_text(
+                metadata.get("release_id"), "release_id"
+            ),
+            "task_manifest_sha256": sha256_digest(metadata.get("task_manifest_sha256")),
+            "scoring_gold_sha256": sha256_digest(metadata.get("scoring_gold_sha256")),
+            "scoring_private_revision": revision_digest(
+                metadata.get("scoring_private_revision")
+            ),
+            "scoring_public_revision": revision_digest(
+                metadata.get("scoring_public_revision")
+            ),
+            "scoring_public_repo_id": repository_id(
+                metadata.get("scoring_public_repo_id")
+            ),
+            "scoring_task_manifest_path": task_manifest_path,
+            "team": bounded_private_text(metadata.get("team"), "team"),
+            "participant_names": bounded_private_text(
+                metadata.get("participant_names"), "participant_names"
+            ),
+            "submission_name": bounded_private_text(
+                metadata.get("submission_name"), "submission_name"
+            ),
+        }
+    except ValueError:
+        raise _InvalidSubmission() from None
+
+
+def _validate_attempt_contract(record) -> None:
+    try:
+        for field in (
+            "release_id",
+            "hf_subject",
+            "hf_username",
+            "verified_email",
+            "team",
+            "participant_names",
+            "submission_name",
+        ):
+            bounded_private_text(record.get(field), field)
+        validate_test_predictions(record.get("predictions"))
+    except ValueError:
+        raise _Unavailable() from None
 
 
 def _json_copy(value):
@@ -563,17 +602,16 @@ def _validate_release_state(value, policy: TestReleasePolicy):
 
 
 def _validate_scoring_state(value, policy: TestReleasePolicy):
-    if value.get("scoring_gold_sha256") != policy.gold_sha256:
-        raise _Unavailable()
-    for name in (
-        "scoring_private_revision",
-        "scoring_public_revision",
-        "scoring_public_repo_id",
-        "scoring_task_manifest_path",
-    ):
-        item = value.get(name)
-        if not isinstance(item, str) or not item.strip():
-            raise _Unavailable()
+    try:
+        if sha256_digest(value.get("scoring_gold_sha256")) != policy.gold_sha256:
+            raise ValueError()
+        revision_digest(value.get("scoring_private_revision"))
+        revision_digest(value.get("scoring_public_revision"))
+        repository_id(value.get("scoring_public_repo_id"))
+        if value.get("scoring_task_manifest_path") != "test/tasks.jsonl":
+            raise ValueError()
+    except ValueError:
+        raise _Unavailable() from None
 
 
 def _validate_organizer_projection(value, policy: TestReleasePolicy):

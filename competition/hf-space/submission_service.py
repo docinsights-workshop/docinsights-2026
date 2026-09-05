@@ -21,6 +21,13 @@ from scoring import (
     parse_submission_text,
     score_predictions,
 )
+from test_contract import (
+    bounded_private_text,
+    repository_id,
+    revision_digest,
+    sha256_digest,
+    validate_test_predictions,
+)
 from test_policy import (
     OAuthIdentity,
     TestPolicyError,
@@ -32,10 +39,6 @@ from test_policy import (
 TEST_UNAVAILABLE = "Test submission is temporarily unavailable."
 OPAQUE_INSTANCE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 MAX_TEST_UPLOAD_BYTES = 10 * 1024 * 1024
-MAX_TEST_ROWS = 10_000
-MAX_TEST_ANSWER_CHARACTERS = 4_096
-MAX_TEST_EVIDENCE_IDS = 128
-MAX_TEST_EVIDENCE_ID_CHARACTERS = 256
 TEST_SCORING_ACQUISITION_TIMEOUT_SECONDS = 1.0
 TEST_SCORING_SEMAPHORE = threading.BoundedSemaphore(value=2)
 
@@ -102,9 +105,7 @@ class HubTestConfigLoader:
                 repo_type="dataset",
                 revision="main",
             )
-            sha = getattr(info, "sha", None)
-            if not isinstance(sha, str) or not sha:
-                raise ValueError()
+            sha = _pinned_revision(getattr(info, "sha", None))
             release_raw = self._read(self.release_config_path, sha)
             gold_raw = self._read(self.gold_config_path, sha)
             release = json.loads(release_raw.decode("utf-8"))
@@ -214,7 +215,7 @@ class SubmissionService:
                 raise ValueError()
             text = upload_path.read_text(encoding="utf-8")
             predictions = parse_submission_text(text)
-            _validate_test_prediction_bounds(predictions)
+            validate_test_predictions(predictions)
         except Exception:
             raise SubmissionError("Test submission could not be accepted.") from None
 
@@ -276,7 +277,9 @@ class SubmissionService:
             attempts = self.test_store.account_history(identity)
             return [_history_response(attempt) for attempt in attempts]
         except Exception:
-            raise SubmissionError("Test submission history is temporarily unavailable.") from None
+            raise SubmissionError(
+                "Test submission history is temporarily unavailable."
+            ) from None
 
 
 def _split(value) -> SubmissionSplit:
@@ -290,28 +293,35 @@ def _oauth_identity(profile) -> OAuthIdentity:
     try:
         return OAuthIdentity.from_profile(profile)
     except (TestPolicyError, TypeError, ValueError):
-        raise SubmissionError("Sign in with Hugging Face to submit test predictions.") from None
+        raise SubmissionError(
+            "Sign in with Hugging Face to submit test predictions."
+        ) from None
 
 
 def _test_metadata(metadata, config: TrustedTestConfig) -> dict:
     if not isinstance(metadata, Mapping):
         raise ValueError()
-    team = metadata.get("team")
-    participant_names = metadata.get("participant_names")
-    submission_name = metadata.get("submission_name")
-    if any(not isinstance(value, str) or not value.strip() for value in (team, submission_name)):
+    team = bounded_private_text(metadata.get("team"), "team")
+    participant_names = bounded_private_text(
+        metadata.get("participant_names"), "participant_names"
+    )
+    submission_name = bounded_private_text(
+        metadata.get("submission_name"), "submission_name"
+    )
+    task_manifest_path = config.task_manifest_path
+    if task_manifest_path != "test/tasks.jsonl":
         raise ValueError()
     return {
-        "release_id": config.policy.release_id,
-        "task_manifest_sha256": config.policy.task_manifest_sha256,
-        "scoring_gold_sha256": config.scoring_gold_sha256,
-        "scoring_private_revision": config.private_revision,
-        "scoring_public_revision": config.public_revision,
-        "scoring_public_repo_id": config.public_repo_id,
-        "scoring_task_manifest_path": config.task_manifest_path,
-        "team": team.strip(),
+        "release_id": bounded_private_text(config.policy.release_id, "release_id"),
+        "task_manifest_sha256": sha256_digest(config.policy.task_manifest_sha256),
+        "scoring_gold_sha256": sha256_digest(config.scoring_gold_sha256),
+        "scoring_private_revision": revision_digest(config.private_revision),
+        "scoring_public_revision": revision_digest(config.public_revision),
+        "scoring_public_repo_id": repository_id(config.public_repo_id),
+        "scoring_task_manifest_path": task_manifest_path,
+        "team": team,
         "participant_names": normalize_participant_names(participant_names),
-        "submission_name": submission_name.strip(),
+        "submission_name": submission_name,
     }
 
 
@@ -326,29 +336,11 @@ def _attempt_response(attempt) -> dict:
         raise ValueError()
     attempt_number = attempt.get("attempt_number")
     receipt = attempt.get("submission_id")
-    response = participant_test_response(attempt_number, attempt.get("metrics"), receipt)
+    response = participant_test_response(
+        attempt_number, attempt.get("metrics"), receipt
+    )
     response["accepted_at"] = str(attempt.get("submitted_at") or "")
     return response
-
-
-def _validate_test_prediction_bounds(rows) -> None:
-    if not isinstance(rows, list) or len(rows) > MAX_TEST_ROWS:
-        raise ValueError()
-    for row in rows:
-        if not isinstance(row, Mapping):
-            raise ValueError()
-        answer = row.get("answer")
-        if not isinstance(answer, str) or len(answer) > MAX_TEST_ANSWER_CHARACTERS:
-            raise ValueError()
-        evidence = row.get("evidence")
-        if not isinstance(evidence, list) or len(evidence) > MAX_TEST_EVIDENCE_IDS:
-            raise ValueError()
-        if any(
-            not isinstance(identifier, str)
-            or len(identifier) > MAX_TEST_EVIDENCE_ID_CHARACTERS
-            for identifier in evidence
-        ):
-            raise ValueError()
 
 
 def _parse_utc(value) -> dt.datetime:
@@ -386,7 +378,10 @@ def _public_task_ids(raw: bytes) -> set[str]:
     for row in rows:
         if not isinstance(row, Mapping) or set(row) != expected_keys:
             raise ValueError()
-        if any(not isinstance(row[key], str) or not row[key].strip() for key in expected_keys):
+        if any(
+            not isinstance(row[key], str) or not row[key].strip()
+            for key in expected_keys
+        ):
             raise ValueError()
         instance_id = row["instance_id"]
         if OPAQUE_INSTANCE_ID.fullmatch(instance_id) is None:
@@ -407,7 +402,11 @@ def _gold_rows_and_ids(raw: bytes) -> tuple[list[dict], set[str]]:
         if not isinstance(row, dict) or set(row) != expected_keys:
             raise ValueError()
         instance_id = row["instance_id"]
-        if not isinstance(instance_id, str) or not instance_id.strip() or instance_id in ids:
+        if (
+            not isinstance(instance_id, str)
+            or not instance_id.strip()
+            or instance_id in ids
+        ):
             raise ValueError()
         if not isinstance(row["answer"], str):
             raise ValueError()

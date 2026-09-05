@@ -21,7 +21,12 @@ VALIDATION_LABELS = [
     {"instance_id": "val-1", "answer": "42", "evidence": ["b1"]},
 ]
 VALIDATION_ROWS = [
-    {"instance_id": "val-1", "answer": "42", "evidence": ["b1"]},
+    {
+        "instance_id": "val-1",
+        "answer": "42",
+        "evidence": ["b1"],
+        "legacy_extension": "preserved",
+    },
 ]
 NOW = dt.datetime(2026, 9, 5, 12, 0, tzinfo=dt.timezone.utc)
 PROFILE = {
@@ -103,7 +108,9 @@ class RecordingStore:
             }
         )
         attempt = next(self.attempts)
-        return TestReceipt(True, attempt, f"receipt-{attempt}", f"2026-09-05T12:00:0{attempt}Z")
+        return TestReceipt(
+            True, attempt, f"receipt-{attempt}", f"2026-09-05T12:00:0{attempt}Z"
+        )
 
     def account_history(self, identity):
         self.history_identity = identity
@@ -151,7 +158,7 @@ def configured_service(store=None, loader=None):
             policy=TRUSTED_POLICY,
             labels=TEST_LABELS,
             scoring_gold_sha256=TRUSTED_POLICY.gold_sha256,
-            private_revision="private-sha",
+            private_revision="e" * 40,
             public_revision="f" * 40,
             public_repo_id="public/repo",
             task_manifest_path="test/tasks.jsonl",
@@ -203,7 +210,9 @@ class LegacyValidationCharacterizationTests(unittest.TestCase):
             rendered,
         )
 
-    def test_validation_callback_preserves_metrics_identity_persistence_and_response(self):
+    def test_validation_callback_preserves_metrics_identity_persistence_and_response(
+        self,
+    ):
         upload = tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False)
         self.addCleanup(Path(upload.name).unlink, missing_ok=True)
         for row in VALIDATION_ROWS:
@@ -212,7 +221,9 @@ class LegacyValidationCharacterizationTests(unittest.TestCase):
         persisted = {}
 
         def capture_upload(*, path_or_fileobj, path_in_repo, **kwargs):
-            persisted["payload"] = json.loads(Path(path_or_fileobj).read_text(encoding="utf-8"))
+            persisted["payload"] = json.loads(
+                Path(path_or_fileobj).read_text(encoding="utf-8")
+            )
             persisted["path_in_repo"] = path_in_repo
             Path(path_or_fileobj).unlink(missing_ok=True)
 
@@ -251,12 +262,15 @@ class LegacyValidationCharacterizationTests(unittest.TestCase):
             },
         )
         self.assertEqual(
-            {key: result["value"][key] for key in (
-                "answer_accuracy",
-                "evidence_exact_match",
-                "evidence_f1",
-                "examples",
-            )},
+            {
+                key: result["value"][key]
+                for key in (
+                    "answer_accuracy",
+                    "evidence_exact_match",
+                    "evidence_f1",
+                    "examples",
+                )
+            },
             {
                 "answer_accuracy": 1.0,
                 "evidence_exact_match": 1.0,
@@ -264,7 +278,9 @@ class LegacyValidationCharacterizationTests(unittest.TestCase):
                 "examples": 1,
             },
         )
-        self.assertEqual(set(persisted["payload"]), {"leaderboard", "metrics", "predictions"})
+        self.assertEqual(
+            set(persisted["payload"]), {"leaderboard", "metrics", "predictions"}
+        )
         self.assertEqual(persisted["payload"]["predictions"], VALIDATION_ROWS)
         self.assertEqual(
             persisted["payload"]["metrics"],
@@ -299,7 +315,9 @@ class LegacyValidationCharacterizationTests(unittest.TestCase):
 
 
 class SplitAwareServiceTests(unittest.TestCase):
-    def test_validation_service_compatibility_fixture_preserves_exact_public_metrics(self):
+    def test_validation_service_compatibility_fixture_preserves_exact_public_metrics(
+        self,
+    ):
         upload = test_file(VALIDATION_ROWS)
         self.addCleanup(Path(upload.name).unlink, missing_ok=True)
         metadata = {
@@ -363,13 +381,46 @@ class SplitAwareServiceTests(unittest.TestCase):
     def test_test_rejects_unavailable_configuration_before_reading_file(self):
         unreadable = FileProbe()
         service = configured_service(
-            loader=lambda now: (_ for _ in ()).throw(RuntimeError("private config detail"))
+            loader=lambda now: (_ for _ in ()).throw(
+                RuntimeError("private config detail")
+            )
         )
 
         with self.assertRaisesRegex(SubmissionError, "temporarily unavailable"):
             service.submit_for_split("test", unreadable, TEST_META, PROFILE)
 
         self.assertFalse(unreadable.was_read)
+
+    def test_test_rejects_oversized_oauth_and_private_metadata_before_file_read(self):
+        """Catches unbounded identity or participant text reaching scoring/storage."""
+        profile_cases = {
+            "subject": {**PROFILE, "sub": "s" * 4_097},
+            "username": {**PROFILE, "preferred_username": "u" * 4_097},
+            "email": {**PROFILE, "email": "e" * 4_097},
+        }
+        metadata_cases = {
+            "team": {**TEST_META, "team": "t" * 4_097},
+            "participant names": {**TEST_META, "participant_names": "p" * 501},
+            "submission name": {**TEST_META, "submission_name": "n" * 4_097},
+        }
+
+        for name, profile in profile_cases.items():
+            with self.subTest(profile=name):
+                unreadable = FileProbe()
+                with self.assertRaisesRegex(SubmissionError, "Sign in"):
+                    configured_service().submit_for_split(
+                        "test", unreadable, TEST_META, profile
+                    )
+                self.assertFalse(unreadable.was_read)
+
+        for name, metadata in metadata_cases.items():
+            with self.subTest(metadata=name):
+                unreadable = FileProbe()
+                with self.assertRaisesRegex(SubmissionError, "temporarily unavailable"):
+                    configured_service().submit_for_split(
+                        "test", unreadable, metadata, PROFILE
+                    )
+                self.assertFalse(unreadable.was_read)
 
     def test_service_rechecks_fresh_window_after_loading_config_before_file_read(self):
         close_at = NOW + dt.timedelta(seconds=1)
@@ -390,7 +441,7 @@ class SplitAwareServiceTests(unittest.TestCase):
                 policy=policy,
                 labels=TEST_LABELS,
                 scoring_gold_sha256=policy.gold_sha256,
-                private_revision="private-sha",
+                private_revision="e" * 40,
                 public_revision="f" * 40,
                 public_repo_id="public/repo",
                 task_manifest_path="test/tasks.jsonl",
@@ -435,16 +486,14 @@ class SplitAwareServiceTests(unittest.TestCase):
             },
         )
         recorded = store.submissions[0]
-        self.assertEqual(
-            recorded["identity"], OAuthIdentity.from_profile(PROFILE)
-        )
+        self.assertEqual(recorded["identity"], OAuthIdentity.from_profile(PROFILE))
         self.assertEqual(
             recorded["metadata"],
             {
                 "release_id": "trusted-release",
                 "task_manifest_sha256": "a" * 64,
                 "scoring_gold_sha256": "b" * 64,
-                "scoring_private_revision": "private-sha",
+                "scoring_private_revision": "e" * 40,
                 "scoring_public_revision": "f" * 40,
                 "scoring_public_repo_id": "public/repo",
                 "scoring_task_manifest_path": "test/tasks.jsonl",
@@ -519,7 +568,9 @@ class SplitAwareServiceTests(unittest.TestCase):
         self.assertEqual(store.submissions, [])
         self.assertEqual(len(store.lookup_requests), 1)
 
-    def test_racing_exact_retry_response_uses_the_store_record_not_rescored_metrics(self):
+    def test_racing_exact_retry_response_uses_the_store_record_not_rescored_metrics(
+        self,
+    ):
         upload = test_file()
         self.addCleanup(Path(upload.name).unlink, missing_ok=True)
         persisted = {
@@ -582,6 +633,37 @@ class SplitAwareServiceTests(unittest.TestCase):
             service.submit_for_split("test", upload, TEST_META, PROFILE)
 
         scorer.assert_not_called()
+        self.assertEqual(store.submissions, [])
+
+    def test_test_rejects_extra_prediction_fields_before_lookup_scoring_or_persistence(
+        self,
+    ):
+        """Catches private test payload extensions entering the immutable ledger."""
+        upload = test_file(
+            [
+                {
+                    "instance_id": "test-1",
+                    "answer": "42",
+                    "evidence": ["b1"],
+                    "gold_answer": "participant-controlled-extra",
+                }
+            ]
+        )
+        self.addCleanup(Path(upload.name).unlink, missing_ok=True)
+        store = RecordingStore()
+        service = configured_service(store=store)
+
+        with (
+            patch(
+                "submission_service.score_predictions",
+                side_effect=AssertionError("extra fields must not reach the scorer"),
+            ) as scorer,
+            self.assertRaisesRegex(SubmissionError, "could not be accepted"),
+        ):
+            service.submit_for_split("test", upload, TEST_META, PROFILE)
+
+        scorer.assert_not_called()
+        self.assertEqual(store.lookup_requests, [])
         self.assertEqual(store.submissions, [])
 
     def test_test_answer_and_evidence_bounds_precede_scoring_and_persistence(self):
@@ -681,7 +763,9 @@ class SplitAwareServiceTests(unittest.TestCase):
                 return None
 
             def submit(self, identity, metadata, predictions, metrics):
-                return TestReceipt(True, 1, f"receipt-{id(predictions)}", "2026-09-05T12:00:01Z")
+                return TestReceipt(
+                    True, 1, f"receipt-{id(predictions)}", "2026-09-05T12:00:01Z"
+                )
 
         uploads = [
             test_file(
@@ -827,7 +911,9 @@ class SplitAwareServiceTests(unittest.TestCase):
         secrets = "secret@example.org private-answer score=0.25"
 
         for service in (
-            configured_service(loader=lambda now: (_ for _ in ()).throw(RuntimeError(secrets))),
+            configured_service(
+                loader=lambda now: (_ for _ in ()).throw(RuntimeError(secrets))
+            ),
             configured_service(store=FailingStore(secrets)),
         ):
             upload = test_file()
@@ -906,7 +992,7 @@ class InMemoryConfigHub:
 
     def repo_info(self, repo_id, *, repo_type, revision):
         self.repo_calls.append((repo_id, revision))
-        return SimpleNamespace(sha="private-sha")
+        return SimpleNamespace(sha="e" * 40)
 
     def hf_hub_download(self, repo_id, path, *, repo_type, revision):
         self.download_calls.append((repo_id, path, revision))
@@ -953,8 +1039,10 @@ class HubTestConfigLoaderTests(unittest.TestCase):
 
         self.assertEqual(config.policy.release_id, "trusted-release")
         self.assertEqual(config.labels, TEST_LABELS)
-        self.assertEqual(config.scoring_gold_sha256, hashlib.sha256(self.gold).hexdigest())
-        self.assertEqual(config.private_revision, "private-sha")
+        self.assertEqual(
+            config.scoring_gold_sha256, hashlib.sha256(self.gold).hexdigest()
+        )
+        self.assertEqual(config.private_revision, "e" * 40)
         self.assertEqual(config.public_revision, "f" * 40)
         self.assertEqual(config.public_repo_id, "public/repo")
         self.assertEqual(config.task_manifest_path, "test/tasks.jsonl")
@@ -962,13 +1050,15 @@ class HubTestConfigLoaderTests(unittest.TestCase):
         self.assertEqual(
             hub.download_calls,
             [
-                ("private/repo", "sealed/release.json", "private-sha"),
-                ("private/repo", "sealed/gold.jsonl", "private-sha"),
+                ("private/repo", "sealed/release.json", "e" * 40),
+                ("private/repo", "sealed/gold.jsonl", "e" * 40),
                 ("public/repo", "test/tasks.jsonl", "f" * 40),
             ],
         )
 
-    def test_loader_rejects_policy_that_differs_from_deployment_pin_before_upload_read(self):
+    def test_loader_rejects_policy_that_differs_from_deployment_pin_before_upload_read(
+        self,
+    ):
         hub = InMemoryConfigHub(self.release, self.gold, self.tasks)
         expected = self._expected_policy()
         for changes in (
@@ -1036,7 +1126,9 @@ class HubTestConfigLoaderTests(unittest.TestCase):
         )
         unreadable = FileProbe()
         with self.assertRaisesRegex(SubmissionError, "temporarily unavailable"):
-            invalid_attempt_service.submit_for_split("test", unreadable, TEST_META, PROFILE)
+            invalid_attempt_service.submit_for_split(
+                "test", unreadable, TEST_META, PROFILE
+            )
         self.assertFalse(unreadable.was_read)
 
     def test_loader_rejects_malformed_server_digest(self):
@@ -1058,7 +1150,10 @@ class HubTestConfigLoaderTests(unittest.TestCase):
             b'{"instance_id":"test-1","user_query":"question",'
             b'"document_pdf":"test/documents/test-1.pdf","answer":"leak"}\n'
         )
-        release = {**self.release, "task_manifest_sha256": hashlib.sha256(tasks).hexdigest()}
+        release = {
+            **self.release,
+            "task_manifest_sha256": hashlib.sha256(tasks).hexdigest(),
+        }
         hub = InMemoryConfigHub(release, self.gold, tasks)
 
         with self.assertRaisesRegex(SubmissionError, "temporarily unavailable"):
@@ -1069,7 +1164,10 @@ class HubTestConfigLoaderTests(unittest.TestCase):
             b'{"instance_id":"test-2","user_query":"question",'
             b'"document_pdf":"test/documents/test-2.pdf"}\n'
         )
-        release = {**self.release, "task_manifest_sha256": hashlib.sha256(tasks).hexdigest()}
+        release = {
+            **self.release,
+            "task_manifest_sha256": hashlib.sha256(tasks).hexdigest(),
+        }
         hub = InMemoryConfigHub(release, self.gold, tasks)
 
         with self.assertRaisesRegex(SubmissionError, "temporarily unavailable"):
@@ -1084,14 +1182,17 @@ class HubTestConfigLoaderTests(unittest.TestCase):
         )
         for document_pdf in invalid_paths:
             with self.subTest(document_pdf=document_pdf):
-                tasks = json.dumps(
-                    {
-                        "instance_id": "test-1",
-                        "user_query": "question",
-                        "document_pdf": document_pdf,
-                    },
-                    separators=(",", ":"),
-                ).encode("utf-8") + b"\n"
+                tasks = (
+                    json.dumps(
+                        {
+                            "instance_id": "test-1",
+                            "user_query": "question",
+                            "document_pdf": document_pdf,
+                        },
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                    + b"\n"
+                )
                 release = {
                     **self.release,
                     "task_manifest_sha256": hashlib.sha256(tasks).hexdigest(),
@@ -1130,18 +1231,28 @@ class HubTestConfigLoaderTests(unittest.TestCase):
         )
         for instance_id in invalid_ids:
             with self.subTest(instance_id=instance_id):
-                tasks = json.dumps(
-                    {
-                        "instance_id": instance_id,
-                        "user_query": "question",
-                        "document_pdf": f"test/documents/{instance_id}.pdf",
-                    },
-                    separators=(",", ":"),
-                ).encode("utf-8") + b"\n"
-                gold = json.dumps(
-                    {"instance_id": instance_id, "answer": "42", "evidence": ["b1"]},
-                    separators=(",", ":"),
-                ).encode("utf-8") + b"\n"
+                tasks = (
+                    json.dumps(
+                        {
+                            "instance_id": instance_id,
+                            "user_query": "question",
+                            "document_pdf": f"test/documents/{instance_id}.pdf",
+                        },
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                    + b"\n"
+                )
+                gold = (
+                    json.dumps(
+                        {
+                            "instance_id": instance_id,
+                            "answer": "42",
+                            "evidence": ["b1"],
+                        },
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                    + b"\n"
+                )
                 release = {
                     **self.release,
                     "task_manifest_sha256": hashlib.sha256(tasks).hexdigest(),
@@ -1194,7 +1305,9 @@ class HubTestConfigLoaderTests(unittest.TestCase):
         with self.assertRaises(SubmissionError) as caught:
             self._loader(hub)(NOW)
 
-        self.assertEqual(str(caught.exception), "Test submission is temporarily unavailable.")
+        self.assertEqual(
+            str(caught.exception), "Test submission is temporarily unavailable."
+        )
         self.assertNotIn("c" * 64, str(caught.exception))
 
     def test_disabled_loader_performs_no_repository_io(self):

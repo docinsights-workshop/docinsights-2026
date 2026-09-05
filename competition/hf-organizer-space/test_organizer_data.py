@@ -1,8 +1,12 @@
+import datetime as dt
 import hashlib
 import json
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+
+from huggingface_hub.errors import EntryNotFoundError
 
 from organizer_data import (
     ADJUDICATION_PREFIX,
@@ -14,6 +18,9 @@ from organizer_data import (
     organizer_rows,
     verify_snapshot,
 )
+from scoring import score_predictions
+from test_policy import OAuthIdentity, account_key
+from test_store import HubTestStore, TestStoreError
 
 
 REVISION = "f" * 40
@@ -274,6 +281,47 @@ class FakeHub:
         return str(destination)
 
 
+class ProducerHub:
+    """Minimal private-Hub fixture used to exercise the real ledger producer."""
+
+    def __init__(self, root, files):
+        self.root = Path(root)
+        self.files = dict(files)
+        self.sha = "producer-sha-0"
+        self.create_calls = []
+
+    def repo_info(self, repo_id, *, repo_type, revision):
+        return SimpleNamespace(sha=self.sha)
+
+    def hf_hub_download(self, repo_id, filename, *, repo_type, revision):
+        if revision != self.sha or filename not in self.files:
+            raise EntryNotFoundError("not found")
+        destination = self.root / filename
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(self.files[filename])
+        return str(destination)
+
+    def create_commit(
+        self,
+        *,
+        repo_id,
+        repo_type,
+        revision,
+        parent_commit,
+        operations,
+        commit_message,
+    ):
+        if parent_commit != self.sha:
+            raise AssertionError("producer fixture requires the exact parent")
+        for operation in operations:
+            self.files[operation.path_in_repo] = operation.path_or_fileobj
+        self.create_calls.append(
+            tuple(operation.path_in_repo for operation in operations)
+        )
+        self.sha = "producer-sha-1"
+        return SimpleNamespace(oid=self.sha)
+
+
 class OrganizerSnapshotTests(unittest.TestCase):
     def load(self, hub=None):
         return load_snapshot(
@@ -282,6 +330,175 @@ class OrganizerSnapshotTests(unittest.TestCase):
             PRIVATE_TOKEN,
             api=hub or FakeHub(),
         )
+
+    def produce_real_store_attempt(self, *, participant_names_length=500):
+        """Return immutable files emitted by the participant HubTestStore."""
+        workspace = tempfile.TemporaryDirectory()
+        self.addCleanup(workspace.cleanup)
+        release_id = "r" * 4_096
+        identifier = "i" * 256
+        answer = "a" * 4_096
+        evidence_id = "e" * 256
+        labels = [
+            {"instance_id": identifier, "answer": answer, "evidence": [evidence_id]}
+        ]
+        predictions = [dict(labels[0])]
+        gold = (json.dumps(labels[0], separators=(",", ":")) + "\n").encode()
+        gold_digest = hashlib.sha256(gold).hexdigest()
+        release = {
+            "schema_version": 1,
+            "release_id": release_id,
+            "task_manifest_sha256": TASK_DIGEST,
+            "gold_sha256": gold_digest,
+            "enabled": True,
+            "finalized": False,
+            "max_attempts": 3,
+            "feedback_policy": "first-attempt-only",
+            "open_at": "2026-09-01T00:00:00Z",
+            "close_at": "2026-10-01T00:00:00Z",
+            "public_revision": "4" * 40,
+            "public_repo_id": "public/docsem",
+            "task_manifest_path": "test/tasks.jsonl",
+        }
+        hub = ProducerHub(
+            workspace.name,
+            {
+                "private/test_release.json": json_bytes(release),
+                "private/test_labels.jsonl": gold,
+            },
+        )
+        identity = OAuthIdentity(
+            sub="s" * 4_096,
+            username="u" * 4_096,
+            email="e" * 4_084 + "@example.org",
+        )
+        metadata = {
+            "release_id": release_id,
+            "task_manifest_sha256": TASK_DIGEST,
+            "scoring_gold_sha256": gold_digest,
+            "scoring_private_revision": "3" * 40,
+            "scoring_public_revision": "4" * 40,
+            "scoring_public_repo_id": "public/docsem",
+            "scoring_task_manifest_path": "test/tasks.jsonl",
+            "team": "t" * 4_096,
+            "participant_names": "p" * participant_names_length,
+            "submission_name": "n" * 4_096,
+        }
+        metrics = score_predictions(predictions, labels)
+        store = HubTestStore(
+            hub,
+            repo_id="private/docsem",
+            release_config_path="private/test_release.json",
+            gold_config_path="private/test_labels.jsonl",
+            now_provider=lambda: dt.datetime(2026, 9, 5, 12, 0, tzinfo=dt.timezone.utc),
+        )
+        receipt = store.submit(identity, metadata, predictions, metrics)
+        return hub.files, identity, receipt
+
+    def test_real_participant_producer_records_verify_at_exact_text_boundaries(self):
+        """Catches drift between producer records and OrganizerSnapshot validation."""
+        files, identity, receipt = self.produce_real_store_attempt()
+        snapshot = self.load(FakeHub(files))
+        report = verify_snapshot(snapshot)
+
+        self.assertTrue(report.valid)
+        self.assertEqual(report.account_count, 1)
+        self.assertEqual(report.attempt_count, 1)
+        rows = organizer_rows(snapshot)
+        self.assertEqual(rows[0]["account_key"], account_key(identity))
+        self.assertEqual(rows[0]["submission_id"], receipt.submission_id)
+        self.assertEqual(len(rows[0]["team"]), 4_096)
+        self.assertEqual(len(rows[0]["participant_names"]), 500)
+        self.assertEqual(len(rows[0]["submission_name"]), 4_096)
+
+    def test_organizer_rejects_participant_names_above_producer_boundary(self):
+        """Catches the organizer accepting records the participant producer forbids."""
+        files, identity, receipt = self.produce_real_store_attempt()
+        key = account_key(identity)
+        attempt_path = f"attempts/test/{key}/{receipt.submission_id}.json"
+        record = json.loads(files[attempt_path])
+        record["participant_names"] = "p" * 501
+        files[attempt_path] = json_bytes(record)
+
+        account_path = f"projections/test/accounts/{key}.json"
+        account = json.loads(files[account_path])
+        account["attempts"][0]["record_sha256"] = hashlib.sha256(
+            files[attempt_path]
+        ).hexdigest()
+        files[account_path] = json_bytes(account)
+
+        organizer_path = "projections/test/organizer_leaderboard.json"
+        projection = json.loads(files[organizer_path])
+        projection["accounts"][0]["participant_names"] = "p" * 501
+        files[organizer_path] = json_bytes(projection)
+
+        report = verify_snapshot(self.load(FakeHub(files)))
+        self.assertFalse(report.valid)
+        self.assertIn("attempt_invalid", report.issue_codes)
+
+    def test_real_store_rejects_extra_prediction_fields_without_emitting_records(self):
+        """Catches direct producer calls bypassing the exact test-row schema."""
+        workspace = tempfile.TemporaryDirectory()
+        self.addCleanup(workspace.cleanup)
+        gold = b'{"instance_id":"task-1","answer":"42","evidence":["b1"]}\n'
+        gold_digest = hashlib.sha256(gold).hexdigest()
+        release = {
+            "schema_version": 1,
+            "release_id": "docsem-test-2026",
+            "task_manifest_sha256": TASK_DIGEST,
+            "gold_sha256": gold_digest,
+            "enabled": True,
+            "finalized": False,
+            "max_attempts": 3,
+            "feedback_policy": "first-attempt-only",
+            "open_at": "2026-09-01T00:00:00Z",
+            "close_at": "2026-10-01T00:00:00Z",
+            "public_revision": "4" * 40,
+            "public_repo_id": "public/docsem",
+            "task_manifest_path": "test/tasks.jsonl",
+        }
+        hub = ProducerHub(
+            workspace.name,
+            {
+                "private/test_release.json": json_bytes(release),
+                "private/test_labels.jsonl": gold,
+            },
+        )
+        identity = OAuthIdentity("subject-a", "user-a", "user-a@example.org")
+        metadata = {
+            "release_id": release["release_id"],
+            "task_manifest_sha256": TASK_DIGEST,
+            "scoring_gold_sha256": gold_digest,
+            "scoring_private_revision": "3" * 40,
+            "scoring_public_revision": "4" * 40,
+            "scoring_public_repo_id": "public/docsem",
+            "scoring_task_manifest_path": "test/tasks.jsonl",
+            "team": "Shared Team",
+            "participant_names": "Participant A",
+            "submission_name": "run-a-1",
+        }
+        predictions = [
+            {
+                "instance_id": "task-1",
+                "answer": "42",
+                "evidence": ["b1"],
+                "unexpected": "participant-controlled-extra",
+            }
+        ]
+        metrics = score_predictions(predictions, [json.loads(gold)])
+        store = HubTestStore(
+            hub,
+            repo_id="private/docsem",
+            release_config_path="private/test_release.json",
+            gold_config_path="private/test_labels.jsonl",
+            now_provider=lambda: dt.datetime(2026, 9, 5, 12, 0, tzinfo=dt.timezone.utc),
+        )
+
+        with self.assertRaisesRegex(TestStoreError, "could not be accepted"):
+            store.submit(identity, metadata, predictions, metrics)
+
+        self.assertEqual(hub.create_calls, [])
+        self.assertFalse(any(path.startswith("attempts/test/") for path in hub.files))
 
     def test_reconstructs_all_accounts_attempts_best_exclusions_and_adjudications(self):
         """Catches trusting a projection or collapsing accounts that share a team."""

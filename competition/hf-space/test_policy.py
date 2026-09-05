@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from collections.abc import Mapping
 
 from scoring import normalize_answer
+from test_contract import bounded_private_text
 
 
 class TestPolicyError(ValueError):
@@ -32,12 +33,21 @@ class OAuthIdentity:
     @classmethod
     def from_profile(cls, profile):
         data = dict(profile or {})
-        sub = str(data.get("sub") or "").strip()
-        username = str(data.get("preferred_username") or "").strip()
-        email = str(data.get("email") or "").strip().casefold()
         verified = data.get("email_verified")
-        if not sub or not username or not email or verified is not True:
-            raise TestPolicyError("Test submission requires a verified email and HF identity.")
+        if verified is not True:
+            raise TestPolicyError(
+                "Test submission requires a verified email and HF identity."
+            )
+        try:
+            sub = bounded_private_text(data.get("sub"), "hf_subject")
+            username = bounded_private_text(
+                data.get("preferred_username"), "hf_username"
+            )
+            email = bounded_private_text(data.get("email"), "verified_email").casefold()
+        except ValueError:
+            raise TestPolicyError(
+                "Test submission requires a verified email and HF identity."
+            ) from None
         return cls(sub=sub, username=username, email=email)
 
 
@@ -45,7 +55,9 @@ def account_key(identity: OAuthIdentity) -> str:
     """Return the stable repository path key derived only from OAuth ``sub``."""
 
     if not isinstance(identity, OAuthIdentity) or not identity.sub:
-        raise TestPolicyError("A valid HF OAuth identity is required for test submissions.")
+        raise TestPolicyError(
+            "A valid HF OAuth identity is required for test submissions."
+        )
     return hashlib.sha256(identity.sub.encode("utf-8")).hexdigest()
 
 
@@ -62,15 +74,25 @@ class TestReleasePolicy:
     max_attempts: int = 3
 
     def __post_init__(self):
-        if not isinstance(self.max_attempts, int) or isinstance(self.max_attempts, bool):
+        if not isinstance(self.max_attempts, int) or isinstance(
+            self.max_attempts, bool
+        ):
             raise TestPolicyError("Test max_attempts must be an integer.")
         if self.max_attempts != 3:
             raise TestPolicyError("Test max_attempts must be exactly 3.")
         for name in ("open_at", "close_at"):
             value = getattr(self, name)
-            if value is not None and (not isinstance(value, dt.datetime) or not _is_utc(value)):
-                raise TestPolicyError(f"Test release {name} must be a timezone-aware UTC datetime.")
-        if self.open_at is not None and self.close_at is not None and self.close_at <= self.open_at:
+            if value is not None and (
+                not isinstance(value, dt.datetime) or not _is_utc(value)
+            ):
+                raise TestPolicyError(
+                    f"Test release {name} must be a timezone-aware UTC datetime."
+                )
+        if (
+            self.open_at is not None
+            and self.close_at is not None
+            and self.close_at <= self.open_at
+        ):
             raise TestPolicyError("Test release close_at must be after open_at.")
         if self.enabled and any(
             not isinstance(value, str) or not value.strip()
@@ -103,7 +125,9 @@ class TestReleasePolicy:
             raise TestPolicyError("Test release configuration is incomplete.")
         current = dt.datetime.now(dt.timezone.utc) if now is None else now
         if not isinstance(current, dt.datetime) or not _is_utc(current):
-            raise TestPolicyError("Test release checks require a timezone-aware UTC datetime.")
+            raise TestPolicyError(
+                "Test release checks require a timezone-aware UTC datetime."
+            )
         if current < self.open_at or current >= self.close_at:
             raise TestPolicyError("Test submissions are not open.")
         return True
@@ -111,7 +135,9 @@ class TestReleasePolicy:
 
 def _canonical_value(value):
     if isinstance(value, Mapping):
-        return {str(key): _canonical_value(value[key]) for key in sorted(value, key=str)}
+        return {
+            str(key): _canonical_value(value[key]) for key in sorted(value, key=str)
+        }
     if isinstance(value, (list, tuple)):
         return [_canonical_value(item) for item in value]
     if isinstance(value, str):
@@ -154,7 +180,9 @@ def canonical_submission_hash(
     if not isinstance(release_id, str) or not release_id.strip():
         raise TestPolicyError("Test release ID is required.")
     if not isinstance(identity, OAuthIdentity) or not identity.sub:
-        raise TestPolicyError("A valid HF OAuth identity is required for test submissions.")
+        raise TestPolicyError(
+            "A valid HF OAuth identity is required for test submissions."
+        )
     envelope = {
         "oauth_sub": identity.sub,
         "payload": _canonical_predictions(predictions),
@@ -248,5 +276,10 @@ def participant_test_response(attempt: int, metrics: Mapping, receipt: str) -> d
             "evidence_f1": evidence_f1,
         }
     if attempt in (2, 3):
-        return {"accepted": True, "attempt": attempt, "receipt": receipt, "score": "withheld"}
+        return {
+            "accepted": True,
+            "attempt": attempt,
+            "receipt": receipt,
+            "score": "withheld",
+        }
     raise TestPolicyError("Test attempt limit exceeded.")

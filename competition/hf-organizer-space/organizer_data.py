@@ -33,6 +33,14 @@ from test_policy import (  # noqa: E402
     canonical_submission_hash,
     select_best_attempt,
 )
+from test_contract import (  # noqa: E402
+    MAX_INSTANCE_ID_CHARACTERS,
+    MAX_PRIVATE_TEXT_CHARACTERS,
+    MAX_TEST_ROWS,
+    is_bounded_private_text,
+    repository_id,
+    validate_test_predictions,
+)
 
 
 RELEASE_POLICY_PATH = "private/test_release.json"
@@ -48,11 +56,7 @@ MAX_FILE_BYTES = 16 * 1024 * 1024
 MAX_SNAPSHOT_BYTES = 128 * 1024 * 1024
 MAX_SNAPSHOT_COMMITS = 10_000
 MAX_ATTEMPTS = 3
-MAX_ROWS_PER_ATTEMPT = 10_000
-MAX_INSTANCE_ID_CHARACTERS = 256
-MAX_ANSWER_CHARACTERS = 4096
-MAX_EVIDENCE_IDS = 128
-MAX_EVIDENCE_ID_CHARACTERS = 256
+MAX_ROWS_PER_ATTEMPT = MAX_TEST_ROWS
 RELEASE_SCHEMA_VERSION = 1
 LEDGER_SCHEMA_VERSION = 2
 
@@ -476,13 +480,11 @@ def _repository_id(value) -> str:
 
 
 def _valid_repository_id(value) -> bool:
-    if not isinstance(value, str) or not value.strip() or len(value.strip()) > 256:
+    try:
+        repository_id(value)
+    except ValueError:
         return False
-    parts = value.strip().split("/")
-    return len(parts) == 2 and all(
-        re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", part) is not None
-        for part in parts
-    )
+    return True
 
 
 def _pinned_revision(value) -> str:
@@ -596,7 +598,7 @@ def _release_state(release, issues: set[str]) -> dict | None:
         type(release.get("schema_version")) is not int
         or release.get("schema_version") != RELEASE_SCHEMA_VERSION
         or split != "test"
-        or not _nonempty(state["release_id"])
+        or not is_bounded_private_text(state["release_id"], "release_id")
         or not _digest(state["task_manifest_sha256"])
         or not _digest(state["gold_sha256"])
         or type(release.get("max_attempts")) is not int
@@ -681,7 +683,7 @@ def _valid_attempt(
         "participant_names",
         "submission_name",
     ):
-        if not _nonempty(record.get(name)):
+        if not is_bounded_private_text(record.get(name), name):
             return False
     expected_key = hashlib.sha256(str(record["hf_subject"]).encode("utf-8")).hexdigest()
     if expected_key != account:
@@ -773,34 +775,14 @@ def _valid_metrics(metrics) -> bool:
 def _valid_predictions(predictions, metrics) -> bool:
     if not isinstance(predictions, list) or not isinstance(metrics, Mapping):
         return False
-    examples = metrics.get("examples")
-    if len(predictions) != examples or len(predictions) > MAX_ROWS_PER_ATTEMPT:
+    try:
+        validate_test_predictions(predictions)
+    except ValueError:
         return False
-    prediction_ids = set()
-    for row in predictions:
-        if not isinstance(row, Mapping) or set(row) != {
-            "instance_id",
-            "answer",
-            "evidence",
-        }:
-            return False
-        identifier = row.get("instance_id")
-        answer = row.get("answer")
-        evidence = row.get("evidence")
-        if (
-            not _bounded_string(identifier, MAX_INSTANCE_ID_CHARACTERS)
-            or identifier in prediction_ids
-            or not isinstance(answer, str)
-            or len(answer) > MAX_ANSWER_CHARACTERS
-            or not isinstance(evidence, list)
-            or not 1 <= len(evidence) <= MAX_EVIDENCE_IDS
-            or any(
-                not _bounded_string(item, MAX_EVIDENCE_ID_CHARACTERS)
-                for item in evidence
-            )
-        ):
-            return False
-        prediction_ids.add(identifier)
+    examples = metrics.get("examples")
+    if len(predictions) != examples:
+        return False
+    prediction_ids = {row["instance_id"] for row in predictions}
     metric_ids = {
         row.get("instance_id")
         for row in metrics.get("per_example", ())
@@ -933,7 +915,11 @@ def _valid_audit_record(record, state, record_id, grouped) -> bool:
 
 
 def _nonempty(value) -> bool:
-    return isinstance(value, str) and bool(value.strip()) and len(value) <= 4096
+    return (
+        isinstance(value, str)
+        and bool(value.strip())
+        and len(value) <= MAX_PRIVATE_TEXT_CHARACTERS
+    )
 
 
 def _bounded_string(value, limit: int) -> bool:
