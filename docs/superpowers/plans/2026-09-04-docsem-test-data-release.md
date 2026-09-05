@@ -199,29 +199,29 @@ git commit -m "Document DocSem held-out test release"
 **Interfaces:**
 - Produces: dry-run publication plan and explicit `--publish` workflow for canonical GitHub, public HF, and private HF targets.
 
-- [ ] **Step 1: Write failing dry-run tests**
+- [x] **Step 1: Write failing dry-run tests**
 
 Assert the plan names exact repositories, base revisions, allowed public paths, private paths, counts, and hashes. Assert publication refuses a dirty/behind/diverged source checkout, missing manifest, nonmatching hashes, public labels, or unspecified source branch.
 
-- [ ] **Step 2: Implement dry-run-only default**
+- [x] **Step 2: Implement dry-run-only default**
 
 No remote write occurs without `--publish`, an exact expected source revision, and a permission-restricted private staging root. Print counts and hashes only, never private rows or answers.
 
-- [ ] **Step 3: Implement non-force publication gates**
+- [x] **Step 3: Implement non-force publication gates**
 
 Publish the canonical GitHub test directory and public HF test directory with explicit paths. Publish only private labels/policy to the private repository using exact-parent CAS. Abort on any remote movement and regenerate the plan.
 
-- [ ] **Step 4: Implement post-publication reconciliation**
+- [x] **Step 4: Implement post-publication reconciliation**
 
 Download public tasks/checksums, compare all public PDF SHA-256 values, verify private label/release digests, and scan current public trees and reachable history for forbidden paths/fields. Emit a sanitized revision receipt.
 
-- [ ] **Step 5: Run publication dry-run tests**
+- [x] **Step 5: Run publication dry-run tests**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 /Users/aamita/miniconda3/bin/python scripts/test_publish_docsem_test_release.py`
 
 Expected: remote-movement, dirty-tree, allowed-path, hash, and privacy gates pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add scripts/publish_docsem_test_release.py scripts/test_publish_docsem_test_release.py competition/README.md

@@ -120,6 +120,60 @@ release contains 1,125 PDFs:
 
 Do not run that publication command with a generated `test/` directory until the label-free release manifest, task/PDF counts, and every checksum have passed the guarded publication dry run. Declaring the future `test` split in the dataset card does not mean the held-out data has been released or that the submission window is open.
 
+### Guarded held-out test publication
+
+The held-out test publisher accepts only the exact public/private staging pair
+produced by `prepare_docsem_test_release.py` and the test-ready dataset-card
+bytes rendered by `prepare_docsem_hf_dataset.py`. It does not discover or
+select a source dataset. No official test source is present in this checkout,
+so do not substitute similarly named local folders or archives.
+
+Resolve and record the current immutable revisions of canonical GitHub main,
+the public Hugging Face dataset, and the private Hugging Face dataset. Keep the
+Hugging Face write credential only in `DOCSEM_HF_WRITE_TOKEN` (or the existing
+`HF_WRITE_TOKEN`) and use the operator's configured Git credential store for
+GitHub. Never pass credentials on the command line. Then run the default dry
+run:
+
+```bash
+/Users/aamita/miniconda3/bin/python scripts/publish_docsem_test_release.py \
+  --public-stage competition/hf-test-staging/public \
+  --private-stage competition/hf-test-staging/private \
+  --release-card /secure/audited/docsem-test-README.md \
+  --card-template competition/hf-dataset/README.md \
+  --source-branch main \
+  --source-base <exact-canonical-source-commit> \
+  --github-remote-base <exact-canonical-source-commit> \
+  --public-hf-base <exact-public-dataset-commit> \
+  --private-hf-base <exact-private-dataset-commit>
+```
+
+The sanitized plan lists the exact repositories, allowed paths, counts,
+digests, bases, publication order, and recovery actions. It performs no write.
+It refuses dirty or stale source state, remote movement, linked/special/extra
+staging entries, unsafe private modes, mismatched release manifests or hashes,
+public label-bearing paths, and a dataset card that cannot be reproduced from
+the same audited public snapshot.
+
+After an organizer has reviewed that exact plan, the only write form is the
+same command plus:
+
+```text
+--publish --confirm PUBLISH
+```
+
+Publication is intentionally non-force and fail-closed: it first commits the
+private labels and a release policy with `enabled=false`, then adds only the
+audited `docsem/test/**` files to canonical GitHub, then commits the
+byte-identical public `test/**` tree and matching `README.md` to the public
+Hugging Face dataset. Hugging Face writes use exact-parent compare-and-swap;
+GitHub uses a disposable clone and a normal fast-forward push. A partial
+failure leaves test submissions disabled, preserves any completed safe commit,
+and requires a fresh dry-run with new exact bases. Successful publication ends
+with byte/hash reconciliation plus a reachable-public-history scan and emits
+only revisions, counts, and digests. It never activates test submissions or
+publishes a test leaderboard.
+
 Reset prior submissions and leaderboard state only when the public release has
 changed and prior scores are no longer comparable. The command is a dry run
 unless `--yes` is provided, and it preserves hidden validation labels:
