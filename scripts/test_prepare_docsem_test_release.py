@@ -27,6 +27,7 @@ def write_pdf_with_visible_text(
     text,
     *,
     rendering_mode=0,
+    font_size=12,
     x=72,
     y=720,
     fill_color=None,
@@ -35,7 +36,7 @@ def write_pdf_with_visible_text(
     """Write a tiny self-contained PDF whose text extractor sees ``text``."""
     color = "" if fill_color is None else f"{fill_color[0]} {fill_color[1]} {fill_color[2]} rg "
     content = (
-        f"{underlay_content}{color}BT /F1 12 Tf {rendering_mode} Tr {x} {y} Td ({text}) Tj ET"
+        f"{underlay_content}{color}BT /F1 {font_size} Tf {rendering_mode} Tr {x} {y} Td ({text}) Tj ET"
     ).encode("ascii")
     objects = (
         b"<< /Type /Catalog /Pages 2 0 R >>",
@@ -288,6 +289,42 @@ class PrepareDocsemTestReleaseTests(unittest.TestCase):
             underlay_content="0 0 0 rg 495 728 35 2 re f ",
         )
         self.assert_rejected(source)
+
+    def test_rejects_unrelated_ink_under_clipped_mid_gray_evidence_characters(self):
+        """Catches loose color matching that credits ink from a clipped gray ID."""
+        underlays = (
+            ("black", 0, 728, 2),
+            ("near-gray-antialias", 0.499, 727.5, 0.3),
+        )
+        for name, underlay_color, underlay_y, underlay_height in underlays:
+            with self.subTest(underlay=name):
+                source = self.make_source()
+                write_pdf_with_visible_text(
+                    source.root / "documents" / "synthetic-1.pdf",
+                    "b01",
+                    x=500,
+                    fill_color=(0.5, 0.5, 0.5),
+                    underlay_content=(
+                        f"{underlay_color} {underlay_color} {underlay_color} rg "
+                        f"495 {underlay_y} 35 {underlay_height} re f "
+                        "0 0 1 1 re W n "
+                    ),
+                )
+                self.assert_rejected(source)
+
+    def test_accepts_visible_antialiased_mid_gray_evidence_at_small_text_size(self):
+        """Catches strict raster proof that rejects a normal small gray glyph core."""
+        source = self.make_source()
+        write_pdf_with_visible_text(
+            source.root / "documents" / "synthetic-1.pdf",
+            "b01",
+            font_size=8,
+            fill_color=(0.5, 0.5, 0.5),
+        )
+
+        validated = validate_source(source.root, (), ())
+
+        self.assertEqual(validated.ids, ("synthetic-1", "synthetic-2", "synthetic-3"))
 
     def test_fails_closed_when_the_pdf_renderer_is_unavailable(self):
         """Catches falling back to extraction-only validation without a renderer."""

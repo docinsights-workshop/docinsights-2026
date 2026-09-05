@@ -24,6 +24,8 @@ SCHEMA_VERSION = 1
 TASK_KEYS = frozenset(("instance_id", "user_query", "document_pdf"))
 LABEL_KEYS = frozenset(("instance_id", "answer", "evidence"))
 BLOCK_ID = re.compile(r"b[0-9]+$")
+GLYPH_RENDER_SCALE = 4
+GLYPH_CORE_EDGE = 2
 
 
 class ValidationError(ValueError):
@@ -159,45 +161,46 @@ def _trace_rgb(trace: dict) -> tuple[int, int, int]:
         raise ValidationError("PDF text color is malformed.") from exc
     if not all(math.isfinite(component) and 0 <= component <= 1 for component in values):
         _fail("PDF text color is malformed.")
-    return tuple(round(component * 255) for component in values)
+    return tuple(int(component * 255) for component in values)
 
 
-def _bbox_has_rendered_pixels(
+def _pixmap_has_exact_color_core(pixmap: object, expected_rgb: tuple[int, int, int]) -> bool:
+    if expected_rgb == (255, 255, 255):
+        return False
+    samples = pixmap.samples
+    for y in range(pixmap.height - GLYPH_CORE_EDGE + 1):
+        for x in range(pixmap.width - GLYPH_CORE_EDGE + 1):
+            if all(
+                tuple(
+                    samples[
+                        (y + delta_y) * pixmap.stride
+                        + (x + delta_x) * pixmap.n
+                        + component
+                    ]
+                    for component in range(3)
+                )
+                == expected_rgb
+                for delta_y in range(GLYPH_CORE_EDGE)
+                for delta_x in range(GLYPH_CORE_EDGE)
+            ):
+                return True
+    return False
+
+
+def _bbox_has_rendered_glyph_core(
+    page: object,
     bbox: object,
-    page_rect: tuple[float, float, float, float],
-    pixmap: object,
     expected_rgb: tuple[int, int, int],
 ) -> bool:
     left, top, right, bottom = _numeric_rect(bbox, "text bounding box")
-    page_left, page_top, page_right, page_bottom = page_rect
-
-    left = max(left, page_left)
-    top = max(top, page_top)
-    right = min(right, page_right)
-    bottom = min(bottom, page_bottom)
-    if left >= right or top >= bottom:
-        return False
-
-    scale_x = pixmap.width / (page_right - page_left)
-    scale_y = pixmap.height / (page_bottom - page_top)
-    start_x = max(0, math.floor((left - page_left) * scale_x))
-    start_y = max(0, math.floor((top - page_top) * scale_y))
-    end_x = min(pixmap.width, math.ceil((right - page_left) * scale_x))
-    end_y = min(pixmap.height, math.ceil((bottom - page_top) * scale_y))
-    if start_x >= end_x or start_y >= end_y:
-        return False
-
-    samples = pixmap.samples
-    for y in range(start_y, end_y):
-        row_offset = y * pixmap.stride
-        for x in range(start_x, end_x):
-            offset = row_offset + x * pixmap.n
-            pixel = tuple(samples[offset + component] for component in range(3))
-            if any(component != 255 for component in pixel) and max(
-                abs(component - expected) for component, expected in zip(pixel, expected_rgb)
-            ) <= 128:
-                return True
-    return False
+    pixmap = page.get_pixmap(
+        matrix=fitz.Matrix(GLYPH_RENDER_SCALE, GLYPH_RENDER_SCALE),
+        clip=fitz.Rect(left, top, right, bottom),
+        alpha=False,
+        colorspace=fitz.csRGB,
+    )
+    _validate_pixmap(pixmap)
+    return _pixmap_has_exact_color_core(pixmap, expected_rgb)
 
 
 def _trace_characters(trace: dict) -> list[tuple[str, tuple[float, float, float, float]]]:
@@ -222,8 +225,8 @@ def _block_match_spans(text: str, block_id: str):
 
 def _matched_blocks_with_rendered_characters(
     trace: dict,
+    page: object,
     page_rect: tuple[float, float, float, float],
-    pixmap: object,
     evidence_ids: set[str],
 ) -> set[str]:
     _numeric_rect(trace.get("bbox"), "text bounding box")
@@ -240,7 +243,7 @@ def _matched_blocks_with_rendered_characters(
                 and top >= page_top
                 and right <= page_right
                 and bottom <= page_bottom
-                and _bbox_has_rendered_pixels((left, top, right, bottom), page_rect, pixmap, expected_rgb)
+                and _bbox_has_rendered_glyph_core(page, (left, top, right, bottom), expected_rgb)
                 for _, (left, top, right, bottom) in matched_characters
             ):
                 matched.add(block_id)
@@ -259,14 +262,12 @@ def _render_visible_pdf_evidence_blocks(path: Path, evidence_ids: set[str]) -> s
             if document.needs_pass:
                 _fail("PDF is encrypted and cannot be inspected.")
             for page in document:
-                pixmap = page.get_pixmap(alpha=False)
-                _validate_pixmap(pixmap)
                 page_rect = _numeric_rect(tuple(page.rect), "page bounds")
                 for trace in page.get_texttrace():
                     if trace.get("type") not in {0, 1, 2} or float(trace.get("opacity", 0)) <= 0:
                         continue
                     matched_blocks.update(
-                        _matched_blocks_with_rendered_characters(trace, page_rect, pixmap, evidence_ids)
+                        _matched_blocks_with_rendered_characters(trace, page, page_rect, evidence_ids)
                     )
         return matched_blocks
     except ValidationError:
