@@ -594,6 +594,7 @@ assert client.get("/config").status_code == 200
         )
         self.assertIn("sdk: gradio\n", readme)
         self.assertIn("sdk_version: 4.42.0\n", readme)
+        self.assertIn('python_version: "3.12"\n', readme)
 
 
 if __name__ == "__main__":

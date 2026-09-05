@@ -14,6 +14,7 @@ class PortalLayoutTests(unittest.TestCase):
 
         self.assertIn("sdk: gradio\n", readme)
         self.assertIn("sdk_version: 4.42.0\n", readme)
+        self.assertIn('python_version: "3.12"\n', readme)
 
     def test_root_config_and_api_info_routes_generate_without_schema_errors(self):
         client = TestClient(demo.app, raise_server_exceptions=False)

@@ -2,6 +2,7 @@
 title: "DocSem Organizer Test Dashboard"
 sdk: gradio
 sdk_version: 4.42.0
+python_version: "3.12"
 app_file: app.py
 license: apache-2.0
 ---
