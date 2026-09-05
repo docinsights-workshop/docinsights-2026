@@ -28,6 +28,7 @@ from prepare_docsem_test_release import (
     MAX_PUBLIC_CHECKSUM_BYTES,
     MAX_PUBLIC_MANIFEST_BYTES,
     MAX_PUBLIC_TASKS_BYTES,
+    _visibility_audit_contract,
     audit_public_payload,
 )
 
@@ -56,12 +57,18 @@ _ARCHIVE_SUFFIXES = (
     ".7z",
     ".rar",
 )
+_SPLIT_COMPONENTS = frozenset({"val", "validation", "test"})
+_CONTENT_EXTENSION = re.compile(
+    r"\.(?:pdf|jsonl?|zip|tar|tgz|gz|7z|rar)(?=\.|$)",
+    re.IGNORECASE,
+)
 _FORBIDDEN_PUBLIC_PATH_PART = re.compile(
     r"(?:^|[._-])(answers?|evidence|gold|ground[_-]?truth|labels?|mapping|organizer|private|solutions?)(?:$|[._-])",
     re.IGNORECASE,
 )
 _FORBIDDEN_PUBLIC_FIELD = re.compile(
-    r"(?:^|_)(answer|evidence|gold|label|source_mapping|organizer_note|private)(?:$|_)",
+    r"(?:^|[_-])(?:answers?|evidence|gold|ground[_-]?truth|labels?|solutions?|"
+    r"source[_-]?mapping|organizer[_-]?note|private)(?:$|[_-])",
     re.IGNORECASE,
 )
 _PRIVATE_MANIFEST_KEYS = frozenset(
@@ -124,6 +131,12 @@ class HistorySnapshot:
     metadata: Mapping[str, bytes]
 
 
+@dataclass(frozen=True)
+class HfRepositoryState:
+    revision: str
+    private: bool
+
+
 @dataclass(frozen=True, repr=False)
 class Artifact:
     snapshot_path: Path
@@ -165,6 +178,7 @@ class _CapturedRelease:
     public_root: Path
     public: Mapping[str, Artifact]
     private: Mapping[str, Artifact]
+    card_template: Artifact
     release_card: Artifact
     public_manifest: Mapping[str, object]
     private_manifest: Mapping[str, object]
@@ -202,7 +216,7 @@ class GitBackend(Protocol):
 
 
 class HfBackend(Protocol):
-    def current_revision(self, repository: str, token: str) -> str: ...
+    def repository_state(self, repository: str, token: str) -> HfRepositoryState: ...
 
     def list_paths(
         self, repository: str, revision: str, token: str
@@ -219,6 +233,8 @@ class HfBackend(Protocol):
         operations: Mapping[str, Artifact],
         message: str,
         token: str,
+        *,
+        expected_private: bool,
     ) -> str: ...
 
     def history_snapshots(
@@ -578,6 +594,7 @@ def _capture_private(
     counts = private_manifest.get("counts")
     if (
         set(private_manifest) != _PRIVATE_MANIFEST_KEYS
+        or type(private_manifest.get("schema_version")) is not int
         or private_manifest.get("schema_version") != 1
         or private_manifest.get("release_id") != public_manifest.get("release_id")
         or not isinstance(counts, dict)
@@ -599,7 +616,7 @@ def _capture_private(
         or private_manifest.get("feedback_policy") != "first-attempt-only"
         or private_manifest.get("enabled") is not False
         or private_manifest.get("finalized") is not False
-        or not isinstance(private_manifest.get("visibility_audit"), dict)
+        or private_manifest.get("visibility_audit") != _visibility_audit_contract()
     ):
         raise ReleaseError(
             "Private test release policy does not match the public release."
@@ -660,6 +677,7 @@ def _capture_release(
         public_root=sealed_public_root,
         public=public,
         private=private,
+        card_template=template,
         release_card=card,
         public_manifest=public_manifest,
         private_manifest=private_manifest,
@@ -755,11 +773,17 @@ def _inspect_targets(
         github_revision = git_backend.current_revision(
             config.source_repository, config.source_branch
         )
-        public_revision = hf_backend.current_revision(
-            PUBLIC_HF_REPOSITORY, public_token
+        public_state = _validated_hf_state(
+            hf_backend.repository_state(PUBLIC_HF_REPOSITORY, public_token),
+            expected_revision=config.public_hf_base,
+            expected_private=False,
+            description="Public Hugging Face repository",
         )
-        private_revision = hf_backend.current_revision(
-            PRIVATE_HF_REPOSITORY, private_token
+        _validated_hf_state(
+            hf_backend.repository_state(PRIVATE_HF_REPOSITORY, private_token),
+            expected_revision=config.private_hf_base,
+            expected_private=True,
+            description="Private Hugging Face repository",
         )
     except ReleaseError:
         raise
@@ -781,12 +805,6 @@ def _inspect_targets(
         raise ReleaseError(
             "The canonical source checkout is dirty, stale, divergent, or mismatched."
         )
-    if (
-        public_revision != config.public_hf_base
-        or private_revision != config.private_hf_base
-    ):
-        raise ReleaseError("A Hugging Face target moved from its expected base.")
-
     github_ops = _github_operations(release)
     public_ops = _public_hf_operations(release)
     private_ops = _private_hf_operations(release)
@@ -799,6 +817,48 @@ def _inspect_targets(
         )
         private_paths = hf_backend.list_paths(
             PRIVATE_HF_REPOSITORY, config.private_hf_base, private_token
+        )
+        remote_card = hf_backend.read_files(
+            PUBLIC_HF_REPOSITORY,
+            public_state.revision,
+            ("README.md",),
+            public_token,
+        )
+        if remote_card != {"README.md": release.card_template.read_bytes()}:
+            raise ReleaseError(
+                "The dataset card template is not the exact public Hugging Face base README.md."
+            )
+        _scan_current_public_tree(
+            revision=github_revision,
+            paths=github_paths,
+            reader=lambda names: git_backend.read_files(
+                config.source_repository,
+                github_revision,
+                names,
+            ),
+            repository_kind="github",
+        )
+        _scan_current_public_tree(
+            revision=public_state.revision,
+            paths=public_paths,
+            reader=lambda names: hf_backend.read_files(
+                PUBLIC_HF_REPOSITORY,
+                public_state.revision,
+                names,
+                public_token,
+            ),
+            repository_kind="hf",
+        )
+        _scan_public_history(
+            git_backend.history_snapshots(
+                config.source_repository,
+                config.source_branch,
+            ),
+            "github",
+        )
+        _scan_public_history(
+            hf_backend.history_snapshots(PUBLIC_HF_REPOSITORY, public_token),
+            "hf",
         )
         statuses = {
             "private_hugging_face": _state_for_namespace(
@@ -929,8 +989,25 @@ def _validate_revision(value: str, description: str) -> str:
     return value
 
 
-def _partial_error(completed: Sequence[str]) -> PartialPublicationError:
-    names = ",".join(completed)
+def _validated_hf_state(
+    state: HfRepositoryState,
+    *,
+    expected_revision: str,
+    expected_private: bool,
+    description: str,
+) -> HfRepositoryState:
+    if not isinstance(state, HfRepositoryState):
+        raise ReleaseError(f"{description} state is invalid.")
+    revision = _validate_revision(state.revision, description)
+    if type(state.private) is not bool or state.private is not expected_private:
+        raise ReleaseError(f"{description} visibility is unsafe.")
+    if revision != expected_revision:
+        raise RemoteMovedError(f"{description} moved from its expected base.")
+    return state
+
+
+def _partial_error(completed: Mapping[str, str]) -> PartialPublicationError:
+    names = ",".join(f"{name}={revision}" for name, revision in completed.items())
     return PartialPublicationError(
         f"Publication stopped after safe completed targets: {names}. "
         "Test activation was not attempted; refresh exact bases and regenerate the plan."
@@ -942,7 +1019,7 @@ def _publish_target(
     expected_base: str,
     current: Callable[[], str],
     publish: Callable[[], str],
-    completed: list[str],
+    completed: dict[str, str],
 ) -> str:
     try:
         if current() != expected_base:
@@ -954,7 +1031,7 @@ def _publish_target(
         raise ReleaseError(
             "Publication stopped before any target completed; exact remote state changed or a write failed."
         ) from exc
-    completed.append(name)
+    completed[name] = revision
     return revision
 
 
@@ -971,27 +1048,49 @@ def _contains_forbidden_field(value: object) -> bool:
     return False
 
 
-def _history_path_forbidden(path: str, namespace: str) -> bool:
+def _canonical_train_label_path(repository_kind: str) -> str:
+    if repository_kind == "github":
+        return "docsem/train/labels.jsonl"
+    if repository_kind == "hf":
+        return "train/labels.jsonl"
+    raise ReleaseError("A public repository kind is invalid.")
+
+
+def _split_sensitive_metadata_path(path: str) -> bool:
+    components = path.lower().split("/")
+    return (
+        bool(_SPLIT_COMPONENTS.intersection(components[:-1]))
+        and path.lower().endswith((".json", ".jsonl"))
+        and len(_CONTENT_EXTENSION.findall(components[-1])) == 1
+    )
+
+
+def _history_path_forbidden(path: str, repository_kind: str) -> bool:
     lowered = path.lower()
-    if lowered.endswith(_ARCHIVE_SUFFIXES) and (
-        path.startswith(namespace) or "/test/" in path or lowered.startswith("val/")
+    components = lowered.split("/")
+    filename = components[-1]
+    extension_markers = _CONTENT_EXTENSION.findall(filename)
+    if "private" in components:
+        return True
+    if any(
+        re.search(rf"{re.escape(suffix)}(?=\.|$)", filename)
+        for suffix in _ARCHIVE_SUFFIXES
     ):
         return True
-    if path.startswith(namespace) and _FORBIDDEN_PUBLIC_PATH_PART.search(
-        Path(path).name
-    ):
+    if len(extension_markers) > 1:
         return True
-    if lowered in {
-        "val/labels.jsonl",
-        "validation/labels.jsonl",
-        "docsem/val/labels.jsonl",
-        "docsem/validation/labels.jsonl",
-    }:
+    if extension_markers and not re.search(r"\.(?:pdf|jsonl?)\Z", filename):
         return True
-    return False
+    if path == _canonical_train_label_path(repository_kind):
+        return False
+    return any(
+        _FORBIDDEN_PUBLIC_PATH_PART.search(component) for component in components
+    )
 
 
-def _scan_public_history(snapshots: Sequence[HistorySnapshot], namespace: str) -> None:
+def _scan_public_history(
+    snapshots: Sequence[HistorySnapshot], repository_kind: str
+) -> None:
     if len(snapshots) > MAX_HISTORY_COMMITS:
         raise ReleaseError("Public history exceeds the bounded reconciliation limit.")
     metadata_bytes = 0
@@ -1001,13 +1100,18 @@ def _scan_public_history(snapshots: Sequence[HistorySnapshot], namespace: str) -
         paths = tuple(snapshot.paths)
         if any(not _safe_relative_path(path) for path in paths):
             raise ReleaseError("Public history contains an unsafe path.")
-        if any(_history_path_forbidden(path, namespace) for path in paths):
+        if any(_history_path_forbidden(path, repository_kind) for path in paths):
             raise ReleaseError(
                 "Public history contains a forbidden test or validation artifact."
             )
+        expected_metadata = {
+            path for path in paths if _split_sensitive_metadata_path(path)
+        }
+        if set(snapshot.metadata) != expected_metadata:
+            raise ReleaseError(
+                "Public history split metadata inventory is incomplete or extra."
+            )
         for path, payload in snapshot.metadata.items():
-            if path not in paths or not path.startswith(namespace):
-                continue
             metadata_bytes += len(payload)
             if metadata_bytes > MAX_HISTORY_METADATA_BYTES:
                 raise ReleaseError(
@@ -1029,6 +1133,29 @@ def _scan_public_history(snapshots: Sequence[HistorySnapshot], namespace: str) -
                 raise ReleaseError(
                     "Public history metadata contains a forbidden field."
                 )
+
+
+def _scan_current_public_tree(
+    *,
+    revision: str,
+    paths: Sequence[str],
+    reader: Callable[[Sequence[str]], Mapping[str, bytes]],
+    repository_kind: str,
+) -> None:
+    metadata_paths = tuple(
+        sorted(path for path in paths if _split_sensitive_metadata_path(path))
+    )
+    metadata = reader(metadata_paths) if metadata_paths else {}
+    _scan_public_history(
+        (
+            HistorySnapshot(
+                revision=revision,
+                paths=tuple(paths),
+                metadata=metadata,
+            ),
+        ),
+        repository_kind,
+    )
 
 
 def _verify_remote_files(
@@ -1075,16 +1202,18 @@ def _reconcile(
             != revisions["github"]
         ):
             raise RemoteMovedError("GitHub moved before reconciliation.")
-        if (
-            hf_backend.current_revision(PUBLIC_HF_REPOSITORY, public_token)
-            != revisions["public_hugging_face"]
-        ):
-            raise RemoteMovedError("Public Hugging Face moved before reconciliation.")
-        if (
-            hf_backend.current_revision(PRIVATE_HF_REPOSITORY, private_token)
-            != revisions["private_hugging_face"]
-        ):
-            raise RemoteMovedError("Private Hugging Face moved before reconciliation.")
+        _validated_hf_state(
+            hf_backend.repository_state(PUBLIC_HF_REPOSITORY, public_token),
+            expected_revision=revisions["public_hugging_face"],
+            expected_private=False,
+            description="Public Hugging Face repository",
+        )
+        _validated_hf_state(
+            hf_backend.repository_state(PRIVATE_HF_REPOSITORY, private_token),
+            expected_revision=revisions["private_hugging_face"],
+            expected_private=True,
+            description="Private Hugging Face repository",
+        )
 
         github_paths = git_backend.list_paths(
             config.source_repository, revisions["github"]
@@ -1130,11 +1259,11 @@ def _reconcile(
             git_backend.history_snapshots(
                 config.source_repository, config.source_branch
             ),
-            "docsem/test/",
+            "github",
         )
         _scan_public_history(
             hf_backend.history_snapshots(PUBLIC_HF_REPOSITORY, public_token),
-            "test/",
+            "hf",
         )
     except ReleaseError:
         raise
@@ -1208,25 +1337,29 @@ def run_release(
         if not publish:
             return plan
 
-        completed: list[str] = []
+        completed: dict[str, str] = {}
         revisions: dict[str, str] = {}
         private_ops = _private_hf_operations(release)
         if statuses["private_hugging_face"] == "already-published":
             revisions["private_hugging_face"] = config.private_hf_base
-            completed.append("private_hugging_face")
+            completed["private_hugging_face"] = config.private_hf_base
         else:
             revisions["private_hugging_face"] = _publish_target(
                 "private_hugging_face",
                 config.private_hf_base,
-                lambda: hf_backend.current_revision(
-                    PRIVATE_HF_REPOSITORY, private_token
-                ),
+                lambda: _validated_hf_state(
+                    hf_backend.repository_state(PRIVATE_HF_REPOSITORY, private_token),
+                    expected_revision=config.private_hf_base,
+                    expected_private=True,
+                    description="Private Hugging Face repository",
+                ).revision,
                 lambda: hf_backend.publish(
                     PRIVATE_HF_REPOSITORY,
                     config.private_hf_base,
                     private_ops,
                     f"Stage disabled DocSem test release {release.public_manifest['release_id']}",
                     private_token,
+                    expected_private=True,
                 ),
                 completed,
             )
@@ -1234,7 +1367,7 @@ def run_release(
         github_ops = _github_operations(release)
         if statuses["github"] == "already-published":
             revisions["github"] = config.github_remote_base
-            completed.append("github")
+            completed["github"] = config.github_remote_base
         else:
             revisions["github"] = _publish_target(
                 "github",
@@ -1255,18 +1388,24 @@ def run_release(
         public_ops = _public_hf_operations(release)
         if statuses["public_hugging_face"] == "already-published":
             revisions["public_hugging_face"] = config.public_hf_base
-            completed.append("public_hugging_face")
+            completed["public_hugging_face"] = config.public_hf_base
         else:
             revisions["public_hugging_face"] = _publish_target(
                 "public_hugging_face",
                 config.public_hf_base,
-                lambda: hf_backend.current_revision(PUBLIC_HF_REPOSITORY, public_token),
+                lambda: _validated_hf_state(
+                    hf_backend.repository_state(PUBLIC_HF_REPOSITORY, public_token),
+                    expected_revision=config.public_hf_base,
+                    expected_private=False,
+                    description="Public Hugging Face repository",
+                ).revision,
                 lambda: hf_backend.publish(
                     PUBLIC_HF_REPOSITORY,
                     config.public_hf_base,
                     public_ops,
                     f"Release DocSem held-out test inputs {release.public_manifest['release_id']}",
                     public_token,
+                    expected_private=False,
                 ),
                 completed,
             )
@@ -1304,6 +1443,63 @@ def _normalize_repository(value: str) -> str:
     if normalized.startswith("git@github.com:"):
         normalized = "https://github.com/" + normalized.removeprefix("git@github.com:")
     return normalized.lower()
+
+
+def _ensure_real_git_parent(checkout: Path, relative_path: str) -> Path:
+    current = checkout
+    for component in relative_path.split("/")[:-1]:
+        current = current / component
+        try:
+            mode = current.lstat().st_mode
+        except FileNotFoundError:
+            try:
+                current.mkdir(mode=0o755)
+                mode = current.lstat().st_mode
+            except OSError as exc:
+                raise ReleaseError(
+                    "A GitHub publication parent could not be created safely."
+                ) from exc
+        except OSError as exc:
+            raise ReleaseError(
+                "A GitHub publication parent could not be inspected safely."
+            ) from exc
+        if not stat.S_ISDIR(mode) or stat.S_ISLNK(mode):
+            raise ReleaseError("A GitHub publication parent is linked or special.")
+    return current
+
+
+def _verify_git_artifacts(
+    checkout: Path,
+    revision: str,
+    operations: Mapping[str, Artifact],
+    description: str,
+) -> None:
+    for path, artifact in operations.items():
+        if revision == ":":
+            listing = _run_command(
+                ["git", "ls-files", "--stage", "--", path],
+                cwd=checkout,
+            ).decode("utf-8")
+            fields = listing.rstrip("\n").split(maxsplit=3)
+            if len(fields) != 4 or fields[0] != "100644" or fields[2] != "0":
+                raise ReleaseError(f"The GitHub {description} blob mode is unsafe.")
+            object_spec = f":{path}"
+        else:
+            listing = _run_command(
+                ["git", "ls-tree", revision, "--", path],
+                cwd=checkout,
+            ).decode("utf-8")
+            fields = listing.rstrip("\n").split(maxsplit=3)
+            if len(fields) != 4 or fields[0] != "100644" or fields[1] != "blob":
+                raise ReleaseError(f"The GitHub {description} blob mode is unsafe.")
+            object_spec = f"{revision}:{path}"
+        if (
+            _run_command(["git", "show", object_spec], cwd=checkout)
+            != artifact.read_bytes()
+        ):
+            raise ReleaseError(
+                f"The GitHub {description} blob differs from the sealed artifact."
+            )
 
 
 class SubprocessGitBackend:
@@ -1453,20 +1649,77 @@ class SubprocessGitBackend:
                 raise RemoteMovedError(
                     "GitHub moved while the temporary clone was created."
                 )
+            tracked_paths = tuple(
+                line
+                for line in _run_command(
+                    ["git", "ls-tree", "-r", "--name-only", "HEAD"],
+                    cwd=checkout,
+                )
+                .decode("utf-8")
+                .splitlines()
+                if line
+            )
+            if any(Path(path).name == ".gitattributes" for path in tracked_paths):
+                raise ReleaseError(
+                    "GitHub publication refuses repository-controlled Git transformations."
+                )
             for path, artifact in operations.items():
                 if not path.startswith("docsem/test/") or not _safe_relative_path(path):
                     raise ReleaseError(
                         "GitHub publication contains a path outside docsem/test."
                     )
                 destination = checkout / path
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                if destination.exists():
+                _ensure_real_git_parent(checkout, path)
+                try:
+                    destination.lstat()
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    raise ReleaseError(
+                        "The GitHub target could not be inspected safely."
+                    ) from exc
+                else:
                     raise ReleaseError(
                         "The GitHub target already contains an unplanned test path."
                     )
-                with destination.open("xb") as output:
-                    output.write(artifact.read_bytes())
-            _run_command(["git", "add", "--", *sorted(operations)], cwd=checkout)
+                descriptor = None
+                try:
+                    descriptor = os.open(
+                        destination,
+                        os.O_WRONLY
+                        | os.O_CREAT
+                        | os.O_EXCL
+                        | os.O_CLOEXEC
+                        | getattr(os, "O_NOFOLLOW", 0),
+                        0o644,
+                    )
+                    payload = artifact.read_bytes()
+                    view = memoryview(payload)
+                    while view:
+                        written = os.write(descriptor, view)
+                        if written <= 0:
+                            raise OSError("short GitHub artifact write")
+                        view = view[written:]
+                    os.fsync(descriptor)
+                except OSError as exc:
+                    destination.unlink(missing_ok=True)
+                    raise ReleaseError(
+                        "A GitHub publication artifact could not be written safely."
+                    ) from exc
+                finally:
+                    if descriptor is not None:
+                        os.close(descriptor)
+            _run_command(
+                [
+                    "git",
+                    "-c",
+                    "core.attributesFile=/dev/null",
+                    "add",
+                    "--",
+                    *sorted(operations),
+                ],
+                cwd=checkout,
+            )
             staged = set(
                 _run_command(["git", "diff", "--cached", "--name-only"], cwd=checkout)
                 .decode("utf-8")
@@ -1474,9 +1727,12 @@ class SubprocessGitBackend:
             )
             if staged != set(operations):
                 raise ReleaseError("The GitHub staged path allowlist is not exact.")
+            _verify_git_artifacts(checkout, ":", operations, "index")
             _run_command(
                 [
                     "git",
+                    "-c",
+                    "core.hooksPath=/dev/null",
                     "-c",
                     "user.name=DocInsights Release Automation",
                     "-c",
@@ -1492,8 +1748,16 @@ class SubprocessGitBackend:
                 .decode()
                 .strip()
             )
+            _verify_git_artifacts(checkout, revision, operations, "committed")
             _run_command(
-                ["git", "push", "origin", f"HEAD:refs/heads/{branch}"],
+                [
+                    "git",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "push",
+                    "origin",
+                    f"HEAD:refs/heads/{branch}",
+                ],
                 cwd=checkout,
             )
             return _validate_revision(revision, "GitHub publication")
@@ -1515,10 +1779,7 @@ class SubprocessGitBackend:
         for value in values:
             paths = tuple(self.list_paths(repository, value))
             metadata_paths = [
-                path
-                for path in paths
-                if path.startswith("docsem/test/")
-                and path.endswith((".json", ".jsonl"))
+                path for path in paths if _split_sensitive_metadata_path(path)
             ]
             metadata = self.read_files(repository, value, metadata_paths)
             snapshots.append(HistorySnapshot(value, paths, metadata))
@@ -1538,19 +1799,22 @@ class HuggingFaceBackend:
             ) from exc
         return CommitOperationAdd, HfApi, hf_hub_download
 
-    def current_revision(self, repository: str, token: str) -> str:
+    def repository_state(self, repository: str, token: str) -> HfRepositoryState:
         _CommitOperationAdd, HfApi, _download = self._imports()
         try:
-            value = (
-                HfApi(token=token)
-                .repo_info(repo_id=repository, repo_type="dataset")
-                .sha
+            info = HfApi(token=token).repo_info(
+                repo_id=repository,
+                repo_type="dataset",
             )
         except Exception as exc:
             raise ReleaseError(
-                "A Hugging Face repository revision could not be resolved."
+                "A Hugging Face repository state could not be resolved."
             ) from exc
-        return _validate_revision(value, "Hugging Face repository")
+        revision = _validate_revision(info.sha, "Hugging Face repository")
+        private = getattr(info, "private", None)
+        if type(private) is not bool:
+            raise ReleaseError("A Hugging Face repository visibility is unavailable.")
+        return HfRepositoryState(revision=revision, private=private)
 
     def list_paths(self, repository: str, revision: str, token: str) -> Sequence[str]:
         _CommitOperationAdd, HfApi, _download = self._imports()
@@ -1614,10 +1878,16 @@ class HuggingFaceBackend:
         operations: Mapping[str, Artifact],
         message: str,
         token: str,
+        *,
+        expected_private: bool,
     ) -> str:
         CommitOperationAdd, HfApi, _download = self._imports()
-        if self.current_revision(repository, token) != expected_parent:
-            raise RemoteMovedError("Hugging Face moved before exact-parent commit.")
+        _validated_hf_state(
+            self.repository_state(repository, token),
+            expected_revision=expected_parent,
+            expected_private=expected_private,
+            description="Hugging Face repository",
+        )
         additions = [
             CommitOperationAdd(
                 path_in_repo=path,
@@ -1664,9 +1934,7 @@ class HuggingFaceBackend:
             revision = _validate_revision(commit.commit_id, "Hugging Face history")
             paths = tuple(self.list_paths(repository, revision, token))
             metadata_paths = [
-                path
-                for path in paths
-                if path.startswith("test/") and path.endswith((".json", ".jsonl"))
+                path for path in paths if _split_sensitive_metadata_path(path)
             ]
             metadata = self.read_files(repository, revision, metadata_paths, token)
             snapshots.append(HistorySnapshot(revision, paths, metadata))
@@ -1726,6 +1994,7 @@ def main(
     private_credential = (
         private_token
         or os.environ.get("DOCSEM_PRIVATE_HF_TOKEN")
+        or os.environ.get("DOCSEM_HF_WRITE_TOKEN")
         or os.environ.get("HF_WRITE_TOKEN")
     )
     public_credential = (

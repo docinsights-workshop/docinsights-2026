@@ -11,7 +11,10 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
+import prepare_docsem_test_release as preparer
 import publish_docsem_test_release as publisher
 
 
@@ -94,8 +97,7 @@ class FakeGitBackend:
                 metadata={
                     path: payload
                     for path, payload in tree.items()
-                    if path.endswith((".json", ".jsonl"))
-                    and not path.endswith("labels.jsonl")
+                    if publisher._split_sensitive_metadata_path(path)
                 },
             )
             for revision, tree in self.history
@@ -103,8 +105,15 @@ class FakeGitBackend:
 
 
 class FakeHfBackend:
-    def __init__(self, revisions, trees=None, *, event_log=None):
+    def __init__(self, revisions, trees=None, *, event_log=None, private_flags=None):
         self.revisions = dict(revisions)
+        self.private_flags = dict(
+            private_flags
+            or {
+                publisher.PUBLIC_HF_REPOSITORY: False,
+                publisher.PRIVATE_HF_REPOSITORY: True,
+            }
+        )
         self.trees = {key: dict(value) for key, value in (trees or {}).items()}
         for repo in revisions:
             self.trees.setdefault(repo, {})
@@ -115,11 +124,15 @@ class FakeHfBackend:
         self.writes = []
         self.event_log = event_log if event_log is not None else []
         self.move_before_commit = set()
+        self.flip_visibility_before_commit = set()
         self.fail_message = None
         self.tamper_after_commit = None
 
-    def current_revision(self, repository, token):
-        return self.revisions[repository]
+    def repository_state(self, repository, token):
+        return publisher.HfRepositoryState(
+            revision=self.revisions[repository],
+            private=self.private_flags[repository],
+        )
 
     def list_paths(self, repository, revision, token):
         if revision != self.revisions[repository]:
@@ -131,7 +144,16 @@ class FakeHfBackend:
             raise RuntimeError("unknown revision")
         return {path: self.trees[repository][path] for path in paths}
 
-    def publish(self, repository, expected_parent, operations, message, token):
+    def publish(
+        self,
+        repository,
+        expected_parent,
+        operations,
+        message,
+        token,
+        *,
+        expected_private,
+    ):
         stage = (
             "private_hf"
             if repository == publisher.PRIVATE_HF_REPOSITORY
@@ -140,6 +162,10 @@ class FakeHfBackend:
         self.event_log.append(stage)
         if self.fail_message:
             raise RuntimeError(self.fail_message)
+        if repository in self.flip_visibility_before_commit:
+            self.private_flags[repository] = not self.private_flags[repository]
+        if self.private_flags[repository] is not expected_private:
+            raise publisher.ReleaseError("Hugging Face visibility changed.")
         if repository in self.move_before_commit:
             self.revisions[repository] = "8" * 40
         if self.revisions[repository] != expected_parent:
@@ -172,8 +198,7 @@ class FakeHfBackend:
                 metadata={
                     path: payload
                     for path, payload in tree.items()
-                    if path.endswith((".json", ".jsonl"))
-                    and not path.endswith("labels.jsonl")
+                    if publisher._split_sensitive_metadata_path(path)
                 },
             )
             for revision, tree in self.history[repository]
@@ -237,9 +262,7 @@ class PublicationFixture:
             "gold_sha256": _digest(self.labels_bytes),
             "pdf_inventory_sha256": self.public_manifest["pdf_inventory_sha256"],
             "visibility_audit": {
-                "method": "bounded-rendered-raster-ocr",
-                "renderer": "PyMuPDF 1.26.3",
-                "ocr": "tesseract 5.5.1",
+                **preparer._visibility_audit_contract(),
             },
             "enabled": False,
             "max_attempts": 3,
@@ -325,7 +348,15 @@ class PublishDocsemTestReleaseTests(unittest.TestCase):
                 publisher.PUBLIC_HF_REPOSITORY: {
                     "README.md": self.fixture.base_card_bytes,
                     "train/labels.jsonl": b"public training labels are allowed\n",
-                    "val/tasks.jsonl": b"public validation tasks\n",
+                    "val/tasks.jsonl": _canonical_rows(
+                        [
+                            {
+                                "instance_id": "val_000001",
+                                "user_query": "Public validation question?",
+                                "document_pdf": "val/documents/val_000001.pdf",
+                            }
+                        ]
+                    ),
                 },
                 publisher.PRIVATE_HF_REPOSITORY: {
                     "private/val_labels.jsonl": b"private validation labels\n"
@@ -466,6 +497,25 @@ class PublishDocsemTestReleaseTests(unittest.TestCase):
                 bad_git = FakeGitBackend(state)
                 self.run_release(git_backend=bad_git)
 
+    def test_hugging_face_visibility_is_checked_in_dry_run_and_each_cas(self):
+        self.hf.private_flags[publisher.PUBLIC_HF_REPOSITORY] = True
+        with self.assertRaisesRegex(publisher.ReleaseError, "visibility"):
+            self.run_release()
+        self.assertEqual(self.event_log, [])
+
+        self.setUp_fresh_fixture()
+        self.hf.private_flags[publisher.PRIVATE_HF_REPOSITORY] = False
+        with self.assertRaisesRegex(publisher.ReleaseError, "visibility"):
+            self.run_release()
+        self.assertEqual(self.event_log, [])
+
+        self.setUp_fresh_fixture()
+        self.hf.flip_visibility_before_commit.add(publisher.PRIVATE_HF_REPOSITORY)
+        with self.assertRaises(publisher.ReleaseError):
+            self.run_release(publish=True, confirmation="PUBLISH")
+        self.assertEqual(self.event_log, ["private_hf"])
+        self.assertEqual(self.hf.writes, [])
+
     def test_stage_pair_card_and_private_modes_fail_closed(self):
         mutations = []
 
@@ -507,6 +557,27 @@ class PublishDocsemTestReleaseTests(unittest.TestCase):
             path.chmod(0o600)
 
         mutations.append(("private enabled", private_enabled))
+
+        def private_schema_version_bool():
+            manifest = dict(self.fixture.private_manifest)
+            manifest["schema_version"] = True
+            path = self.fixture.private_root / "private/test_release.json"
+            path.write_bytes(_canonical_json(manifest))
+            path.chmod(0o600)
+
+        mutations.append(("private schema version type", private_schema_version_bool))
+
+        def private_visibility_contract_extra():
+            manifest = dict(self.fixture.private_manifest)
+            manifest["visibility_audit"] = dict(manifest["visibility_audit"])
+            manifest["visibility_audit"]["unapproved"] = True
+            path = self.fixture.private_root / "private/test_release.json"
+            path.write_bytes(_canonical_json(manifest))
+            path.chmod(0o600)
+
+        mutations.append(
+            ("private visibility contract", private_visibility_contract_extra)
+        )
 
         def private_hash_mismatch():
             path = self.fixture.private_root / "private/test_labels.jsonl"
@@ -616,7 +687,10 @@ class PublishDocsemTestReleaseTests(unittest.TestCase):
 
         self.setUp_fresh_fixture()
         self.git.move_before_commit = True
-        with self.assertRaisesRegex(publisher.ReleaseError, "private_hugging_face"):
+        with self.assertRaisesRegex(
+            publisher.ReleaseError,
+            rf"private_hugging_face={('e' * 40)}",
+        ):
             self.run_release(publish=True, confirmation="PUBLISH")
         self.assertEqual(self.event_log, ["private_hf", "github"])
         self.assertEqual(len(self.hf.writes), 1)
@@ -626,6 +700,11 @@ class PublishDocsemTestReleaseTests(unittest.TestCase):
             publisher.PUBLIC_HF_REPOSITORY,
             "test/tasks.jsonl",
         )
+        with self.assertRaises(publisher.ReleaseError):
+            self.run_release(publish=True, confirmation="PUBLISH")
+
+        self.setUp_fresh_fixture()
+        self.git.tamper_after_commit = "docsem/test/documents/test_000001.pdf"
         with self.assertRaises(publisher.ReleaseError):
             self.run_release(publish=True, confirmation="PUBLISH")
 
@@ -668,6 +747,109 @@ class PublishDocsemTestReleaseTests(unittest.TestCase):
         )
         with self.assertRaises(publisher.ReleaseError):
             self.run_release(publish=True, confirmation="PUBLISH")
+
+    def test_dry_run_scans_entire_public_trees_and_reachable_history(self):
+        forbidden_cases = (
+            ("github private tree", "github", "private/audit.json", b"{}\n"),
+            (
+                "github validation gold",
+                "github",
+                "docsem/validation/gold.jsonl",
+                b"{}\n",
+            ),
+            ("hf test answers", "hf", "test/answers.jsonl", b"{}\n"),
+            ("hf archive", "hf", "legacy/data.zip", b"PK\x03\x04"),
+            ("hf polyglot", "hf", "test/tasks.jsonl.pdf", b"%PDF\n"),
+            ("hf disguised metadata", "hf", "test/tasks.jsonl.txt", b"{}\n"),
+        )
+        for name, target, path, payload in forbidden_cases:
+            with self.subTest(name=name):
+                self.setUp_fresh_fixture()
+                if target == "github":
+                    prior_tree = dict(self.git.tree)
+                    prior_tree[path] = payload
+                    self.git.history.append(("4" * 40, prior_tree))
+                else:
+                    repository = publisher.PUBLIC_HF_REPOSITORY
+                    prior_tree = dict(self.hf.trees[repository])
+                    prior_tree[path] = payload
+                    self.hf.history[repository].append(("4" * 40, prior_tree))
+                with self.assertRaises(publisher.ReleaseError):
+                    self.run_release()
+                self.assertEqual(self.event_log, [])
+
+        self.setUp_fresh_fixture()
+        repository = publisher.PUBLIC_HF_REPOSITORY
+        self.hf.trees[repository]["legacy/data.zip"] = b"PK\x03\x04"
+        with self.assertRaises(publisher.ReleaseError):
+            self.run_release()
+
+        self.setUp_fresh_fixture()
+        self.git.history.append(
+            (
+                "3" * 40,
+                {
+                    "docsem/val/tasks.jsonl": _canonical_rows(
+                        [
+                            {
+                                "instance_id": "val_leak",
+                                "user_query": "q",
+                                "document_pdf": "val/documents/val_leak.pdf",
+                                "answer": "secret",
+                            }
+                        ]
+                    )
+                },
+            )
+        )
+        with self.assertRaisesRegex(publisher.ReleaseError, "forbidden field"):
+            self.run_release()
+
+        self.setUp_fresh_fixture()
+        repository = publisher.PUBLIC_HF_REPOSITORY
+        prior_tree = dict(self.hf.trees[repository])
+        prior_tree["test/tasks.jsonl"] = _canonical_rows(
+            [
+                {
+                    "instance_id": "test_leak",
+                    "user_query": "q",
+                    "document_pdf": "test/documents/test_leak.pdf",
+                    "solutions": ["secret"],
+                }
+            ]
+        )
+        self.hf.history[repository].append(("1" * 40, prior_tree))
+        with self.assertRaisesRegex(publisher.ReleaseError, "forbidden field"):
+            self.run_release()
+
+    def test_only_canonical_training_label_path_is_allowed_publicly(self):
+        self.git.tree["docsem/train/labels.jsonl"] = b"public training labels\n"
+        self.run_release()
+
+        self.setUp_fresh_fixture()
+        repository = publisher.PUBLIC_HF_REPOSITORY
+        self.hf.trees[repository]["legacy/train_labels.jsonl"] = b"public\n"
+        self.hf.history[repository].append(("2" * 40, dict(self.hf.trees[repository])))
+        with self.assertRaises(publisher.ReleaseError):
+            self.run_release()
+
+        self.setUp_fresh_fixture()
+        self.git.tree["train/labels.jsonl"] = b"misplaced public labels\n"
+        with self.assertRaises(publisher.ReleaseError):
+            self.run_release()
+
+    def test_card_template_must_equal_public_hf_base_readme(self):
+        self.fixture.card_template.write_bytes(b"---\nprivate: secret\n---\nbody\n")
+        self.fixture.release_card.write_bytes(self.fixture.release_card_bytes)
+        with self.assertRaisesRegex(publisher.ReleaseError, "README"):
+            self.run_release()
+
+        self.setUp_fresh_fixture()
+        self.fixture.release_card.write_bytes(
+            self.fixture.release_card_bytes + b"Private organizer content.\n"
+        )
+        with self.assertRaises(publisher.ReleaseError):
+            self.run_release()
 
     def setUp_fresh_fixture(self):
         self.temporary.cleanup()
@@ -724,6 +906,101 @@ class PublishDocsemTestReleaseTests(unittest.TestCase):
         self.assertNotIn('"evidence"', output.getvalue())
         self.assertEqual(self.git.writes, [])
         self.assertEqual(self.hf.writes, [])
+
+    def test_cli_supports_documented_docsem_hf_write_token(self):
+        self.hf.required_token = "documented-token"
+        original_state = self.hf.repository_state
+
+        def checked_state(repository, token):
+            if token != self.hf.required_token:
+                raise publisher.ReleaseError("wrong credential")
+            return original_state(repository, token)
+
+        self.hf.repository_state = checked_state
+        output = io.StringIO()
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"DOCSEM_HF_WRITE_TOKEN": "documented-token"},
+                clear=True,
+            ),
+            contextlib.redirect_stdout(output),
+        ):
+            exit_code = publisher.main(
+                [
+                    "--public-stage",
+                    str(self.fixture.public_root),
+                    "--private-stage",
+                    str(self.fixture.private_root),
+                    "--release-card",
+                    str(self.fixture.release_card),
+                    "--card-template",
+                    str(self.fixture.card_template),
+                    "--source-branch",
+                    "main",
+                    "--source-base",
+                    self.SOURCE_BASE,
+                    "--github-remote-base",
+                    self.SOURCE_BASE,
+                    "--public-hf-base",
+                    self.PUBLIC_BASE,
+                    "--private-hf-base",
+                    self.PRIVATE_BASE,
+                ],
+                git_backend=self.git,
+                hf_backend=self.hf,
+                public_auditor=self.fixture.public_auditor,
+                card_renderer=self.fixture.card_renderer,
+            )
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(json.loads(output.getvalue())["mode"], "dry-run")
+
+    def test_real_hf_backend_collects_all_split_sensitive_metadata(self):
+        revision = "1" * 40
+        tree = {
+            "README.md": b"card\n",
+            "train/tasks.jsonl": b"{}\n",
+            "train/labels.jsonl": b"{}\n",
+            "val/tasks.jsonl": b'{"instance_id":"v"}\n',
+            "validation/release.json": b"{}\n",
+            "test/tasks.jsonl": b'{"instance_id":"t"}\n',
+        }
+
+        class Api:
+            def __init__(self, token=None):
+                self.token = token
+
+            def list_repo_commits(self, **_kwargs):
+                return [SimpleNamespace(commit_id=revision)]
+
+            def list_repo_files(self, **_kwargs):
+                return tuple(tree)
+
+            def repo_info(self, **_kwargs):
+                return SimpleNamespace(sha=revision, private=False)
+
+        def download(*, filename, cache_dir, **_kwargs):
+            destination = Path(cache_dir) / filename
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(tree[filename])
+            return str(destination)
+
+        backend = publisher.HuggingFaceBackend()
+        with mock.patch.object(
+            publisher.HuggingFaceBackend,
+            "_imports",
+            return_value=(object, Api, download),
+        ):
+            state = backend.repository_state("owner/data", "token")
+            snapshots = backend.history_snapshots("owner/data", "token")
+        self.assertEqual(
+            state,
+            publisher.HfRepositoryState(revision=revision, private=False),
+        )
+        self.assertEqual(
+            set(snapshots[0].metadata),
+            {"val/tasks.jsonl", "validation/release.json", "test/tasks.jsonl"},
+        )
 
     def test_real_git_backend_uses_fast_forward_push_and_reads_reachable_history(self):
         root = self.fixture.root / "git-integration"
@@ -785,16 +1062,30 @@ class PublishDocsemTestReleaseTests(unittest.TestCase):
             sealed, len(self.fixture.tasks_bytes), _digest(self.fixture.tasks_bytes)
         )
 
+        hooks_template = root / "hooks-template"
+        hooks = hooks_template / "hooks"
+        hooks.mkdir(parents=True)
+        marker = root / "hook-ran"
+        for name in ("pre-commit", "pre-push"):
+            hook = hooks / name
+            hook.write_text(
+                f"#!/bin/sh\nprintf hook > {marker}\nexit 97\n",
+                encoding="utf-8",
+            )
+            hook.chmod(0o755)
+
         backend = publisher.SubprocessGitBackend()
         try:
-            revision = backend.publish(
-                str(remote),
-                "main",
-                base,
-                {"docsem/test/tasks.jsonl": artifact},
-                "fixture release",
-            )
+            with mock.patch.dict(os.environ, {"GIT_TEMPLATE_DIR": str(hooks_template)}):
+                revision = backend.publish(
+                    str(remote),
+                    "main",
+                    base,
+                    {"docsem/test/tasks.jsonl": artifact},
+                    "fixture release",
+                )
             self.assertNotEqual(revision, base)
+            self.assertFalse(marker.exists())
             self.assertEqual(backend.current_revision(str(remote), "main"), revision)
             self.assertIn(
                 "docsem/test/tasks.jsonl", backend.list_paths(str(remote), revision)
@@ -808,6 +1099,155 @@ class PublishDocsemTestReleaseTests(unittest.TestCase):
             self.assertEqual(history[0].revision, revision)
         finally:
             backend.close()
+
+    def test_git_backend_rejects_attributes_and_linked_parent_components(self):
+        for name, entries in (
+            (
+                "attributes",
+                {
+                    ".gitattributes": b"*.jsonl filter=evil\n",
+                    "docsem/README.md": b"x\n",
+                },
+            ),
+            (
+                "linked parent",
+                {"docsem/README.md": b"x\n", "docsem/test": ("symlink", "../escape")},
+            ),
+        ):
+            with self.subTest(name=name):
+                root, remote, base, artifact = self._git_backend_fixture(entries)
+                backend = publisher.SubprocessGitBackend()
+                try:
+                    with self.assertRaises(publisher.ReleaseError):
+                        backend.publish(
+                            str(remote),
+                            "main",
+                            base,
+                            {"docsem/test/tasks.jsonl": artifact},
+                            "fixture release",
+                        )
+                    self.assertEqual(
+                        backend.current_revision(str(remote), "main"), base
+                    )
+                finally:
+                    backend.close()
+                    root.cleanup()
+
+    def test_git_blob_verifier_rejects_index_and_commit_mismatch(self):
+        root = tempfile.TemporaryDirectory()
+        checkout = Path(root.name)
+        subprocess.run(
+            ["git", "init", "--initial-branch=main", str(checkout)], check=True
+        )
+        target = checkout / "docsem/test/tasks.jsonl"
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b"wrong\n")
+        subprocess.run(
+            ["git", "add", "--", "docsem/test/tasks.jsonl"], cwd=checkout, check=True
+        )
+        sealed = checkout / "sealed"
+        sealed.write_bytes(b"expected\n")
+        sealed.chmod(0o400)
+        artifact = publisher.Artifact(sealed, 9, _digest(b"expected\n"))
+        with self.assertRaises(publisher.ReleaseError):
+            publisher._verify_git_artifacts(
+                checkout,
+                ":",
+                {"docsem/test/tasks.jsonl": artifact},
+                "index",
+            )
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.test",
+                "commit",
+                "-m",
+                "wrong blob",
+            ],
+            cwd=checkout,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        with self.assertRaises(publisher.ReleaseError):
+            publisher._verify_git_artifacts(
+                checkout,
+                "HEAD",
+                {"docsem/test/tasks.jsonl": artifact},
+                "committed",
+            )
+        root.cleanup()
+
+    def _git_backend_fixture(self, entries):
+        root = tempfile.TemporaryDirectory()
+        base_root = Path(root.name)
+        remote = base_root / "remote.git"
+        seed = base_root / "seed"
+        subprocess.run(
+            ["git", "init", "--bare", "--initial-branch=main", str(remote)],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            ["git", "init", "--initial-branch=main", str(seed)],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        for path, payload in entries.items():
+            destination = seed / path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if isinstance(payload, tuple) and payload[0] == "symlink":
+                destination.symlink_to(payload[1])
+            else:
+                destination.write_bytes(payload)
+        subprocess.run(["git", "add", "--all"], cwd=seed, check=True)
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.test",
+                "commit",
+                "-m",
+                "seed",
+            ],
+            cwd=seed,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            ["git", "remote", "add", "origin", str(remote)], cwd=seed, check=True
+        )
+        subprocess.run(
+            ["git", "push", "origin", "main"],
+            cwd=seed,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        base = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=seed,
+            check=True,
+            stdout=subprocess.PIPE,
+            text=True,
+        ).stdout.strip()
+        sealed = base_root / "tasks.jsonl"
+        sealed.write_bytes(self.fixture.tasks_bytes)
+        sealed.chmod(0o400)
+        artifact = publisher.Artifact(
+            sealed,
+            len(self.fixture.tasks_bytes),
+            _digest(self.fixture.tasks_bytes),
+        )
+        return root, remote, base, artifact
 
 
 if __name__ == "__main__":

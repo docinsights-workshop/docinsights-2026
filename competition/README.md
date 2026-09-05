@@ -153,7 +153,12 @@ digests, bases, publication order, and recovery actions. It performs no write.
 It refuses dirty or stale source state, remote movement, linked/special/extra
 staging entries, unsafe private modes, mismatched release manifests or hashes,
 public label-bearing paths, and a dataset card that cannot be reproduced from
-the same audited public snapshot.
+the same audited public snapshot. The local card template must be byte-identical
+to `README.md` at the pinned public Hugging Face base; only the deterministic
+test-split transform is accepted. The dry run also requires the submissions
+dataset to be private and the public dataset to be public, and scans both
+current public trees plus all reachable history for split-sensitive private
+paths, archives/polyglots, and forbidden validation/test fields.
 
 After an organizer has reviewed that exact plan, the only write form is the
 same command plus:
@@ -168,8 +173,11 @@ audited `docsem/test/**` files to canonical GitHub, then commits the
 byte-identical public `test/**` tree and matching `README.md` to the public
 Hugging Face dataset. Hugging Face writes use exact-parent compare-and-swap;
 GitHub uses a disposable clone and a normal fast-forward push. A partial
-failure leaves test submissions disabled, preserves any completed safe commit,
-and requires a fresh dry-run with new exact bases. Successful publication ends
+failure reports each completed target and its commit revision, leaves test
+submissions disabled, preserves any completed safe commit, and requires a fresh
+dry-run with new exact bases. The Git adapter disables hooks, rejects repository
+attributes and linked/special target parents, and verifies staged and committed
+blobs byte-for-byte before pushing. Successful publication ends
 with byte/hash reconciliation plus a reachable-public-history scan and emits
 only revisions, counts, and digests. It never activates test submissions or
 publishes a test leaderboard.
