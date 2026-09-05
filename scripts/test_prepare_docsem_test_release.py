@@ -618,6 +618,49 @@ class PrepareDocsemTestReleaseTests(unittest.TestCase):
 
         self.assertEqual(validated.label_rows[0]["evidence"], [token])
 
+    def test_accepts_a_three_character_lowercase_opaque_token_after_raster_ocr(self):
+        """Catches raising the opaque lower bound or rejecting lowercase letters."""
+        source = self.make_source()
+        token = "a9z"
+        source.labels[0]["evidence"] = [token]
+        source.write_labels()
+        pdf_path = source.root / "documents" / "synthetic-1.pdf"
+        replace_with_image_only_pdf(pdf_path, f"{token}: Raster evidence header")
+        with release_module.fitz.open(pdf_path) as document:
+            self.assertEqual(document[0].get_text().strip(), "")
+
+        validated = validate_source(source.root, (), ())
+
+        self.assertEqual(validated.label_rows[0]["evidence"], [token])
+
+    def test_accepts_an_unbounded_legacy_numeric_token_after_raster_ocr(self):
+        """Catches applying the opaque six-character cap to legacy numeric IDs."""
+        source = self.make_source()
+        token = "b1234567"
+        source.labels[0]["evidence"] = [token]
+        source.write_labels()
+        pdf_path = source.root / "documents" / "synthetic-1.pdf"
+        replace_with_image_only_pdf(pdf_path, f"{token}: Raster evidence header")
+        with release_module.fitz.open(pdf_path) as document:
+            self.assertEqual(document[0].get_text().strip(), "")
+
+        validated = validate_source(source.root, (), ())
+
+        self.assertEqual(validated.label_rows[0]["evidence"], [token])
+
+    def test_rejects_opaque_evidence_with_whitespace_before_the_header_colon(self):
+        """Catches accepting an OCR token whose colon is not immediately adjacent."""
+        source = self.make_source()
+        token = "a9z"
+        source.labels[0]["evidence"] = [token]
+        source.write_labels()
+        pdf_path = source.root / "documents" / "synthetic-1.pdf"
+        replace_with_image_only_pdf(pdf_path, f"{token} : Raster evidence header")
+        with release_module.fitz.open(pdf_path) as document:
+            self.assertEqual(document[0].get_text().strip(), "")
+
+        self.assert_rejected(source)
+
     def test_rejects_an_opaque_header_near_miss_in_an_image_only_ocr_workflow(self):
         """Catches accepting an overlong token that merely starts with required evidence."""
         source = self.make_source()
