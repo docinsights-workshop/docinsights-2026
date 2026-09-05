@@ -28,7 +28,7 @@ class Source:
 class Hf:
     def __init__(self, root, base):
         self.root, self.revision, self.private = Path(root), base, False
-        self.events = []; self.history = [(base, self.tree())]
+        self.events = []; self.history = [(base, self.tree())]; self.partial_once = False; self.upload_roots = []
     def tree(self): return {p.relative_to(self.root).as_posix(): p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
     def state(self): return publisher.RemoteState(self.revision, self.private)
     def inventory(self, revision): return {name: publisher.RemoteFile(len(data), sha(data)) for name, data in self.tree().items()}
@@ -36,10 +36,15 @@ class Hf:
     def history_snapshots(self): return tuple(self.history)
     def upload_large_folder(self, stage, expected_parent):
         self.events.append("upload")
+        self.upload_roots.append(Path(stage))
         if expected_parent != self.revision: raise publisher.RemoteMovedError("moved")
-        for source in (Path(stage) / "test").rglob("*"):
+        sources = [source for source in (Path(stage) / "test").rglob("*") if source.is_file()]
+        if self.partial_once:
+            sources = sources[:1]; self.partial_once = False
+        for source in sources:
             if source.is_file():
-                destination = self.root / source.relative_to(stage); destination.parent.mkdir(parents=True, exist_ok=True); os.link(source, destination)
+                destination = self.root / source.relative_to(stage); destination.parent.mkdir(parents=True, exist_ok=True)
+                if not destination.exists(): os.link(source, destination)
         self.revision = "c" * 40; self.history.append((self.revision, self.tree())); return self.revision
     def commit_docs(self, files, expected_parent):
         self.events.append("docs")
@@ -53,21 +58,24 @@ class PublicReleaseTests(unittest.TestCase):
         if publisher is None: self.fail("dedicated public-only publisher is missing")
         self.original_audit = publisher.audit_public_payload; self.original_renderer = publisher.render_test_ready_dataset_card
         self.original_source_root = publisher.SOURCE_TASK_ROOT
+        self.original_readme = publisher.TRACKED_README; self.original_instructions = publisher.TRACKED_INSTRUCTIONS
         publisher.audit_public_payload = self.audit_fixture
         publisher.render_test_ready_dataset_card = self.render_fixture
         self.temp = tempfile.TemporaryDirectory(); root = Path(self.temp.name)
-        self.source, self.stage, self.dataset = root / "source", root / "stage", root / "dataset"
-        (self.source / "documents").mkdir(parents=True); self.dataset.mkdir()
+        self.source, self.stage, self.dataset, self.templates = root / "source", root / "stage", root / "dataset", root / "templates"
+        (self.source / "documents").mkdir(parents=True); self.dataset.mkdir(); self.templates.mkdir()
         self.ids = ("test_000001", "test_000002")
         self.rows = [{"instance_id": item, "user_query": "PUBLIC-QUERY-NOT-PRINTED", "document_pdf": f"documents/{item}.pdf"} for item in self.ids]
         (self.source / "tasks.jsonl").write_bytes(b"".join(canonical(row) for row in self.rows))
         for item in self.ids: (self.source / "documents" / f"{item}.pdf").write_bytes(pdf_bytes())
         self.train, self.validation = root / "train.jsonl", root / "validation.jsonl"
         self.train.write_bytes(canonical({"instance_id":"train_000001","user_query":"q","document_pdf":"documents/train_000001.pdf"})); self.validation.write_bytes(canonical({"instance_id":"val_000001","user_query":"q","document_pdf":"documents/val_000001.pdf"}))
-        self.readme = b"---\nconfigs:\n- config_name: tasks\n  data_files:\n  - split: validation\n    path: val/tasks.jsonl\n- config_name: labels\n  data_files:\n  - split: train\n    path: train/labels.jsonl\n---\nBase.\n"; self.instructions = b"Existing train and validation behavior.\n"
+        self.readme = b"---\nconfigs:\n- config_name: tasks\n  data_files:\n  - split: validation\n    path: val/tasks.jsonl\n- config_name: labels\n  data_files:\n  - split: train\n    path: train/labels.jsonl\n---\nHeld-out test: not released in the current public payload.\nNo official held-out test payload is present in this revision.\n"; self.instructions = b"Train and validation behavior remains accurate. Every content block begins with `b01: content`.\n"
         (self.dataset / "README.md").write_bytes(self.readme); (self.dataset / "INSTRUCTIONS.md").write_bytes(self.instructions); (self.dataset / "train").mkdir(); (self.dataset / "train/labels.jsonl").write_bytes(b"train labels permitted\n")
+        (self.templates / "README.md").write_bytes(self.readme); (self.templates / "INSTRUCTIONS.md").write_bytes(self.instructions)
         self.hf = Hf(self.dataset, self.BASE)
         publisher.SOURCE_TASK_ROOT = self.source
+        publisher.TRACKED_README = self.templates / "README.md"; publisher.TRACKED_INSTRUCTIONS = self.templates / "INSTRUCTIONS.md"
         self.state = publisher.SourceState(publisher.SOURCE_CHECKOUT, publisher.SOURCE_HEAD, publisher.SOURCE_PARENT, False, publisher.SOURCE_MANIFEST_SHA256)
         self.config = publisher.ReleaseConfig(self.source, self.stage, self.train, self.validation, self.BASE)
     def audit_fixture(self, stage):
@@ -77,7 +85,7 @@ class PublicReleaseTests(unittest.TestCase):
     def render_fixture(self, stage, *, card_template_path):
         return Path(card_template_path).read_bytes().replace(b"  - split: validation\n    path: val/tasks.jsonl\n", b"  - split: validation\n    path: val/tasks.jsonl\n  - split: test\n    path: test/tasks.jsonl\n")
     def cleanup(self):
-        publisher.audit_public_payload = self.original_audit; publisher.render_test_ready_dataset_card = self.original_renderer; publisher.SOURCE_TASK_ROOT = self.original_source_root
+        publisher.audit_public_payload = self.original_audit; publisher.render_test_ready_dataset_card = self.original_renderer; publisher.SOURCE_TASK_ROOT = self.original_source_root; publisher.TRACKED_README = self.original_readme; publisher.TRACKED_INSTRUCTIONS = self.original_instructions
     def tearDown(self): self.cleanup(); self.temp.cleanup()
     def release(self, **kwargs):
         if not self.stage.exists(): publisher.prepare_stage(self.config, source=Source(self.state))
@@ -117,9 +125,25 @@ class PublicReleaseTests(unittest.TestCase):
         self.config = publisher.ReleaseConfig(self.source, self.stage, self.train, self.validation, "c" * 40)
         with self.assertRaises(publisher.ReleaseError): self.release(publish=True, confirm="PUBLISH")
         self.assertEqual(self.hf.events, ["upload"])
-    def test_partial_upload_resumes_without_docs_and_complete_is_idempotent(self):
-        self.release(); self.hf.upload_large_folder(self.stage, self.BASE); self.release(publish=True, confirm="PUBLISH", expected_complete_base="c" * 40); self.assertEqual(self.hf.events, ["upload", "docs"])
+    def test_one_file_partial_upload_resumes_from_same_uploader_cache_without_docs(self):
+        self.hf.partial_once = True
+        self.release(publish=True, confirm="PUBLISH")
+        self.config = publisher.ReleaseConfig(self.source, self.stage, self.train, self.validation, "c" * 40)
+        self.release(publish=True, confirm="PUBLISH")
+        self.assertEqual(self.hf.events, ["upload", "upload", "docs"])
+        self.assertEqual(self.hf.upload_roots[0], self.hf.upload_roots[1])
+    def test_complete_release_is_idempotent(self):
+        self.release(publish=True, confirm="PUBLISH"); self.assertEqual(self.hf.events, ["upload", "docs"])
         result = self.release(publish=True, confirm="PUBLISH", expected_complete_base="d" * 40); self.assertEqual(result["mode"], "already-complete"); self.assertEqual(self.hf.events, ["upload", "docs"])
+
+    def test_generated_docs_replace_template_contradictions(self):
+        docs = publisher._release_docs()
+        self.assertNotIn(b"not released in the current public payload", docs["README.md"])
+        self.assertNotIn(b"No official held-out test payload", docs["README.md"])
+        self.assertIn(b"1,730 test tasks and PDFs", docs["README.md"])
+        self.assertIn(b"labels config remains train-only", docs["README.md"])
+        self.assertNotIn(b"Every content block begins with `b01", docs["INSTRUCTIONS.md"])
+        self.assertIn(b"before the colon exactly, including punctuation", docs["INSTRUCTIONS.md"])
     def test_private_target_or_public_history_test_labels_are_refused(self):
         self.hf.private = True
         with self.assertRaises(publisher.ReleaseError): self.release()

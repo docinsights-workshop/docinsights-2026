@@ -298,13 +298,49 @@ def _release_docs() -> dict[str, bytes]:
     if base_readme.count(marker) != 1:
         raise ReleaseError("Tracked dataset card cannot be rendered deterministically.")
     readme = base_readme.replace(marker, marker + b"  - split: test\n    path: test/tasks.jsonl\n", 1)
+    replacements = {
+        b"- **Held-out test:** not released in the current public payload. After the organizers publish an audited release, the `test` task split will contain tasks and PDFs without labels.": b"- **Held-out test:** 1,730 public test tasks and PDFs are available without labels; submissions and scoring remain closed.",
+        b"No official held-out test payload is present in this revision, so the tracked dataset-card configuration intentionally declares only the existing train and validation task files. The release generator adds the `test` configuration to a deterministic release-card payload only after an explicitly selected public staging tree passes the complete audit. It must not be populated from similarly named local directories or archives.": b"The audited release exposes the public `test` task split with 1,730 tasks and byte-identical PDFs. The labels configuration remains train-only; validation and test labels are not public.",
+        b"- Declared the held-out `test` task-split contract and participant policy. The official test files are not included in this revision and the test submission window is not open.": b"- Released the audited public held-out test inputs. Test submission and scoring remain closed.",
+        b"available only after the audited release is published.": b"available in this audited public release.",
+        b"once released.": b"in this audited release.",
+    }
+    for old, new in replacements.items():
+        if old in readme:
+            readme = readme.replace(old, new)
+    readme = readme.replace(
+        b"Held-out test: not released in the current public payload.",
+        b"Held-out test: 1,730 public test tasks and PDFs are available; submissions and scoring remain closed.",
+    ).replace(
+        b"No official held-out test payload is present in this revision.",
+        b"The audited public test payload contains 1,730 tasks and PDFs; labels config remains train-only.",
+    )
+    start = b"### Held-out test submission policy\n"
+    end = b"The public release contains only tasks, PDFs, checksums, and sanitized release metadata."
+    if start in readme and end in readme:
+        prefix, remainder = readme.split(start, 1)
+        _, suffix = remainder.split(end, 1)
+        readme = prefix + start + b"\nPublic test inputs are available, but test submissions and scoring remain closed until a separate organizer announcement.\n\n" + end + suffix
+    readme = readme.replace(
+        b"- `evidence` must be a non-empty list of visible PDF block IDs such as `b01`.",
+        b"- For train and validation, `evidence` is a non-empty list of visible PDF block IDs such as `b01`; for test, copy the opaque token before the colon exactly, including punctuation.",
+    ).replace(
+        b"Only answer accuracy and evidence F1 are returned for the first held-out test attempt; later-attempt metrics and all per-example test results remain organizer-only until finalization.",
+        b"Test submissions and scoring remain closed; no held-out test metrics or per-example results are returned in this release.",
+    )
     readme += (
         b"\n## Held-out test release\n\n"
-        b"Public held-out test inputs are available in the `test` task split; submissions remain closed. "
+        b"Public held-out test inputs are available in the `test` task split: 1,730 test tasks and PDFs; submissions remain closed and scoring remains closed. "
         b"This audited release is `docsem-test-a4205880-r1`, derived from upstream `a4205880`. "
         b"Collision-remapped test filenames preserve byte-identical PDFs. This manifest does not claim those remapped names are on GitHub main.\n"
     )
-    instructions = base_instructions + (
+    instructions = base_instructions.replace(
+        b"Every content block begins with a visible identifier in the form `b01: <block content>`; use these identifiers when reporting evidence.",
+        b"For train and validation, visible block identifiers such as `b01:` remain the evidence convention. For test, copy the opaque visible token immediately before the colon exactly, including punctuation; do not infer a closed token grammar.",
+    ).replace(
+        b"Every content block begins with `b01: content`.",
+        b"Train and validation use visible block identifiers; test uses the opaque token before the colon exactly, including punctuation.",
+    ) + (
         b"\n## Held-out test evidence\n\n"
         b"For test instances, copy the opaque visible token immediately before the block colon exactly, including punctuation. "
         b"Do not infer a closed token grammar. Test submissions remain closed.\n"
@@ -315,9 +351,14 @@ def _release_docs() -> dict[str, bytes]:
 def _make_upload_root(stage: Path) -> Path:
     """Make an uploader cache outside the audited stage without copying PDFs."""
     try:
-        root = Path(tempfile.mkdtemp(prefix="docsem-public-upload-", dir=stage.parent))
+        root = stage.parent / f".{stage.name}-upload-{RELEASE_ID}"
         if root == stage or stage in root.parents:
             raise ReleaseError("Upload cache overlaps the audited stage.")
+        if root.exists():
+            if not root.is_dir() or root.is_symlink() or not (root / "test").is_dir():
+                raise ReleaseError("Existing upload cache is unsafe.")
+            return root
+        root.mkdir(mode=0o700)
         (root / "test/documents").mkdir(parents=True)
         for name in ("tasks.jsonl", "release.json", "SHA256SUMS"):
             shutil.copyfile(stage / "test" / name, root / "test" / name)
@@ -365,16 +406,17 @@ def _stage_expectations(stage: Path) -> tuple[dict[str, bytes], dict[str, Remote
 def _test_status(hf: HfBackend, revision: str, metadata: Mapping[str, bytes], expected: Mapping[str, RemoteFile]) -> str:
     inventory = dict(hf.inventory(revision)); names = {name for name in inventory if name.startswith("test/")}
     if not names: return "missing"
-    if names != set(expected): raise ReleaseError("Remote test inventory is not exact.")
+    if not names.issubset(expected): raise ReleaseError("Remote test inventory is not exact.")
     if any(
         inventory[name] != expected[name]
         for name in expected
-        if name.startswith("test/documents/")
-    ) or any(inventory[name].size != len(payload) for name, payload in metadata.items()):
+        if name.startswith("test/documents/") and name in inventory
+    ) or any(inventory[name].size != len(payload) for name, payload in metadata.items() if name in inventory):
         raise ReleaseError("Remote test file hash or size differs.")
-    actual = hf.read(revision, tuple(metadata))
-    if actual != metadata: raise ReleaseError("Remote test metadata differs.")
-    return "complete"
+    present_metadata = tuple(name for name in metadata if name in names)
+    if hf.read(revision, present_metadata) != {name: metadata[name] for name in present_metadata}:
+        raise ReleaseError("Remote test metadata differs.")
+    return "complete" if names == set(expected) else "partial"
 
 
 def run_release(config: ReleaseConfig, *, source: SourceInspector, hf: HfBackend, publish: bool = False, confirm: str | None = None, expected_complete_base: str | None = None) -> dict:
@@ -394,14 +436,16 @@ def run_release(config: ReleaseConfig, *, source: SourceInspector, hf: HfBackend
     if test == "complete" and docs_complete:
         return {**result, "mode": "already-complete", "revision": state.revision}
     current = state.revision
-    if test == "missing":
+    if test in {"missing", "partial"}:
         hf.upload_large_folder(_make_upload_root(Path(config.stage)), current)
         current = hf.state().revision
         if not _REVISION.fullmatch(current): raise ReleaseError("Test upload did not produce an exact revision.")
         after_upload = dict(hf.inventory(current))
         if {name: info for name, info in after_upload.items() if not name.startswith("test/")} != {name: info for name, info in before.items() if not name.startswith("test/")}:
             raise ReleaseError("A non-test path changed before documentation publication.")
-        _scan_history(hf); _test_status(hf, current, metadata, expected)
+        _scan_history(hf)
+        if _test_status(hf, current, metadata, expected) == "partial":
+            return {**result, "mode": "partial-upload", "revision": current}
     else:
         current = state.revision
     # Exact-parent CAS for both documents is intentionally the final operation.
