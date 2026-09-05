@@ -1,6 +1,11 @@
+import csv
 import hashlib
 import json
+import os
+import shutil
 import stat
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -30,6 +35,7 @@ from test_organizer_data import (
     TASK_DIGEST,
     fixture_files,
 )
+from test_policy import OAuthIdentity, canonical_submission_hash
 
 
 PRIVATE_REPO = "private/docsem-organizer-ledger"
@@ -164,6 +170,66 @@ class OrganizerAppTests(unittest.TestCase):
     def test_build_is_offline_and_does_not_resolve_the_private_repository(self):
         demo = build_app(environment=organizer_environment(), api=NoNetworkHub())
         self.assertIsNotNone(demo)
+
+    def test_readme_app_file_starts_from_a_clean_organizer_only_bundle(self):
+        """Catches undeclared imports from the sibling participant Space."""
+
+        source = Path(__file__).resolve().parent
+        readme = (source / "README.md").read_text(encoding="utf-8")
+        app_file = next(
+            line.split(":", 1)[1].strip()
+            for line in readme.splitlines()
+            if line.startswith("app_file:")
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            bundle = Path(directory) / "organizer-space"
+            shutil.copytree(
+                source,
+                bundle,
+                ignore=shutil.ignore_patterns("test_*.py", "__pycache__"),
+            )
+            runner = """
+import importlib.util
+import sys
+from pathlib import Path
+from fastapi.testclient import TestClient
+
+bundle = Path(sys.argv[1])
+app_path = bundle / sys.argv[2]
+sys.path.insert(0, str(bundle))
+spec = importlib.util.spec_from_file_location("docsem_organizer_app", app_path)
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+class NoNetworkHub:
+    def __getattr__(self, name):
+        raise AssertionError(f"startup must not call Hub method {name}")
+
+demo = module.build_app(
+    environment={
+        "ORGANIZER_READ_TOKEN": "clean-bundle-token",
+        "PRIVATE_REPO_ID": "private/docsem-ledger",
+    },
+    api=NoNetworkHub(),
+)
+client = TestClient(demo.app, raise_server_exceptions=False)
+assert client.get("/").status_code == 200
+assert client.get("/config").status_code == 200
+"""
+            result = subprocess.run(
+                [sys.executable, "-c", runner, str(bundle), app_file],
+                cwd=bundle,
+                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        self.assertEqual(
+            result.returncode,
+            0,
+            f"declared app_file failed in clean bundle:\n{result.stdout}\n{result.stderr}",
+        )
 
     def test_refresh_resolves_head_then_reads_one_exact_private_sha(self):
         hub = HeadAwareHub()
@@ -415,6 +481,82 @@ class OrganizerAppTests(unittest.TestCase):
             ).read_text(encoding="utf-8")
         self.assertNotIn(",=1+1,", text)
         self.assertIn(",'=1+1,", text)
+
+    def test_csv_export_neutralizes_formula_cells_in_audit_headers(self):
+        """Catches a release identifier becoming an executable header cell."""
+
+        files = fixture_files()
+        malicious_release = '=HYPERLINK("https://invalid.example","open")'
+
+        def replace_release_id(value):
+            if isinstance(value, dict):
+                return {
+                    key: malicious_release
+                    if key == "release_id"
+                    else replace_release_id(item)
+                    for key, item in value.items()
+                }
+            if isinstance(value, list):
+                return [replace_release_id(item) for item in value]
+            return value
+
+        governed_paths = [
+            path
+            for path in files
+            if path == "private/test_release.json"
+            or path.startswith("attempts/test/")
+            or path.startswith("projections/test/")
+            or path.startswith("exclusions/test/")
+            or path.startswith("adjudications/test/")
+        ]
+        for path in governed_paths:
+            value = replace_release_id(json.loads(files[path]))
+            if path.startswith("attempts/test/"):
+                value["submission_hash"] = canonical_submission_hash(
+                    value["predictions"],
+                    "test",
+                    malicious_release,
+                    OAuthIdentity(
+                        value["hf_subject"],
+                        value["hf_username"],
+                        value["verified_email"],
+                    ),
+                )
+            files[path] = (
+                json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"
+            ).encode()
+
+        attempt_digests = {}
+        for path in governed_paths:
+            if path.startswith("attempts/test/"):
+                record = json.loads(files[path])
+                attempt_digests[record["submission_id"]] = hashlib.sha256(
+                    files[path]
+                ).hexdigest()
+        for path in governed_paths:
+            if not path.startswith("projections/test/accounts/"):
+                continue
+            projection = json.loads(files[path])
+            for reference in projection["attempts"]:
+                reference["record_sha256"] = attempt_digests[reference["submission_id"]]
+            files[path] = (
+                json.dumps(projection, sort_keys=True, separators=(",", ":")) + "\n"
+            ).encode()
+
+        state, _ = self.refresh(HeadAwareHub(files=files))
+        with tempfile.TemporaryDirectory() as directory:
+            path = export_csv(state, list(state.rows), directory=directory)
+            with Path(path).open(encoding="utf-8", newline="") as stream:
+                rows = list(csv.reader(stream))
+
+        release_header = next(row for row in rows if row[:1] == ["release_id"])
+        self.assertEqual(release_header, ["release_id", "'" + malicious_release])
+        for row in rows:
+            for cell in row:
+                self.assertFalse(
+                    cell.lstrip().startswith(("=", "+", "-", "@", "\t", "\r", "\n")),
+                    (row, cell),
+                )
 
     def test_callbacks_reject_unverified_or_mutated_state(self):
         state, _ = self.refresh()

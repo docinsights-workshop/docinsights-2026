@@ -347,20 +347,24 @@ def export_csv(
             evaluator_revisions = sorted(
                 {str(row["scoring_private_revision"]) for row in authoritative}
             )
-            writer.writerow(["DocSem organizer export", "verified pinned snapshot"])
-            writer.writerow(["repository_id", state.snapshot.repo_id])
-            writer.writerow(["repository_revision", state.revision])
-            writer.writerow(["release_id", release["release_id"]])
-            writer.writerow(["task_manifest_sha256", release["task_manifest_sha256"]])
-            writer.writerow(["gold_sha256", release["gold_sha256"]])
-            writer.writerow(["evaluator_revisions", ";".join(evaluator_revisions)])
-            writer.writerow(["attempts_exported", len(selected)])
-            writer.writerow([])
-            writer.writerow(EXPORT_FIELDS)
+            _write_csv_row(
+                writer, ["DocSem organizer export", "verified pinned snapshot"]
+            )
+            _write_csv_row(writer, ["repository_id", state.snapshot.repo_id])
+            _write_csv_row(writer, ["repository_revision", state.revision])
+            _write_csv_row(writer, ["release_id", release["release_id"]])
+            _write_csv_row(
+                writer, ["task_manifest_sha256", release["task_manifest_sha256"]]
+            )
+            _write_csv_row(writer, ["gold_sha256", release["gold_sha256"]])
+            _write_csv_row(
+                writer, ["evaluator_revisions", ";".join(evaluator_revisions)]
+            )
+            _write_csv_row(writer, ["attempts_exported", len(selected)])
+            _write_csv_row(writer, [])
+            _write_csv_row(writer, EXPORT_FIELDS)
             for row in selected:
-                writer.writerow(
-                    [_safe_csv_value(row.get(name, "")) for name in EXPORT_FIELDS]
-                )
+                _write_csv_row(writer, [row.get(name, "") for name in EXPORT_FIELDS])
         if path.stat().st_size > max_bytes:
             raise OrganizerAppError("Organizer export is unavailable.")
         path.chmod(0o600)
@@ -632,6 +636,12 @@ def _safe_csv_value(value: object) -> object:
     ):
         return "'" + value
     return value
+
+
+def _write_csv_row(writer: csv.writer, values: Sequence[object]) -> None:
+    """Apply spreadsheet-formula safety to every string cell in a CSV row."""
+
+    writer.writerow([_safe_csv_value(value) for value in values])
 
 
 def _export_root(directory: str | os.PathLike | None) -> Path:

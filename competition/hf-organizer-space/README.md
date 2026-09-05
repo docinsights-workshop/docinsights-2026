@@ -16,6 +16,9 @@ The Space is read-only. It resolves the private test-ledger dataset HEAD only
 after an organizer requests a refresh, pins all reconstruction to that exact
 commit SHA, and refuses data whose release, digest, immutable-attempt, account
 projection, organizer projection, exclusion, or adjudication checks fail.
+The directory is a self-contained Space bundle: `app.py`, `organizer_data.py`,
+and `organizer_contract.py` are deployed together; no sibling participant-Space
+source is imported at runtime.
 
 Required Space secrets:
 

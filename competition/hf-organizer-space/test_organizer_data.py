@@ -1,6 +1,7 @@
 import datetime as dt
 import hashlib
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -18,10 +19,17 @@ from organizer_data import (
     organizer_rows,
     verify_snapshot,
 )
-from scoring import score_predictions
-import test_contract
-from test_policy import OAuthIdentity, account_key
-from test_store import HubTestStore, TestStoreError
+
+# Participant-producer integration tests intentionally load the producer from
+# the repository.  Production organizer modules must remain package-local.
+_PARTICIPANT_SPACE = Path(__file__).resolve().parents[1] / "hf-space"
+if str(_PARTICIPANT_SPACE) not in sys.path:
+    sys.path.insert(0, str(_PARTICIPANT_SPACE))
+
+from scoring import score_predictions  # noqa: E402
+import test_contract  # noqa: E402
+from test_policy import OAuthIdentity, account_key  # noqa: E402
+from test_store import HubTestStore, TestStoreError  # noqa: E402
 
 
 REVISION = "f" * 40

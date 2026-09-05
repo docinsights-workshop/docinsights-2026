@@ -12,7 +12,6 @@ import hashlib
 import json
 import math
 import re
-import sys
 import tempfile
 import uuid
 from collections import defaultdict
@@ -23,23 +22,17 @@ from pathlib import Path
 from huggingface_hub import HfApi
 
 
-_HF_SPACE = Path(__file__).resolve().parents[1] / "hf-space"
-if str(_HF_SPACE) not in sys.path:
-    sys.path.insert(0, str(_HF_SPACE))
-
-from test_policy import (  # noqa: E402
-    OAuthIdentity,
-    TestPolicyError,
-    canonical_submission_hash,
-    select_best_attempt,
-)
-from test_contract import (  # noqa: E402
+from organizer_contract import (
     MAX_INSTANCE_ID_CHARACTERS,
     MAX_LEDGER_FILE_BYTES,
     MAX_PRIVATE_TEXT_CHARACTERS,
     MAX_TEST_ROWS,
+    OAuthIdentity,
+    TestPolicyError,
+    canonical_submission_hash,
     is_bounded_private_text,
     repository_id,
+    select_best_attempt,
     validate_test_predictions,
 )
 
