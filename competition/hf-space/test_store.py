@@ -136,7 +136,9 @@ class HubTestStore:
                 )
                 attempts = [*snapshot.attempts, record]
                 best = select_best_attempt(attempts)
-                account_projection = _account_projection(key, snapshot.policy, attempts, best)
+                account_projection = _account_projection(
+                    key, snapshot.policy, attempts, best
+                )
                 organizer_projection = _organizer_projection(
                     snapshot.organizer,
                     key,
@@ -167,20 +169,26 @@ class HubTestStore:
                     raise
                 return TestReceipt(True, attempt_number, candidate_id, accepted_at)
             except HfHubHTTPError:
-                raise TestStoreError("Test submission is temporarily unavailable.") from None
+                raise TestStoreError(
+                    "Test submission is temporarily unavailable."
+                ) from None
             except _ReleaseClosed:
                 raise TestStoreError("Test submissions are not open.") from None
             except _InvalidSubmission:
                 raise TestStoreError("Test submission could not be accepted.") from None
             except Exception:
-                raise TestStoreError("Test submission is temporarily unavailable.") from None
+                raise TestStoreError(
+                    "Test submission is temporarily unavailable."
+                ) from None
         raise TestStoreError("Test submission is temporarily unavailable.")
 
     def account_history(self, identity) -> list[dict]:
         try:
             key = _complete_identity_key(identity)
         except Exception:
-            raise TestStoreError("Test submission history is temporarily unavailable.") from None
+            raise TestStoreError(
+                "Test submission history is temporarily unavailable."
+            ) from None
         try:
             self._require_config_paths()
             sha = self._head_sha()
@@ -190,7 +198,9 @@ class HubTestStore:
                 for attempt in self._load_account_attempts(key, sha, policy)
             ]
         except Exception:
-            raise TestStoreError("Test submission history is temporarily unavailable.") from None
+            raise TestStoreError(
+                "Test submission history is temporarily unavailable."
+            ) from None
 
     def find_exact_attempt(self, identity, metadata, predictions) -> dict | None:
         """Return an immutable matching attempt before any repeat scoring occurs."""
@@ -213,7 +223,9 @@ class HubTestStore:
             existing = _find_submission(snapshot.attempts, submission_hash)
             return _json_copy(existing) if existing is not None else None
         except Exception:
-            raise TestStoreError("Test submission is temporarily unavailable.") from None
+            raise TestStoreError(
+                "Test submission is temporarily unavailable."
+            ) from None
 
     def _load_snapshot(self, key: str) -> _Snapshot:
         self._require_config_paths()
@@ -271,7 +283,8 @@ class HubTestStore:
             if not isinstance(submission_id, str) or not submission_id:
                 raise _Unavailable()
             path = f"attempts/test/{key}/{submission_id}.json"
-            record = self._read_json_required(path, sha)
+            record_raw = self._read_required(path, sha)
+            record = _decode_json(record_raw)
             _validate_release_state(record, policy)
             _validate_scoring_state(record, policy)
             if (
@@ -280,6 +293,8 @@ class HubTestStore:
                 or record.get("submission_id") != submission_id
                 or record.get("attempt_number") != expected_number
                 or reference.get("attempt_number") != expected_number
+                or reference.get("record_sha256")
+                != hashlib.sha256(record_raw).hexdigest()
             ):
                 raise _Unavailable()
             attempts.append(record)
@@ -340,11 +355,11 @@ def _submission_metadata(metadata) -> dict:
         "submission_name",
     )
     result = {}
-    for field in fields:
-        value = metadata.get(field)
+    for name in fields:
+        value = metadata.get(name)
         if not isinstance(value, str) or not value.strip():
             raise _InvalidSubmission()
-        result[field] = value.strip()
+        result[name] = value.strip()
     return result
 
 
@@ -395,7 +410,11 @@ def _decode_json(raw: bytes):
 
 def _validate_gold(raw: bytes):
     try:
-        rows = [json.loads(line) for line in raw.decode("utf-8").splitlines() if line.strip()]
+        rows = [
+            json.loads(line)
+            for line in raw.decode("utf-8").splitlines()
+            if line.strip()
+        ]
     except (UnicodeDecodeError, json.JSONDecodeError):
         raise _Unavailable() from None
     if not rows or any(not isinstance(row, dict) for row in rows):
@@ -423,14 +442,22 @@ def _verify_release(snapshot: _Snapshot, metadata: Mapping):
 
 
 def _find_submission(attempts, submission_hash):
-    matches = [attempt for attempt in attempts if attempt.get("submission_hash") == submission_hash]
+    matches = [
+        attempt
+        for attempt in attempts
+        if attempt.get("submission_hash") == submission_hash
+    ]
     if len(matches) > 1:
         raise _Unavailable()
     return matches[0] if matches else None
 
 
 def _accepted_at(now) -> str:
-    if not isinstance(now, dt.datetime) or now.tzinfo is None or now.utcoffset() is None:
+    if (
+        not isinstance(now, dt.datetime)
+        or now.tzinfo is None
+        or now.utcoffset() is None
+    ):
         raise _InvalidSubmission()
     return now.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -480,6 +507,7 @@ def _account_projection(key, policy, attempts, best) -> dict:
                 **_release_state(policy),
                 "submission_id": attempt["submission_id"],
                 "attempt_number": attempt["attempt_number"],
+                "record_sha256": hashlib.sha256(_json_bytes(attempt)).hexdigest(),
             }
             for attempt in attempts
         ],
@@ -527,20 +555,23 @@ def _release_state(policy: TestReleasePolicy) -> dict:
 def _validate_release_state(value, policy: TestReleasePolicy):
     if not isinstance(value, Mapping):
         raise _Unavailable()
-    if any(value.get(field) != expected for field, expected in _release_state(policy).items()):
+    if any(
+        value.get(field) != expected
+        for field, expected in _release_state(policy).items()
+    ):
         raise _Unavailable()
 
 
 def _validate_scoring_state(value, policy: TestReleasePolicy):
     if value.get("scoring_gold_sha256") != policy.gold_sha256:
         raise _Unavailable()
-    for field in (
+    for name in (
         "scoring_private_revision",
         "scoring_public_revision",
         "scoring_public_repo_id",
         "scoring_task_manifest_path",
     ):
-        item = value.get(field)
+        item = value.get(name)
         if not isinstance(item, str) or not item.strip():
             raise _Unavailable()
 
@@ -564,7 +595,9 @@ def _json_bytes(value) -> bytes:
     return (serialized + "\n").encode("utf-8")
 
 
-def _commit_operations(key, submission_id, record, account_projection, organizer_projection):
+def _commit_operations(
+    key, submission_id, record, account_projection, organizer_projection
+):
     return [
         CommitOperationAdd(
             path_in_repo=f"attempts/test/{key}/{submission_id}.json",
