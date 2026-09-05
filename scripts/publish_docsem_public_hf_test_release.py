@@ -41,6 +41,23 @@ _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 _FORBIDDEN = re.compile(r"(?:label|answer|evidence|gold|private|source.?mapping|archive|link|solution)", re.I)
 _TEST_PDF_LFS_SUFFIX = b" filter=lfs diff=lfs merge=lfs -text\n"
 _MAX_GITATTRIBUTES_BYTES = 1024 * 1024
+MAX_HISTORY_COMMITS = 10_000
+MAX_HISTORY_METADATA_BYTES = 64 * 1024 * 1024
+_ARCHIVE_SUFFIXES = (".zip", ".tar", ".tar.gz", ".tgz", ".gz", ".7z", ".rar")
+_SPLIT_COMPONENTS = frozenset({"val", "validation", "test"})
+_CONTENT_EXTENSION = re.compile(
+    r"\.(?:pdf|jsonl?|zip|tar|tgz|gz|7z|rar)(?=\.|$)", re.IGNORECASE
+)
+_FORBIDDEN_PUBLIC_PATH_PART = re.compile(
+    r"(?:^|[._-])(?:answers?|evidence|gold|ground[_-]?truth|labels?|mapping|"
+    r"organizer|private|solutions?|archives?)(?:$|[._-])",
+    re.IGNORECASE,
+)
+_FORBIDDEN_PUBLIC_FIELD = re.compile(
+    r"(?:^|[_-])(?:answers?|evidence|gold|ground[_-]?truth|labels?|solutions?|"
+    r"source[_-]?mapping|organizer[_-]?note|private)(?:$|[_-])",
+    re.IGNORECASE,
+)
 
 
 class ReleaseError(RuntimeError):
@@ -442,6 +459,61 @@ def _reconcile_upload_root(root: Path, stage: Path) -> None:
             shutil.copyfile(source, destination)
 
 
+def _safe_relative_path(path: str) -> bool:
+    return (
+        isinstance(path, str)
+        and bool(path)
+        and not path.startswith(("/", "\\"))
+        and "\\" not in path
+        and all(part not in {"", ".", ".."} for part in path.split("/"))
+        and all(ord(character) >= 32 and ord(character) != 127 for character in path)
+    )
+
+
+def _contains_forbidden_field(value: object) -> bool:
+    if isinstance(value, dict):
+        return any(
+            not isinstance(key, str)
+            or _FORBIDDEN_PUBLIC_FIELD.search(key)
+            or _contains_forbidden_field(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return any(_contains_forbidden_field(item) for item in value)
+    return False
+
+
+def _split_sensitive_metadata_path(path: str) -> bool:
+    lowered = path.lower()
+    components = lowered.split("/")
+    return (
+        bool(_SPLIT_COMPONENTS.intersection(components[:-1]))
+        and lowered.endswith((".json", ".jsonl"))
+        and len(_CONTENT_EXTENSION.findall(components[-1])) == 1
+    )
+
+
+def _history_path_forbidden(path: str) -> bool:
+    lowered = path.lower()
+    components = lowered.split("/")
+    filename = components[-1]
+    extension_markers = _CONTENT_EXTENSION.findall(filename)
+    if "private" in components:
+        return True
+    if any(
+        re.search(rf"{re.escape(suffix)}(?=\.|$)", filename)
+        for suffix in _ARCHIVE_SUFFIXES
+    ):
+        return True
+    if len(extension_markers) > 1:
+        return True
+    if extension_markers and not re.search(r"\.(?:pdf|jsonl?)\Z", filename):
+        return True
+    if path == "train/labels.jsonl":
+        return False
+    return any(_FORBIDDEN_PUBLIC_PATH_PART.search(component) for component in components)
+
+
 def _forbidden_public_path(path: str) -> bool:
     lower = path.lower()
     if lower == "train/labels.jsonl": return False
@@ -449,9 +521,39 @@ def _forbidden_public_path(path: str) -> bool:
 
 
 def _scan_history(hf: HfBackend) -> None:
-    for _, paths in hf.history_snapshots():
-        if any(_forbidden_public_path(path) for path in paths):
+    snapshots = hf.history_snapshots()
+    if len(snapshots) > MAX_HISTORY_COMMITS:
+        raise ReleaseError("Public history exceeds the bounded reconciliation limit.")
+    metadata_bytes = 0
+    for revision, paths in snapshots:
+        if not _REVISION.fullmatch(revision) or not isinstance(paths, Mapping):
+            raise ReleaseError("Public history contains an invalid snapshot.")
+        names = tuple(paths)
+        if any(not _safe_relative_path(path) for path in names):
+            raise ReleaseError("Public history contains an unsafe path.")
+        if any(_history_path_forbidden(path) for path in names):
             raise ReleaseError("Public history contains a forbidden validation/test path.")
+        for path in names:
+            if not _split_sensitive_metadata_path(path):
+                continue
+            payload = paths[path]
+            if not isinstance(payload, bytes):
+                raise ReleaseError("Public history metadata is invalid.")
+            metadata_bytes += len(payload)
+            if metadata_bytes > MAX_HISTORY_METADATA_BYTES:
+                raise ReleaseError("Public history metadata exceeds the reconciliation limit.")
+            try:
+                if path.lower().endswith(".jsonl"):
+                    value = [
+                        json.loads(line)
+                        for line in payload.decode("utf-8").splitlines()
+                    ]
+                else:
+                    value = json.loads(payload.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ReleaseError("Public history metadata is malformed.") from exc
+            if _contains_forbidden_field(value):
+                raise ReleaseError("Public history metadata contains a forbidden field.")
 
 
 def _expect_state(hf: HfBackend, base: str) -> RemoteState:
@@ -459,6 +561,15 @@ def _expect_state(hf: HfBackend, base: str) -> RemoteState:
     if not isinstance(state, RemoteState) or state.private is not False: raise ReleaseError("The Hugging Face target is not public.")
     if not _REVISION.fullmatch(state.revision): raise ReleaseError("The Hugging Face target revision is invalid.")
     if state.revision != base: raise RemoteMovedError("The Hugging Face target moved from the expected base.")
+    return state
+
+
+def _public_state(hf: HfBackend) -> RemoteState:
+    state = hf.state()
+    if not isinstance(state, RemoteState) or state.private is not False:
+        raise ReleaseError("The Hugging Face target is not public.")
+    if not _REVISION.fullmatch(state.revision):
+        raise ReleaseError("The Hugging Face target revision is invalid.")
     return state
 
 
@@ -584,18 +695,20 @@ def run_release(config: ReleaseConfig, *, source: SourceInspector, hf: HfBackend
         return {**result, "mode": "already-complete", "revision": state.revision}
     current = state.revision
     if test in {"missing", "partial"}:
-        hf.upload_large_folder(_make_upload_root(Path(config.stage)), current)
-        current = hf.state().revision
-        if not _REVISION.fullmatch(current): raise ReleaseError("Test upload did not produce an exact revision.")
+        upload_root = _make_upload_root(Path(config.stage))
+        _expect_state(hf, current)
+        hf.upload_large_folder(upload_root, current)
+        current = _public_state(hf).revision
         after_upload = dict(hf.inventory(current))
         if _audit_non_test_state(hf, current, after_upload, baseline, expected, docs):
             raise ReleaseError("Release documentation changed during test upload.")
         _scan_history(hf)
-        if _test_status(hf, current, metadata, expected) == "partial":
+        if _test_status(hf, current, metadata, expected) != "complete":
             return {**result, "mode": "partial-upload", "revision": current}
     else:
         current = state.revision
     # Exact-parent CAS for both documents is intentionally the final operation.
+    _expect_state(hf, current)
     final = hf.commit_docs(docs, current)
     if not _REVISION.fullmatch(final): raise ReleaseError("Documentation publication did not return an exact revision.")
     if _expect_state(hf, final).revision != final: raise ReleaseError("Final public revision changed unexpectedly.")
@@ -666,13 +779,50 @@ class HuggingFaceHubBackend:
 
     def history_snapshots(self) -> Sequence[tuple[str, Mapping[str, bytes]]]:
         try:
-            commits = self.api.list_repo_commits(self.repository, repo_type="dataset")
-            return tuple((commit.commit_id, {name: b"" for name in self.inventory(commit.commit_id)}) for commit in commits)
-        except ReleaseError: raise
+            commits = tuple(self.api.list_repo_commits(self.repository, repo_type="dataset"))
+            if len(commits) > MAX_HISTORY_COMMITS:
+                raise ReleaseError("Public history exceeds the bounded reconciliation limit.")
+            snapshots = []
+            metadata_bytes = 0
+            for commit in commits:
+                revision = getattr(commit, "commit_id", None)
+                if not isinstance(revision, str) or not _REVISION.fullmatch(revision):
+                    raise ReleaseError("Public history contains an invalid revision.")
+                inventory = dict(self.inventory(revision))
+                paths = tuple(inventory)
+                if any(not _safe_relative_path(path) for path in paths):
+                    raise ReleaseError("Public history contains an unsafe path.")
+                metadata_paths = tuple(
+                    path for path in paths if _split_sensitive_metadata_path(path)
+                )
+                for path in metadata_paths:
+                    info = inventory[path]
+                    if not isinstance(info, RemoteFile) or info.size < 0:
+                        raise ReleaseError("Public history metadata inventory is invalid.")
+                    metadata_bytes += info.size
+                    if metadata_bytes > MAX_HISTORY_METADATA_BYTES:
+                        raise ReleaseError("Public history metadata exceeds the reconciliation limit.")
+                metadata = self.read(revision, metadata_paths) if metadata_paths else {}
+                if set(metadata) != set(metadata_paths) or any(
+                    not isinstance(metadata[path], bytes)
+                    or len(metadata[path]) != inventory[path].size
+                    for path in metadata_paths
+                ):
+                    raise ReleaseError("Public history metadata is invalid.")
+                snapshots.append((
+                    revision,
+                    {
+                        path: metadata[path] if path in metadata else b""
+                        for path in paths
+                    },
+                ))
+            return tuple(snapshots)
+        except ReleaseError:
+            raise
         except Exception as exc: raise ReleaseError("Public Hugging Face history cannot be inspected.") from exc
 
     def upload_large_folder(self, stage: Path, expected_parent: str) -> None:
-        if self.state().revision != expected_parent: raise RemoteMovedError("The public Hugging Face base moved before test upload.")
+        _expect_state(self, expected_parent)
         try:
             self.api.upload_large_folder(
                 self.repository,
@@ -685,7 +835,7 @@ class HuggingFaceHubBackend:
         except Exception as exc: raise ReleaseError("Public test upload failed.") from exc
 
     def commit_docs(self, files: Mapping[str, bytes], expected_parent: str) -> str:
-        if self.state().revision != expected_parent: raise RemoteMovedError("The public Hugging Face base moved before documentation CAS.")
+        _expect_state(self, expected_parent)
         try:
             from huggingface_hub import CommitOperationAdd
             result = self.api.create_commit(self.repository, repo_type="dataset", parent_commit=expected_parent, commit_message=f"Publish {RELEASE_ID} documentation", operations=[CommitOperationAdd(path_in_repo=name, path_or_fileobj=io.BytesIO(payload)) for name, payload in files.items()])

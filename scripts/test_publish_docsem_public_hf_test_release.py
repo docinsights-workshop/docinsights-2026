@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Behavioral tests for the public-only DocSem test publisher."""
 
-import hashlib, json, os, tempfile, unittest
+import hashlib, json, os, sys, tempfile, types, unittest
 from pathlib import Path
 
 try:
@@ -32,7 +32,7 @@ class Hf:
     def __init__(self, root, base):
         self.root, self.revision, self.private = Path(root), base, False
         self.events = []; self.history = [(base, self.tree())]; self.partial_once = False; self.upload_roots = []
-        self.commit_attribute_suffix = b""
+        self.commit_attribute_suffix = b""; self.noop_upload = False; self.private_after_upload = False
     def tree(self, revision=None):
         if revision is not None and revision != self.revision:
             return dict(next(paths for item, paths in self.history if item == revision))
@@ -45,6 +45,7 @@ class Hf:
         self.events.append("upload")
         self.upload_roots.append(Path(stage))
         if expected_parent != self.revision: raise publisher.RemoteMovedError("moved")
+        if self.noop_upload: return
         sources = sorted(source for source in (Path(stage) / "test").rglob("*") if source.is_file())
         if self.partial_once:
             sources = [next(source for source in sources if source.suffix == ".pdf")]; self.partial_once = False
@@ -56,7 +57,7 @@ class Hf:
         for pdf in sorted((self.root / "test/documents").glob("*.pdf")):
             attributes += f"test/documents/{pdf.name}{LFS_SUFFIX}".encode()
         (self.root / ".gitattributes").write_bytes(attributes)
-        self.revision = "c" * 40; self.history.append((self.revision, self.tree())); return self.revision
+        self.revision = "c" * 40; self.private = self.private_after_upload; self.history.append((self.revision, self.tree())); return self.revision
     def commit_docs(self, files, expected_parent):
         self.events.append("docs")
         if expected_parent != self.revision: raise publisher.RemoteMovedError("moved")
@@ -67,9 +68,9 @@ class Hf:
 
 class InstalledUploadLargeFolderApi:
     """Offline fake matching huggingface_hub 0.29.3's upload boundary."""
-    def __init__(self, revision): self.revision, self.upload = revision, None
+    def __init__(self, revision): self.revision, self.private, self.upload, self.commit = revision, False, None, None
     def repo_info(self, repo_id, *, repo_type):
-        return type("RepoInfo", (), {"sha": self.revision, "private": False})()
+        return type("RepoInfo", (), {"sha": self.revision, "private": self.private})()
     def upload_large_folder(
         self, repo_id, folder_path, *, repo_type, revision=None, private=None,
         allow_patterns=None, ignore_patterns=None, num_workers=None,
@@ -82,6 +83,18 @@ class InstalledUploadLargeFolderApi:
             "num_workers": num_workers, "print_report": print_report,
             "print_report_every": print_report_every,
         }
+    def create_commit(self, repo_id, *, repo_type, parent_commit, commit_message, operations):
+        self.commit = {
+            "repo_id": repo_id, "repo_type": repo_type,
+            "parent_commit": parent_commit, "commit_message": commit_message,
+            "operations": tuple(operations),
+        }
+        return type("CommitInfo", (), {"oid": "d" * 40})()
+
+class InstalledHistoryApi:
+    def __init__(self, revision): self.revision = revision
+    def list_repo_commits(self, repo_id, *, repo_type):
+        return (type("Commit", (), {"commit_id": self.revision})(),)
 
 class PublicReleaseTests(unittest.TestCase):
     BASE = "b" * 40
@@ -223,6 +236,26 @@ class PublicReleaseTests(unittest.TestCase):
         self.release(publish=True, confirm="PUBLISH")
         self.assertEqual(self.hf.events, ["upload", "upload", "docs"])
         self.assertEqual(self.hf.upload_roots[0], self.hf.upload_roots[1])
+
+    def test_successful_empty_upload_cannot_publish_release_docs(self):
+        self.hf.noop_upload = True
+        try:
+            result = self.release(publish=True, confirm="PUBLISH")
+        except publisher.ReleaseError:
+            result = None
+        if result is not None:
+            self.assertEqual(result["mode"], "partial-upload")
+        self.assertEqual(self.hf.events, ["upload"])
+        self.assertEqual((self.dataset / "README.md").read_bytes(), self.readme)
+        self.assertEqual((self.dataset / "INSTRUCTIONS.md").read_bytes(), self.instructions)
+
+    def test_post_upload_private_visibility_stops_before_release_docs(self):
+        self.hf.private_after_upload = True
+        with self.assertRaises(publisher.ReleaseError):
+            self.release(publish=True, confirm="PUBLISH")
+        self.assertEqual(self.hf.events, ["upload"])
+        self.assertEqual((self.dataset / "README.md").read_bytes(), self.readme)
+        self.assertEqual((self.dataset / "INSTRUCTIONS.md").read_bytes(), self.instructions)
     def test_complete_release_is_idempotent(self):
         self.release(publish=True, confirm="PUBLISH"); self.assertEqual(self.hf.events, ["upload", "docs"])
         result = self.release(publish=True, confirm="PUBLISH", expected_complete_base="d" * 40); self.assertEqual(result["mode"], "already-complete"); self.assertEqual(self.hf.events, ["upload", "docs"])
@@ -265,6 +298,27 @@ class PublicReleaseTests(unittest.TestCase):
         self.hf.private = True
         with self.assertRaises(publisher.ReleaseError): self.release()
 
+    def test_public_history_rejects_root_and_hyphenated_label_paths(self):
+        for path in ("test_labels.jsonl", "validation-labels.jsonl"):
+            with self.subTest(path=path):
+                self.hf.history = [(self.BASE, {**self.hf.tree(), path: b"{}\n"})]
+                with self.assertRaises(publisher.ReleaseError):
+                    self.release()
+
+    def test_public_history_rejects_forbidden_fields_in_test_metadata(self):
+        payloads = (
+            canonical({"instance_id": "test_000001", "answer": "withheld"}),
+            canonical({"instance_id": "test_000001", "nested": {"evidence": ["withheld"]}}),
+        )
+        for payload in payloads:
+            with self.subTest(payload=payload):
+                self.hf.history = [(
+                    self.BASE,
+                    {**self.hf.tree(), "test/tasks.jsonl": payload},
+                )]
+                with self.assertRaises(publisher.ReleaseError):
+                    self.release()
+
     def test_fix_round_exposes_explicit_read_only_and_prepare_operations(self):
         self.assertTrue(hasattr(publisher, "prepare_stage"), "prepare_stage is required so default dry-run cannot write")
 
@@ -288,6 +342,50 @@ class PublicReleaseTests(unittest.TestCase):
             "num_workers": 2, "print_report": True,
             "print_report_every": 60,
         })
+
+    def test_hub_upload_rechecks_public_visibility_at_write_boundary(self):
+        backend = object.__new__(publisher.HuggingFaceHubBackend)
+        backend.repository = publisher.PUBLIC_HF_REPOSITORY
+        backend.api = InstalledUploadLargeFolderApi(self.BASE)
+        backend.api.private = True
+        with self.assertRaises(publisher.ReleaseError):
+            backend.upload_large_folder(self.stage, self.BASE)
+        self.assertIsNone(backend.api.upload)
+
+    def test_hub_docs_recheck_public_visibility_at_write_boundary(self):
+        backend = object.__new__(publisher.HuggingFaceHubBackend)
+        backend.repository = publisher.PUBLIC_HF_REPOSITORY
+        backend.api = InstalledUploadLargeFolderApi(self.BASE)
+        backend.api.private = True
+        module = types.ModuleType("huggingface_hub")
+        module.CommitOperationAdd = lambda **kwargs: kwargs
+        original = sys.modules.get("huggingface_hub")
+        sys.modules["huggingface_hub"] = module
+        try:
+            with self.assertRaises(publisher.ReleaseError):
+                backend.commit_docs({"README.md": b"release\n"}, self.BASE)
+        finally:
+            if original is None:
+                del sys.modules["huggingface_hub"]
+            else:
+                sys.modules["huggingface_hub"] = original
+        self.assertIsNone(backend.api.commit)
+
+    def test_hub_history_adapter_retains_split_metadata_bytes_for_scanning(self):
+        backend = object.__new__(publisher.HuggingFaceHubBackend)
+        backend.repository = publisher.PUBLIC_HF_REPOSITORY
+        backend.api = InstalledHistoryApi(self.BASE)
+        payload = canonical({"instance_id": "test_000001", "answer": "withheld"})
+        inventory = {
+            ".gitattributes": publisher.RemoteFile(len(BASE_ATTRIBUTES), sha(BASE_ATTRIBUTES)),
+            "test/tasks.jsonl": publisher.RemoteFile(len(payload), sha(payload)),
+        }
+        backend.inventory = lambda revision: inventory
+        backend.read = lambda revision, paths: {
+            path: payload for path in paths if path == "test/tasks.jsonl"
+        }
+        snapshots = backend.history_snapshots()
+        self.assertEqual(snapshots[0][1]["test/tasks.jsonl"], payload)
 
     def test_prepared_stage_is_read_only_during_default_dry_run(self):
         publisher.prepare_stage(self.config, source=Source(self.state))
