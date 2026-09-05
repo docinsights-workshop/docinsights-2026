@@ -231,6 +231,73 @@ TEST_SUBMISSIONS_ENABLED=false
 TEST_PUBLIC_LEADERBOARD_ENABLED=false
 ```
 
+### Private organizer Space deployment
+
+The organizer dashboard is a separate, platform-private Space at
+`amitbcp/docsem-docinsights-organizer`. Its deployment is intentionally
+independent of the participant Space and cannot write submissions, finalize a
+leaderboard, or mutate the private dataset.
+
+Use two different Hugging Face user access tokens from the operator's secure
+environment:
+
+```text
+DOCSEM_ORGANIZER_DEPLOY_TOKEN=<classic write token owned by amitbcp>
+DOCSEM_ORGANIZER_READ_TOKEN=<classic read token owned by amitbcp>
+```
+
+Do not reuse `HF_WRITE_TOKEN`, the participant submission token, or a
+fine-grained token whose read-only scope cannot be proven by the documented
+`whoami-v2` response. The deployment token is used only for the private Space
+repository and its two required secrets. The runtime token must be read-only
+and must be able to read the private submissions dataset. Token values are
+never command-line arguments, receipts, or local files.
+
+Record the clean source commit, the current private-dataset commit, and either
+the current organizer-Space commit or the fact that the Space is absent. The
+default command is a read-only dry run:
+
+```bash
+/Users/aamita/miniconda3/bin/python scripts/publish_docsem_organizer_space.py \
+  --expected-source-revision <exact-clean-git-commit> \
+  --expected-private-revision <exact-private-dataset-commit> \
+  --expected-space-parent <exact-existing-space-commit> \
+  --visibility private \
+  --collaborator amitbcp
+```
+
+For first creation, replace `--expected-space-parent ...` with
+`--expect-absent`. The target is a personal namespace, and the pinned client
+has no documented private-Space collaborator-management API, so the only
+accepted allowlist is the owner `amitbcp`. Never add another collaborator by
+turning the Space public.
+
+After reviewing the sanitized dry-run receipt, repeat the exact command with:
+
+```text
+--publish --confirm PUBLISH_PRIVATE_ORGANIZER_SPACE
+```
+
+The publisher refuses a dirty or moved checkout, a moved Space or private
+dataset, a public/non-Gradio Space, a non-owner deploy identity, a non-read-only
+runtime token, and reserved values configured as public Space variables. It
+deploys exactly `README.md`, `app.py`, `organizer_data.py`,
+`organizer_contract.py`, and `requirements.txt` from the pinned Git commit,
+using an exact-parent compare-and-swap commit; tests, caches, and older extra
+Space files are excluded. It updates only the `ORGANIZER_READ_TOKEN` and
+`PRIVATE_REPO_ID` Space secrets and leaves every other existing secret intact.
+
+Post-deployment checks require private visibility, exact five-file bytes,
+unauthenticated denial, and—once the runtime is running—authenticated `/`,
+`/config`, and `/info` access with no named or mutating endpoint and no secret
+in rendered configuration. At the same pinned private-dataset commit, the
+organizer reader must reconstruct every immutable test attempt. Until an
+official `private/test_release.json` exists, the expected safe status is
+`disabled/no-release`. The public participant Space must simultaneously report
+test submissions closed and the final-test leaderboard unavailable with no
+rows. The deployment does not activate either public test flag and performs no
+participant-Space, dataset, finalization, or leaderboard write.
+
 Only after organizers have published and pinned the official public task manifest and private scoring release may they request test activation. The deployment must then supply a `TEST_RELEASE_ID` made of letters, digits, dot, underscore, or hyphen; lowercase 64-character SHA-256 values for `TEST_TASK_MANIFEST_SHA256` and `TEST_GOLD_SHA256`; RFC3339 UTC (`Z`) `TEST_OPEN_AT` and `TEST_CLOSE_AT` values with `open < close`; exactly `TEST_MAX_ATTEMPTS=3`; and server-secret `TEST_RELEASE_CONFIG_PATH` and `TEST_GOLD_CONFIG_PATH` values. Those server paths have no public defaults. Any omission, malformed release ID/digest/window/path, reversed window, or non-three attempt value keeps both requested test surfaces disabled. The private server release remains the authority and is verified again at submission time.
 
 Validation remains anonymous and follows the established validation scoring and public-leaderboard behavior under every test-gate outcome. Do not place test gold paths, labels, answer/evidence values, OAuth subjects, email addresses, raw predictions, per-example metrics, or later-attempt scores in the public Space configuration, logs, site content, or deployment documentation.

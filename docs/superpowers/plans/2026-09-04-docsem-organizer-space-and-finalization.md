@@ -193,11 +193,11 @@ git commit -m "Publish final DocSem test leaderboard view"
 **Interfaces:**
 - Produces: dry-run/private-Space creation and update workflow for `amitbcp/docsem-docinsights-organizer`.
 
-- [ ] **Step 1: Write failing deployment-plan tests**
+- [x] **Step 1: Write failing deployment-plan tests**
 
 Assert the Space must be private, uses a read-only token, has an explicit collaborator allowlist, and rejects public visibility or a write-scoped participant token.
 
-- [ ] **Step 2: Implement dry-run-only publication default**
+- [x] **Step 2: Implement dry-run-only publication default**
 
 Inspect current Space visibility/config without printing secrets. Require `--publish`, exact expected source revision, and explicit private visibility for any write.
 
