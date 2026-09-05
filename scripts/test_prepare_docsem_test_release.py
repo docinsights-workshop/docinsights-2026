@@ -42,6 +42,7 @@ def write_pdf_with_visible_text(
     fill_color=None,
     underlay_content="",
     font_name="F1",
+    page_extra="",
 ):
     """Write a tiny self-contained PDF whose text extractor sees ``text``."""
     color = "" if fill_color is None else f"{fill_color[0]} {fill_color[1]} {fill_color[2]} rg "
@@ -55,6 +56,7 @@ def write_pdf_with_visible_text(
         (
             b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
             + f"/Resources << /Font << /{font_name} 4 0 R >> >> ".encode("ascii")
+            + page_extra.encode("ascii")
             + b"/Contents 5 0 R >>"
         ),
         b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
@@ -138,6 +140,17 @@ def add_catalog_javascript(path):
         )
         document.save(replacement, deflate=True)
     replacement.replace(path)
+
+
+def add_pdf_zip_polyglot(path):
+    """Append a real deflated ZIP and then a fresh PDF EOF marker."""
+    combined = io.BytesIO(path.read_bytes())
+    with zipfile.ZipFile(combined, "a", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "private/labels.jsonl",
+            b'{"answer":"organizer-only-secret-repeated-organizer-only-secret"}\n',
+        )
+    path.write_bytes(combined.getvalue() + b"\n%%EOF\n")
 
 
 def refresh_public_release_hashes(public_root):
@@ -470,15 +483,31 @@ class PrepareDocsemTestReleaseTests(unittest.TestCase):
         )
         self.assertNotIn("b01", serialized)
 
-    def test_validated_snapshot_repr_does_not_expose_private_rows(self):
-        """Catches private label bytes or rows leaking through dataclass repr."""
+    def test_validated_snapshot_repr_exposes_only_sanitized_aggregate_state(self):
+        """Catches paths, prerelease IDs, sealed bytes, or digests leaking via repr."""
         source = self.make_source()
 
         validated = validate_source(source.root, (), ())
 
-        rendered = repr(validated)
-        self.assertNotIn("private-synthetic-answer", rendered)
-        self.assertNotIn("'evidence'", rendered)
+        rendered = repr(validated) + repr(validated.pdfs[0])
+        sensitive_values = (
+            "private-synthetic-answer",
+            "'evidence'",
+            str(source.root.resolve()),
+            "synthetic-1",
+            "synthetic-1.pdf",
+            validated.tasks_sha256,
+            validated.private_labels_sha256,
+            validated.pdf_inventory_sha256,
+            validated.pdfs[0].sha256,
+            repr(validated.canonical_task_bytes),
+            repr(validated.canonical_label_bytes),
+        )
+        for value in sensitive_values:
+            with self.subTest(sensitive=value[:32]):
+                self.assertNotIn(value, rendered)
+        self.assertIn("task_count=3", rendered)
+        self.assertIn("pdf_count=3", rendered)
 
     def test_rejects_duplicate_task_ids(self):
         """Catches a release whose task identifiers are not unique."""
@@ -1067,6 +1096,49 @@ class PrepareDocsemTestReleaseTests(unittest.TestCase):
         add_catalog_javascript(source.root / "documents/synthetic-1.pdf")
         self.assert_rejected(source)
 
+    def test_validation_rejects_nested_inline_and_escaped_javascript_actions(self):
+        """Catches active action dictionaries hidden below benign annotation keys."""
+        action_shapes = (
+            "/A <</S/Java#53cript/J#53(app.alert\\(1\\))>> ",
+            "/A [<</S/Java#53cript/J#53(app.alert\\(1\\))>>] ",
+            "/A <</Next [<</S/Java#53cript/J#53(app.alert\\(1\\))>>]>> ",
+        )
+        for number, page_extra in enumerate(action_shapes):
+            with self.subTest(action_shape=number):
+                source = self.make_source()
+                write_pdf_with_visible_text(
+                    source.root / "documents/synthetic-1.pdf",
+                    "b01: ordinary evidence",
+                    page_extra=page_extra,
+                )
+
+                self.assert_rejected(source)
+
+    def test_validation_rejects_a_deflated_pdf_zip_polyglot_with_a_final_pdf_eof(self):
+        """Catches a structurally valid ZIP hidden after an otherwise valid PDF."""
+        source = self.make_source()
+        pdf = source.root / "documents/synthetic-1.pdf"
+        add_pdf_zip_polyglot(pdf)
+
+        self.assertTrue(pdf.read_bytes().rstrip().endswith(b"%%EOF"))
+        self.assertTrue(zipfile.is_zipfile(io.BytesIO(pdf.read_bytes())))
+        self.assert_rejected(source)
+
+    def test_validation_accepts_zip_magic_inside_a_pdf_stream_without_a_zip_directory(self):
+        """Catches replacing structural ZIP detection with a raw magic-byte scan."""
+        source = self.make_source()
+        pdf = source.root / "documents/synthetic-1.pdf"
+        write_pdf_with_visible_text(
+            pdf,
+            "b01: ordinary evidence",
+            underlay_content="% PK\x03\x04 ordinary page-content comment\n",
+        )
+
+        self.assertFalse(zipfile.is_zipfile(io.BytesIO(pdf.read_bytes())))
+        validated = validate_source(source.root, (), ())
+
+        self.assertEqual(validated.ids, ("synthetic-1", "synthetic-2", "synthetic-3"))
+
     def test_staging_rejects_mutation_after_validation(self):
         """Catches staging rows or PDF bytes different from the validated snapshot."""
         mutations = (
@@ -1103,6 +1175,47 @@ class PrepareDocsemTestReleaseTests(unittest.TestCase):
                         root / "private",
                         "synthetic-release-v1",
                     )
+
+    def test_staging_uses_only_sealed_row_bytes_after_entry_verification(self):
+        """Catches a post-verification row mutation changing either staged payload."""
+        source = self.make_source()
+        validated = validate_source(source.root, (), ())
+        original_tasks = validated.canonical_task_bytes
+        original_labels = validated.canonical_label_bytes
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        real_verify = release_module._verify_validated_snapshot
+
+        def verify_then_mutate_rows(value):
+            result = real_verify(value)
+            value.task_rows[0]["user_query"] = "Changed after entry verification"
+            value.label_rows[0]["answer"] = "changed-private-answer-after-verification"
+            return result
+
+        with patch.object(
+            release_module,
+            "_verify_validated_snapshot",
+            side_effect=verify_then_mutate_rows,
+        ):
+            release_module.stage_release(
+                validated,
+                root / "public",
+                root / "private",
+                "synthetic-release-v1",
+            )
+
+        staged_tasks = (root / "public/test/tasks.jsonl").read_bytes()
+        expected_public_rows = []
+        for row in [json.loads(line) for line in original_tasks.splitlines()]:
+            row["document_pdf"] = f"test/{row['document_pdf']}"
+            expected_public_rows.append(row)
+        self.assertEqual(staged_tasks, release_module._canonical_rows(expected_public_rows))
+        self.assertEqual(
+            (root / "private/private/test_labels.jsonl").read_bytes(),
+            original_labels,
+        )
+        self.assertNotIn(b"Changed after entry verification", staged_tasks)
 
     def test_stages_short_grounded_answer_and_evidence_strings(self):
         """Catches treating ordinary answer/evidence substrings as metadata leaks."""
@@ -1391,6 +1504,54 @@ class PrepareDocsemTestReleaseTests(unittest.TestCase):
                 refresh_public_release_hashes(mutated)
                 with self.assertRaises(ValidationError):
                     release_module.audit_public_payload(mutated)
+
+    def test_public_audit_rejects_a_fully_rehashed_deflated_pdf_zip_polyglot(self):
+        """Catches trusting reconciled hashes for a PDF that is also a ZIP archive."""
+        source = self.make_source()
+        validated = validate_source(source.root, (), ())
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        public = root / "public"
+        release_module.stage_release(
+            validated,
+            public,
+            root / "private",
+            "synthetic-release-v1",
+        )
+        pdf = public / "test/documents/synthetic-1.pdf"
+        add_pdf_zip_polyglot(pdf)
+        refresh_public_release_hashes(public)
+
+        self.assertTrue(zipfile.is_zipfile(io.BytesIO(pdf.read_bytes())))
+        with self.assertRaises(ValidationError):
+            release_module.audit_public_payload(public)
+
+    def test_public_audit_rejects_a_fully_rehashed_nested_inline_javascript_action(self):
+        """Catches a reconciled public PDF with an active action nested in an array."""
+        source = self.make_source()
+        validated = validate_source(source.root, (), ())
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        public = root / "public"
+        release_module.stage_release(
+            validated,
+            public,
+            root / "private",
+            "synthetic-release-v1",
+        )
+        write_pdf_with_visible_text(
+            public / "test/documents/synthetic-1.pdf",
+            "b01: ordinary evidence",
+            page_extra=(
+                "/A <</Next [<</S/Java#53cript/J#53(app.alert\\(1\\))>>]>> "
+            ),
+        )
+        refresh_public_release_hashes(public)
+
+        with self.assertRaises(ValidationError):
+            release_module.audit_public_payload(public)
 
     def test_public_manifest_rejects_nonexact_types_keys_and_digests(self):
         """Catches bool-as-int and malformed nested or digest manifest values."""

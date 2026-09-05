@@ -9,6 +9,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 import hashlib
+import io
 import json
 import math
 import os
@@ -24,6 +25,7 @@ import subprocess
 import tempfile
 import time
 from typing import Iterable
+import zipfile
 
 try:
     import fitz
@@ -117,7 +119,6 @@ _ARCHIVE_MAGICS = (
     b"Rar!\x1a\x07",
 )
 _SHA256_HEX = re.compile(r"[0-9a-f]{64}\Z")
-_PDF_NAME_TOKEN = re.compile(r"/([A-Za-z0-9_.+#-]+)")
 _PDF_FORBIDDEN_KEYS = frozenset(
     {
         "AA",
@@ -143,12 +144,16 @@ _PDF_FORBIDDEN_TYPE_NAMES = frozenset(
         "Filespec",
         "GoToE",
         "GoToR",
+        "ImportData",
+        "JavaScript",
+        "Launch",
         "Movie",
         "Rendition",
         "ResetForm",
         "RichMediaExecute",
         "Screen",
         "Sound",
+        "SubmitForm",
         "Thread",
         "Trans",
         "UseAttachments",
@@ -156,6 +161,18 @@ _PDF_FORBIDDEN_TYPE_NAMES = frozenset(
     }
 )
 _PDF_FORBIDDEN_NAME_TREE_KEYS = frozenset({"EmbeddedFiles", "JavaScript"})
+_PDF_RESOURCE_DICTIONARY_KEYS = frozenset(
+    {
+        "ColorSpace",
+        "ExtGState",
+        "Font",
+        "Pattern",
+        "Properties",
+        "Shading",
+        "XObject",
+    }
+)
+MAX_PDF_STRUCTURE_TOKENS_PER_VALUE = 100_000
 
 _PAGE_RESULT_HEADER = struct.Struct(">Q")
 _DOCUMENT_PROBE_RESULT = struct.Struct(">I")
@@ -165,7 +182,7 @@ class ValidationError(ValueError):
     """Raised for a structural source error without exposing private rows."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class ValidatedPDF:
     """One bounded source PDF sealed by its validation-time digest."""
 
@@ -174,8 +191,11 @@ class ValidatedPDF:
     size: int
     sha256: str
 
+    def __repr__(self) -> str:
+        return f"ValidatedPDF(size={self.size}, sealed=True)"
 
-@dataclass(frozen=True)
+
+@dataclass(frozen=True, repr=False)
 class ValidatedTestSource:
     """Validated source values used by later explicit staging steps."""
 
@@ -195,6 +215,28 @@ class ValidatedTestSource:
         """Preserve the read-only path view used by callers and tests."""
         return tuple(pdf.source_path for pdf in self.pdfs)
 
+    def __repr__(self) -> str:
+        return (
+            "ValidatedTestSource("
+            f"task_count={len(self.ids)}, pdf_count={len(self.pdfs)}, sealed=True)"
+        )
+
+
+@dataclass(frozen=True, repr=False)
+class _VerifiedSnapshot:
+    """One staging-local view derived from validation-time sealed bytes."""
+
+    source_root: Path
+    ids: tuple[str, ...]
+    task_rows: tuple[dict, ...]
+    label_rows: tuple[dict, ...]
+    pdfs: tuple[ValidatedPDF, ...]
+    canonical_task_bytes: bytes
+    canonical_label_bytes: bytes
+    tasks_sha256: str
+    private_labels_sha256: str
+    pdf_inventory_sha256: str
+
 
 @dataclass(frozen=True)
 class OCRRuntime:
@@ -209,17 +251,9 @@ def _fail(message: str) -> None:
     raise ValidationError(message)
 
 
-def _read_jsonl(path: Path, kind: str) -> list[dict]:
+def _parse_jsonl_bytes(payload: bytes, kind: str) -> list[dict]:
     rows = []
     try:
-        max_bytes = (
-            MAX_PRIVATE_LABELS_BYTES if kind == "private label" else MAX_SOURCE_TASKS_BYTES
-        )
-        payload = _read_bounded_regular_file(
-            path,
-            max_bytes,
-            f"Required {kind} file",
-        )
         for line in payload.decode("utf-8", errors="strict").splitlines():
             if not line.strip():
                 _fail(f"{kind.capitalize()} file contains a blank row.")
@@ -234,6 +268,18 @@ def _read_jsonl(path: Path, kind: str) -> list[dict]:
     if not rows:
         _fail(f"{kind.capitalize()} file is empty.")
     return rows
+
+
+def _read_jsonl(path: Path, kind: str) -> list[dict]:
+    max_bytes = (
+        MAX_PRIVATE_LABELS_BYTES if kind == "private label" else MAX_SOURCE_TASKS_BYTES
+    )
+    payload = _read_bounded_regular_file(
+        path,
+        max_bytes,
+        f"Required {kind} file",
+    )
+    return _parse_jsonl_bytes(payload, kind)
 
 
 def _valid_identifier(value: object) -> bool:
@@ -717,8 +763,169 @@ def _decode_pdf_name(value: str) -> str:
     return output.decode("ascii", errors="strict")
 
 
-def _pdf_value_names(value: str) -> set[str]:
-    return {_decode_pdf_name(match.group(1)) for match in _PDF_NAME_TOKEN.finditer(value)}
+def _tokenize_pdf_structure_value(value: str) -> tuple[tuple[str, str], ...]:
+    """Tokenize one bounded canonical PDF value while ignoring string contents."""
+    tokens: list[tuple[str, str]] = []
+    index = 0
+    length = len(value)
+    whitespace = "\x00\t\n\x0c\r "
+    delimiters = "()<>[]{}/%"
+
+    def append(kind: str, token_value: str = "") -> None:
+        tokens.append((kind, token_value))
+        if len(tokens) > MAX_PDF_STRUCTURE_TOKENS_PER_VALUE:
+            _fail("PDF object dictionary value exceeds its token limit.")
+
+    while index < length:
+        character = value[index]
+        if character in whitespace:
+            index += 1
+            continue
+        if character == "%":
+            newline = value.find("\n", index + 1)
+            index = length if newline < 0 else newline + 1
+            continue
+        if value.startswith("<<", index):
+            append("dict-open")
+            index += 2
+            continue
+        if value.startswith(">>", index):
+            append("dict-close")
+            index += 2
+            continue
+        if character == "[":
+            append("array-open")
+            index += 1
+            continue
+        if character == "]":
+            append("array-close")
+            index += 1
+            continue
+        if character == "/":
+            end = index + 1
+            while end < length and value[end] not in whitespace + delimiters:
+                end += 1
+            if end == index + 1:
+                _fail("PDF object dictionary contains an invalid name.")
+            append("name", _decode_pdf_name(value[index + 1 : end]))
+            index = end
+            continue
+        if character == "(":
+            depth = 1
+            index += 1
+            while index < length and depth:
+                if value[index] == "\\":
+                    index += 2
+                    continue
+                if value[index] == "(":
+                    depth += 1
+                elif value[index] == ")":
+                    depth -= 1
+                index += 1
+            if depth:
+                _fail("PDF object dictionary contains an unterminated string.")
+            append("scalar")
+            continue
+        if character == "<":
+            end = value.find(">", index + 1)
+            if end < 0:
+                _fail("PDF object dictionary contains an unterminated hex string.")
+            append("scalar")
+            index = end + 1
+            continue
+        if character == ">":
+            _fail("PDF object dictionary contains an invalid delimiter.")
+
+        end = index + 1
+        while end < length and value[end] not in whitespace + delimiters:
+            end += 1
+        append("atom", value[index:end])
+        index = end
+    return tuple(tokens)
+
+
+def _parse_pdf_structure_value(value: str) -> tuple:
+    """Parse names, arrays, and dictionaries from one canonical PDF value."""
+    tokens = _tokenize_pdf_structure_value(value)
+
+    def parse_at(index: int) -> tuple[tuple, int]:
+        if index >= len(tokens):
+            _fail("PDF object dictionary contains an incomplete value.")
+        kind, token_value = tokens[index]
+        if kind == "dict-open":
+            entries = []
+            index += 1
+            while index < len(tokens) and tokens[index][0] != "dict-close":
+                if tokens[index][0] != "name":
+                    _fail("PDF object dictionary contains a malformed nested dictionary.")
+                key = tokens[index][1]
+                nested_value, index = parse_at(index + 1)
+                entries.append((key, nested_value))
+            if index >= len(tokens):
+                _fail("PDF object dictionary contains an unterminated dictionary.")
+            return ("dict", tuple(entries)), index + 1
+        if kind == "array-open":
+            values = []
+            index += 1
+            while index < len(tokens) and tokens[index][0] != "array-close":
+                nested_value, index = parse_at(index)
+                values.append(nested_value)
+            if index >= len(tokens):
+                _fail("PDF object dictionary contains an unterminated array.")
+            return ("array", tuple(values)), index + 1
+        if kind == "name":
+            return ("name", token_value), index + 1
+        if kind in {"atom", "scalar"}:
+            if (
+                kind == "atom"
+                and index + 2 < len(tokens)
+                and tokens[index + 1][0] == "atom"
+                and tokens[index + 2] == ("atom", "R")
+                and token_value.lstrip("+-").isdigit()
+                and tokens[index + 1][1].lstrip("+-").isdigit()
+            ):
+                return ("scalar",), index + 3
+            return ("scalar",), index + 1
+        _fail("PDF object dictionary contains an unexpected delimiter.")
+
+    parsed, final_index = parse_at(0)
+    if final_index != len(tokens):
+        _fail("PDF object dictionary contains trailing structural values.")
+    return parsed
+
+
+def _pdf_node_names(node: tuple) -> set[str]:
+    if node[0] == "name":
+        return {node[1]}
+    if node[0] == "array":
+        names: set[str] = set()
+        for child in node[1]:
+            names.update(_pdf_node_names(child))
+        return names
+    return set()
+
+
+def _audit_pdf_structure_node(node: tuple, *, container_key: str | None = None) -> None:
+    """Apply active-content semantics to parsed nested PDF containers."""
+    if node[0] == "array":
+        for child in node[1]:
+            _audit_pdf_structure_node(child, container_key=container_key)
+        return
+    if node[0] != "dict":
+        return
+
+    resource_names = container_key in _PDF_RESOURCE_DICTIONARY_KEYS
+    for key, value in node[1]:
+        if not resource_names and key in _PDF_FORBIDDEN_KEYS:
+            _fail("PDF contains an attachment or active-content structure.")
+        if (
+            key in {"PageMode", "S", "Subtype", "Type"}
+            and _pdf_node_names(value) & _PDF_FORBIDDEN_TYPE_NAMES
+        ):
+            _fail("PDF contains an attachment or active-content structure.")
+        if key == "Names" and _pdf_node_names(value) & _PDF_FORBIDDEN_NAME_TREE_KEYS:
+            _fail("PDF contains an attachment or active-content structure.")
+        _audit_pdf_structure_node(value, container_key=key)
 
 
 def _audit_pdf_structure(document) -> None:
@@ -749,15 +956,20 @@ def _audit_pdf_structure(document) -> None:
             total_value_chars += len(value)
             if total_value_chars > MAX_PDF_STRUCTURE_TOTAL_CHARS:
                 _fail("PDF structural metadata exceeds its limit.")
-            value_names = _pdf_value_names(value) if value_type in {"array", "dict", "name"} else set()
+            parsed_value = (
+                _parse_pdf_structure_value(value)
+                if value_type in {"array", "dict", "name"}
+                else ("scalar",)
+            )
             if (
                 key in {"PageMode", "S", "Subtype", "Type"}
-                and value_names & _PDF_FORBIDDEN_TYPE_NAMES
+                and _pdf_node_names(parsed_value) & _PDF_FORBIDDEN_TYPE_NAMES
             ) or (
                 key == "Names"
-                and value_names & _PDF_FORBIDDEN_NAME_TREE_KEYS
+                and _pdf_node_names(parsed_value) & _PDF_FORBIDDEN_NAME_TREE_KEYS
             ):
                 _fail("PDF contains an attachment or active-content structure.")
+            _audit_pdf_structure_node(parsed_value, container_key=key)
 
 
 def _probe_pdf_document(path: Path) -> int:
@@ -1100,6 +1312,8 @@ def _validate_pdfs(
                 )
                 if not payload.startswith(b"%PDF-"):
                     _fail("PDF is unreadable.")
+                if _is_zip_polyglot(payload):
+                    _fail("PDF contains an appended ZIP archive.")
                 digest = _sha256(payload)
                 exact_path = root / f"{index}.pdf"
                 _write_new_file(exact_path, payload, 0o600)
@@ -1175,6 +1389,14 @@ def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _is_zip_polyglot(payload: bytes) -> bool:
+    """Detect a complete ZIP structure without scanning incidental stream bytes."""
+    try:
+        return zipfile.is_zipfile(io.BytesIO(payload))
+    except (OSError, ValueError):
+        _fail("PDF archive structure could not be inspected safely.")
+
+
 def _inventory_digest(entries: Iterable[tuple[str, str]]) -> str:
     return _sha256(
         b"".join(
@@ -1198,8 +1420,8 @@ def _pdf_inventory_digest(paths: Iterable[Path]) -> str:
     )
 
 
-def _verify_validated_snapshot(validated: ValidatedTestSource) -> None:
-    """Recompute all mutable rows and verify immutable validation-time seals."""
+def _verify_validated_snapshot(validated: ValidatedTestSource) -> _VerifiedSnapshot:
+    """Capture sealed bytes, verify exposed rows once, and return a local view."""
     if (
         not isinstance(validated, ValidatedTestSource)
         or type(validated.ids) is not tuple
@@ -1210,32 +1432,60 @@ def _verify_validated_snapshot(validated: ValidatedTestSource) -> None:
         or type(validated.canonical_label_bytes) is not bytes
     ):
         _fail("Validated source snapshot is malformed.")
+
+    source_root = validated.source_root
+    sealed_ids = tuple(validated.ids)
+    sealed_pdfs = tuple(validated.pdfs)
+    task_bytes = validated.canonical_task_bytes
+    label_bytes = validated.canonical_label_bytes
+    tasks_sha256 = validated.tasks_sha256
+    private_labels_sha256 = validated.private_labels_sha256
+    pdf_inventory_sha256 = validated.pdf_inventory_sha256
+    if (
+        not isinstance(source_root, Path)
+        or type(task_bytes) is not bytes
+        or type(label_bytes) is not bytes
+        or len(task_bytes) > MAX_SOURCE_TASKS_BYTES
+        or len(label_bytes) > MAX_PRIVATE_LABELS_BYTES
+    ):
+        _fail("Validated source seals are malformed.")
+
     try:
-        tasks = _validate_tasks(list(validated.task_rows))
-        labels = _validate_labels(list(validated.label_rows))
+        sealed_tasks = _validate_tasks(_parse_jsonl_bytes(task_bytes, "task"))
+        sealed_labels = _validate_labels(
+            _parse_jsonl_bytes(label_bytes, "private label")
+        )
+        exposed_tasks = _validate_tasks(list(validated.task_rows))
+        exposed_labels = _validate_labels(list(validated.label_rows))
     except (TypeError, KeyError) as exc:
         raise ValidationError("Validated source rows are malformed.") from exc
-    ids = tuple(sorted(tasks))
-    if ids != validated.ids or set(tasks) != set(labels):
-        _fail("Validated source row IDs are inconsistent.")
-    task_bytes = _canonical_rows(tasks[instance_id] for instance_id in ids)
-    label_bytes = _canonical_rows(labels[instance_id] for instance_id in ids)
+
+    ids = tuple(sorted(sealed_tasks))
     if (
-        task_bytes != validated.canonical_task_bytes
-        or label_bytes != validated.canonical_label_bytes
-        or type(validated.tasks_sha256) is not str
-        or not _SHA256_HEX.fullmatch(validated.tasks_sha256)
-        or type(validated.private_labels_sha256) is not str
-        or not _SHA256_HEX.fullmatch(validated.private_labels_sha256)
-        or _sha256(task_bytes) != validated.tasks_sha256
-        or _sha256(label_bytes) != validated.private_labels_sha256
+        ids != sealed_ids
+        or set(sealed_tasks) != set(sealed_labels)
+        or tuple(sorted(exposed_tasks)) != ids
+        or set(exposed_tasks) != set(exposed_labels)
+    ):
+        _fail("Validated source row IDs are inconsistent.")
+    if (
+        task_bytes != _canonical_rows(sealed_tasks[instance_id] for instance_id in ids)
+        or label_bytes != _canonical_rows(sealed_labels[instance_id] for instance_id in ids)
+        or task_bytes != _canonical_rows(exposed_tasks[instance_id] for instance_id in ids)
+        or label_bytes != _canonical_rows(exposed_labels[instance_id] for instance_id in ids)
+        or type(tasks_sha256) is not str
+        or not _SHA256_HEX.fullmatch(tasks_sha256)
+        or type(private_labels_sha256) is not str
+        or not _SHA256_HEX.fullmatch(private_labels_sha256)
+        or _sha256(task_bytes) != tasks_sha256
+        or _sha256(label_bytes) != private_labels_sha256
     ):
         _fail("Validated source rows changed after validation.")
 
     expected_names = tuple(f"{instance_id}.pdf" for instance_id in ids)
-    if tuple(pdf.name for pdf in validated.pdfs) != expected_names:
+    if tuple(pdf.name for pdf in sealed_pdfs) != expected_names:
         _fail("Validated source PDF inventory is inconsistent.")
-    for pdf in validated.pdfs:
+    for pdf in sealed_pdfs:
         if (
             not isinstance(pdf, ValidatedPDF)
             or not isinstance(pdf.source_path, Path)
@@ -1247,33 +1497,58 @@ def _verify_validated_snapshot(validated: ValidatedTestSource) -> None:
         ):
             _fail("Validated source PDF seal is malformed.")
     if (
-        type(validated.pdf_inventory_sha256) is not str
-        or not _SHA256_HEX.fullmatch(validated.pdf_inventory_sha256)
-        or _sealed_pdf_inventory_digest(validated.pdfs)
-        != validated.pdf_inventory_sha256
+        type(pdf_inventory_sha256) is not str
+        or not _SHA256_HEX.fullmatch(pdf_inventory_sha256)
+        or _sealed_pdf_inventory_digest(sealed_pdfs) != pdf_inventory_sha256
     ):
         _fail("Validated source PDF inventory seal is inconsistent.")
 
+    return _VerifiedSnapshot(
+        source_root=source_root,
+        ids=ids,
+        task_rows=tuple(sealed_tasks[instance_id] for instance_id in ids),
+        label_rows=tuple(sealed_labels[instance_id] for instance_id in ids),
+        pdfs=sealed_pdfs,
+        canonical_task_bytes=task_bytes,
+        canonical_label_bytes=label_bytes,
+        tasks_sha256=tasks_sha256,
+        private_labels_sha256=private_labels_sha256,
+        pdf_inventory_sha256=pdf_inventory_sha256,
+    )
 
-def build_release_manifest(validated: ValidatedTestSource, release_id: str) -> dict:
-    """Return a deterministic, sanitized manifest with private values only hashed."""
-    _verify_validated_snapshot(validated)
+
+def _build_release_manifest_from_snapshot(
+    snapshot: _VerifiedSnapshot,
+    release_id: str,
+) -> dict:
     if not isinstance(release_id, str) or not RELEASE_ID.fullmatch(release_id):
         raise ValidationError("Release ID is invalid.")
     return {
         "schema_version": SCHEMA_VERSION,
         "release_id": release_id,
         "counts": {
-            "tasks": len(validated.task_rows),
-            "pdfs": len(validated.pdf_paths),
-            "labels": len(validated.label_rows),
+            "tasks": len(snapshot.task_rows),
+            "pdfs": len(snapshot.pdfs),
+            "labels": len(snapshot.label_rows),
         },
-        "sorted_ids_sha256": _sha256("".join(f"{instance_id}\n" for instance_id in validated.ids).encode("utf-8")),
-        "tasks_sha256": validated.tasks_sha256,
-        "pdf_inventory_sha256": validated.pdf_inventory_sha256,
-        "private_labels_sha256": validated.private_labels_sha256,
+        "sorted_ids_sha256": _sha256(
+            "".join(f"{instance_id}\n" for instance_id in snapshot.ids).encode(
+                "utf-8"
+            )
+        ),
+        "tasks_sha256": snapshot.tasks_sha256,
+        "pdf_inventory_sha256": snapshot.pdf_inventory_sha256,
+        "private_labels_sha256": snapshot.private_labels_sha256,
         "visibility_audit": _visibility_audit_contract(),
     }
+
+
+def build_release_manifest(validated: ValidatedTestSource, release_id: str) -> dict:
+    """Return a deterministic, sanitized manifest with private values only hashed."""
+    return _build_release_manifest_from_snapshot(
+        _verify_validated_snapshot(validated),
+        release_id,
+    )
 
 
 def _canonical_json_document(value: object) -> bytes:
@@ -1513,6 +1788,7 @@ def audit_public_payload(
                 not payload.startswith(b"%PDF-")
                 or not payload.rstrip().endswith(b"%%EOF")
                 or payload.startswith(_ARCHIVE_MAGICS)
+                or _is_zip_polyglot(payload)
                 or _EMBEDDED_FORBIDDEN_FIELD.search(payload)
             ):
                 _fail("Public PDF contains an unsafe embedded payload.")
@@ -1566,12 +1842,12 @@ def audit_public_payload(
     return public_manifest
 
 
-def _normalized_public_tasks(validated: ValidatedTestSource) -> tuple[dict, ...]:
-    tasks_by_id = {row.get("instance_id"): row for row in validated.task_rows}
-    if tuple(sorted(tasks_by_id)) != validated.ids or len(tasks_by_id) != len(validated.task_rows):
+def _normalized_public_tasks(snapshot: _VerifiedSnapshot) -> tuple[dict, ...]:
+    tasks_by_id = {row.get("instance_id"): row for row in snapshot.task_rows}
+    if tuple(sorted(tasks_by_id)) != snapshot.ids or len(tasks_by_id) != len(snapshot.task_rows):
         _fail("Validated source task IDs are inconsistent.")
     rows = []
-    for instance_id in validated.ids:
+    for instance_id in snapshot.ids:
         row = tasks_by_id[instance_id]
         if set(row) != TASK_KEYS or row.get("document_pdf") != f"documents/{instance_id}.pdf":
             _fail("Validated source task schema is inconsistent.")
@@ -1609,10 +1885,11 @@ def stage_release(
     """Stage deterministic public and private payloads without publishing them."""
     if not isinstance(validated, ValidatedTestSource):
         _fail("A validated test source is required for staging.")
-    source_manifest = build_release_manifest(validated, release_id)
+    snapshot = _verify_validated_snapshot(validated)
+    source_manifest = _build_release_manifest_from_snapshot(snapshot, release_id)
     public_destination = Path(public_root).absolute()
     private_destination = Path(private_root).absolute()
-    source_root = validated.source_root.absolute()
+    source_root = snapshot.source_root.absolute()
     try:
         public_resolved = public_destination.resolve(strict=False)
         private_resolved = private_destination.resolve(strict=False)
@@ -1634,16 +1911,12 @@ def stage_release(
     if _path_entry_exists(public_destination) or _path_entry_exists(private_destination):
         _fail("Staging destinations must not already exist.")
 
-    tasks_by_id = _validate_tasks(list(validated.task_rows))
-    labels_by_id = _validate_labels(list(validated.label_rows))
-    if tuple(sorted(tasks_by_id)) != validated.ids or set(tasks_by_id) != set(labels_by_id):
-        _fail("Validated source rows are inconsistent.")
-    normalized_tasks = _normalized_public_tasks(validated)
+    normalized_tasks = _normalized_public_tasks(snapshot)
     task_bytes = _canonical_rows(normalized_tasks)
-    label_bytes = validated.canonical_label_bytes
-    pdfs_by_name = {pdf.name: pdf for pdf in validated.pdfs}
-    expected_pdf_names = {f"{instance_id}.pdf" for instance_id in validated.ids}
-    if set(pdfs_by_name) != expected_pdf_names or len(pdfs_by_name) != len(validated.pdfs):
+    label_bytes = snapshot.canonical_label_bytes
+    pdfs_by_name = {pdf.name: pdf for pdf in snapshot.pdfs}
+    expected_pdf_names = {f"{instance_id}.pdf" for instance_id in snapshot.ids}
+    if set(pdfs_by_name) != expected_pdf_names or len(pdfs_by_name) != len(snapshot.pdfs):
         _fail("Validated source PDF inventory is inconsistent.")
 
     public_manifest = {
