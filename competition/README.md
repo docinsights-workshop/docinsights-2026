@@ -39,7 +39,9 @@ No official held-out test release is present in this checkout, so the test porta
   --test-public-staging competition/hf-test-staging/public
 ```
 
-The explicit staging root must contain exactly public test tasks, PDFs, checksums, and the sanitized release manifest. The generator re-audits counts and hashes, copies those public files byte-for-byte, and never reads or copies private staging. Missing, malformed, linked, special, extra, or label-bearing inputs fail closed before generated output changes.
+The explicit staging root must contain exactly public test tasks, PDFs, checksums, and the sanitized release manifest. The generator re-audits counts and hashes, copies those public files byte-for-byte, and never reads or copies private staging. It also renders the test-ready dataset card from the tracked train/validation-only template in the same audited generation. Missing, malformed, linked, special, extra, or label-bearing inputs fail closed before generated output changes.
+
+Do not upload a test-ready dataset card early or separately from the matching audited `test/` payload. The tracked card deliberately remains loadable with only train and validation. Publication tooling must consume the generated release-card bytes and matching test snapshot as one reconciled release.
 
 To prepare an intentional leaderboard reset as part of a refreshed release:
 
@@ -78,8 +80,8 @@ repo_id = "amitbcp/docinsights-2026-shared-task-data"
 tasks = load_dataset(repo_id, "tasks")
 train_tasks = tasks["train"]
 val_tasks = tasks["validation"]
-# Available only after the official held-out release is published:
-test_tasks = tasks["test"]
+# After the official held-out release, reloading this config also provides
+# tasks["test"].
 
 train_labels = load_dataset(repo_id, "labels")["train"]
 

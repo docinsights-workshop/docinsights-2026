@@ -1171,14 +1171,71 @@ class PrepareDocsemHFDatasetTests(unittest.TestCase):
             PRIVATE_ROOT=environment["private_root"],
         )
 
-    def test_dataset_card_exposes_test_tasks_but_only_training_labels(self):
-        """Catches publishing a test label path or omitting the public test inputs."""
+    @staticmethod
+    def tree_snapshot(root):
+        root = Path(root)
+        if not root.exists():
+            return None
+        return {
+            path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in root.rglob("*")
+            if path.is_file()
+        }
+
+    def test_base_dataset_card_is_loadable_before_test_data_exists(self):
+        """Catches a tracked card that points datasets at an absent test manifest."""
         card_path = Path(__file__).resolve().parents[1] / "competition/hf-dataset/README.md"
         text = card_path.read_text(encoding="utf-8")
         self.assertTrue(text.startswith("---\n"))
         front_matter = yaml.safe_load(text.split("---\n", 2)[1])
         configs = {item["config_name"]: item["data_files"] for item in front_matter["configs"]}
 
+        self.assertEqual(
+            configs["tasks"],
+            [
+                {"split": "train", "path": "train/tasks.jsonl"},
+                {"split": "validation", "path": "val/tasks.jsonl"},
+            ],
+        )
+        self.assertEqual(
+            configs["labels"],
+            [{"split": "train", "path": "train/labels.jsonl"}],
+        )
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        simulated_repository = Path(temporary.name)
+        for config in configs.values():
+            for data_file in config:
+                configured_path = simulated_repository / data_file["path"]
+                configured_path.parent.mkdir(parents=True, exist_ok=True)
+                configured_path.write_text("{}\n", encoding="utf-8")
+        self.assertTrue(
+            all(
+                (simulated_repository / data_file["path"]).is_file()
+                for config in configs.values()
+                for data_file in config
+            )
+        )
+        self.assertFalse((simulated_repository / "test/tasks.jsonl").exists())
+
+    def test_release_card_is_deterministic_and_requires_an_audited_test_snapshot(self):
+        """Catches early test metadata publication and test-label configuration leaks."""
+        environment = self.make_generation_environment()
+        staged_public = self.make_staged_public_release(environment["root"] / "release")
+        card_path = Path(__file__).resolve().parents[1] / "competition/hf-dataset/README.md"
+
+        first = hf_dataset_module.render_test_ready_dataset_card(
+            staged_public,
+            card_template_path=card_path,
+        )
+        second = hf_dataset_module.render_test_ready_dataset_card(
+            staged_public,
+            card_template_path=card_path,
+        )
+
+        self.assertEqual(first, second)
+        front_matter = yaml.safe_load(first.decode("utf-8").split("---\n", 2)[1])
+        configs = {item["config_name"]: item["data_files"] for item in front_matter["configs"]}
         self.assertEqual(
             configs["tasks"],
             [
@@ -1191,6 +1248,11 @@ class PrepareDocsemHFDatasetTests(unittest.TestCase):
             configs["labels"],
             [{"split": "train", "path": "train/labels.jsonl"}],
         )
+        with self.assertRaises(ValidationError):
+            hf_dataset_module.render_test_ready_dataset_card(
+                environment["root"] / "missing-audited-release",
+                card_template_path=card_path,
+            )
 
     def test_no_argument_generation_removes_stale_test_output(self):
         """Catches a normal train/validation refresh silently republishing stale test data."""
@@ -1261,6 +1323,130 @@ class PrepareDocsemHFDatasetTests(unittest.TestCase):
         self.assertEqual(summary["test_release_id"], "synthetic-release-v1")
         self.assertNotIn("labels.jsonl", target_files)
         self.assertFalse((environment["target_root"] / "private").exists())
+        release_card = (environment["target_root"] / "README.md").read_text(encoding="utf-8")
+        release_front_matter = yaml.safe_load(release_card.split("---\n", 2)[1])
+        release_configs = {
+            item["config_name"]: item["data_files"] for item in release_front_matter["configs"]
+        }
+        self.assertEqual(
+            release_configs["tasks"][-1],
+            {
+                "split": "test",
+                "path": "test/tasks.jsonl",
+            },
+        )
+
+    def test_test_snapshot_install_restores_the_previous_tree_on_replace_failure(self):
+        """Catches deleting the prior release before the replacement is committed."""
+        environment = self.make_generation_environment()
+        staged_public = self.make_staged_public_release(environment["root"] / "release")
+        captured, _ = hf_dataset_module._capture_audited_public_test(staged_public)
+        target = environment["target_root"]
+        old_test = target / "test"
+        old_test.mkdir(parents=True)
+        (old_test / "old-release.json").write_text("old release\n", encoding="utf-8")
+        before = self.tree_snapshot(old_test)
+        real_replace = os.replace
+        replace_calls = 0
+
+        def fail_install_after_backup(source, destination):
+            nonlocal replace_calls
+            replace_calls += 1
+            if replace_calls == 2:
+                raise OSError("synthetic replacement failure")
+            return real_replace(source, destination)
+
+        with (
+            patch.object(
+                hf_dataset_module.os,
+                "replace",
+                side_effect=fail_install_after_backup,
+            ),
+            self.assertRaises(ValidationError),
+        ):
+            hf_dataset_module._install_public_test_snapshot(target, captured)
+
+        self.assertEqual(self.tree_snapshot(old_test), before)
+        self.assertFalse(list(target.parent.glob(".docsem-hf-public-test-backup-*")))
+
+        hf_dataset_module._install_public_test_snapshot(target, captured)
+
+        self.assertFalse((old_test / "old-release.json").exists())
+        release_module.audit_public_payload(target)
+        self.assertFalse(list(target.parent.glob(".docsem-hf-public-test-backup-*")))
+
+    def test_capture_rejects_checksum_bytes_changed_after_the_public_audit(self):
+        """Catches a TOCTOU checksum file that no longer describes captured bytes."""
+        environment = self.make_generation_environment()
+        staged_public = self.make_staged_public_release(environment["root"] / "release")
+        target = environment["target_root"]
+        target.mkdir(parents=True)
+        (target / "keep.txt").write_text("unchanged\n", encoding="utf-8")
+        before = self.tree_snapshot(target)
+        real_audit = hf_dataset_module.audit_public_payload
+
+        def audit_then_mutate_checksums(root):
+            manifest = real_audit(root)
+            checksum_path = Path(root) / "test/SHA256SUMS"
+            checksum_bytes = checksum_path.read_bytes()
+            replacement = b"0" if checksum_bytes[:1] != b"0" else b"1"
+            checksum_path.write_bytes(replacement + checksum_bytes[1:])
+            return manifest
+
+        with (
+            self.generation_roots(environment),
+            patch.object(
+                hf_dataset_module,
+                "audit_public_payload",
+                side_effect=audit_then_mutate_checksums,
+            ),
+            self.assertRaises(ValidationError),
+        ):
+            hf_dataset_module.generate_dataset(test_public_staging=staged_public)
+
+        self.assertEqual(self.tree_snapshot(target), before)
+        self.assertIsNone(self.tree_snapshot(environment["private_root"]))
+
+    def test_missing_ordinary_source_leaves_all_existing_outputs_untouched(self):
+        """Catches source preflight occurring after stale cleanup or output writes."""
+        cases = (
+            ("train tasks", "public_source", "train/tasks.jsonl", False),
+            ("validation labels", "organizer_source", "val/labels.jsonl", False),
+            (
+                "validation PDF with audited test snapshot",
+                "public_source",
+                "val/documents/val-fixture.pdf",
+                True,
+            ),
+        )
+        for name, source_key, relative_path, include_test in cases:
+            with self.subTest(missing_source=name):
+                environment = self.make_generation_environment()
+                target = environment["target_root"]
+                private = environment["private_root"]
+                (target / "test").mkdir(parents=True)
+                (target / "test/old-release.json").write_text("old release\n", encoding="utf-8")
+                (target / "train").mkdir()
+                (target / "train/keep.txt").write_text("public\n", encoding="utf-8")
+                (private / "private").mkdir(parents=True)
+                (private / "private/keep.txt").write_text("private\n", encoding="utf-8")
+                before_public = self.tree_snapshot(target)
+                before_private = self.tree_snapshot(private)
+                (environment[source_key] / relative_path).unlink()
+                staged_public = None
+                if include_test:
+                    staged_public = self.make_staged_public_release(environment["root"] / "release")
+
+                with (
+                    self.generation_roots(environment),
+                    self.assertRaises(ValidationError),
+                ):
+                    hf_dataset_module.generate_dataset(
+                        test_public_staging=staged_public,
+                    )
+
+                self.assertEqual(self.tree_snapshot(target), before_public)
+                self.assertEqual(self.tree_snapshot(private), before_private)
 
     def test_explicit_import_rejects_malicious_staging_before_mutating_outputs(self):
         """Catches a generator that trusts a source path and copies private or linked files."""

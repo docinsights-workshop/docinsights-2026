@@ -22,8 +22,6 @@ configs:
     path: train/tasks.jsonl
   - split: validation
     path: val/tasks.jsonl
-  - split: test
-    path: test/tasks.jsonl
 - config_name: labels
   data_files:
   - split: train
@@ -57,7 +55,7 @@ The canonical participant release is the [`docsem/` directory in `oracle-samples
 
 This Hugging Face package mirrors the source release's 908 training tasks, 908 training labels, 217 validation tasks, and all 1,125 PDFs. The PDF files are byte-identical. The Hugging Face task manifests only prefix `document_pdf` with `train/` or `val/` so files resolve directly from this repository's root.
 
-No official held-out test payload is present in this revision. The declared `test` task split is the stable metadata contract for the eventual audited release; it must not be populated from similarly named local directories or archives.
+No official held-out test payload is present in this revision, so the tracked dataset-card configuration intentionally declares only the existing train and validation task files. The release generator adds the `test` configuration to a deterministic release-card payload only after an explicitly selected public staging tree passes the complete audit. It must not be populated from similarly named local directories or archives.
 
 ## Changelog
 
@@ -135,7 +133,7 @@ repo_id = "amitbcp/docinsights-2026-shared-task-data"
 tasks = load_dataset(repo_id, "tasks")
 train_tasks = tasks["train"]
 val_tasks = tasks["validation"]
-test_tasks = tasks["test"]  # available after the official test release
+# After the official release, reloading this config will also provide tasks["test"].
 
 train_labels = load_dataset(repo_id, "labels")["train"]
 

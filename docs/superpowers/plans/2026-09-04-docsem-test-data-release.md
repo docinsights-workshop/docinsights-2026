@@ -159,11 +159,11 @@ git commit -m "Stage DocSem test data with hard privacy boundaries"
 
 **Interfaces:**
 - Consumes: staged public test payload and release manifest.
-- Produces: Hugging Face `tasks` config with train, validation, and test; `labels` config remains train-only.
+- Produces: a tracked/loadable train+validation card plus deterministic audited-release bytes whose `tasks` config adds test; `labels` remains train-only in both.
 
 - [x] **Step 1: Write a failing metadata test**
 
-Parse the dataset card front matter and assert `tasks` has `test/tasks.jsonl`, while `labels` contains only `train/labels.jsonl` and contains no validation/test label path.
+Parse the tracked dataset card front matter and assert every configured path exists before test release. From an explicit audited public test snapshot, render deterministic release-card bytes whose `tasks` config adds `test/tasks.jsonl`, while `labels` remains exactly `train/labels.jsonl`. Assert no release card can be generated without the audited snapshot.
 
 - [x] **Step 2: Implement metadata and participant instructions**
 
@@ -171,7 +171,7 @@ Document the held-out test schema, checksums, OAuth submission portal, three att
 
 - [x] **Step 3: Update the generator safely**
 
-The existing no-argument generation path remains train/validation-only. Test inclusion requires explicit `--test-public-staging` and validates the manifest before copying only public files.
+The existing no-argument generation path remains train/validation-only. Test inclusion requires explicit `--test-public-staging`, validates and captures the complete public snapshot before output mutation, copies only public files, and installs both the snapshot and its generated release card. Never upload the release card before or separately from its matching audited test bytes.
 
 - [x] **Step 4: Run metadata, generator, and scoring tests**
 
@@ -180,7 +180,7 @@ PYTHONDONTWRITEBYTECODE=1 /Users/aamita/miniconda3/bin/python scripts/test_prepa
 PYTHONDONTWRITEBYTECODE=1 /Users/aamita/miniconda3/bin/python scripts/test_competition_scoring.py
 ```
 
-Expected: metadata exposes test tasks but no validation/test labels; existing scoring checks remain green.
+Expected: base metadata is loadable without test; generated release metadata exposes test tasks but no validation/test labels; existing scoring checks remain green.
 
 - [x] **Step 5: Commit**
 
