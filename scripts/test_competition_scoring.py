@@ -21,7 +21,11 @@ import app
 
 
 PRIVATE_TEST_PATH = re.compile(r"(?:private|sealed)/[A-Za-z0-9._/-]+")
-ALLOWED_VALIDATION_SERVER_PATHS = {"private/val_labels.jsonl"}
+ALLOWED_SERVER_SOURCE_PATHS = {
+    "private/val_labels.jsonl",
+    "private/test_release.json",
+    "private/test_finalization_audit.json",
+}
 EMAIL_VALUE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 PUBLIC_COMPONENT_EMAILS = {"lead@example.org"}
 PRIVATE_TEST_FIELDS = {
@@ -42,13 +46,13 @@ COMPATIBILITY_ROWS = [
 ]
 
 
-def _assert_no_private_path(*artifacts):
+def _assert_no_private_path(*artifacts, allowed=()):
     paths = {
         path
         for artifact in artifacts
         for path in PRIVATE_TEST_PATH.findall(str(artifact))
     }
-    if paths - ALLOWED_VALIDATION_SERVER_PATHS:
+    if paths - set(allowed):
         raise AssertionError("test deployment leakage detected: private path")
 
 
@@ -85,7 +89,8 @@ def assert_no_test_leakage(
     """Apply class-aware rules without rejecting participant input schema terms."""
 
     artifacts = (source, rendered_config, api_schema, response, failure_log)
-    _assert_no_private_path(*artifacts)
+    _assert_no_private_path(source, allowed=ALLOWED_SERVER_SOURCE_PATHS)
+    _assert_no_private_path(rendered_config, api_schema, response, failure_log)
     configured_secret_paths = (
         configured_test_secret_paths()
         if configured_secret_paths is None
@@ -270,6 +275,27 @@ def test_test_leakage_scanner_rejects_every_forbidden_class():
             assert configured_path not in str(exc)
         else:
             raise AssertionError("scanner accepted an exact configured secret path")
+
+    assert_no_test_leakage(
+        "\n".join(sorted(ALLOWED_SERVER_SOURCE_PATHS)),
+        "{}",
+        "{}",
+        {"attempt": 2, "score": "withheld"},
+        "failure",
+    )
+    for server_path in ALLOWED_SERVER_SOURCE_PATHS:
+        try:
+            assert_no_test_leakage(
+                "source",
+                json.dumps({"leak": server_path}),
+                "{}",
+                {"attempt": 2, "score": "withheld"},
+                "failure",
+            )
+        except AssertionError as exc:
+            assert "private path" in str(exc)
+        else:
+            raise AssertionError("scanner accepted a server path in rendered config")
 
 
 def test_nondefault_secret_paths_stay_out_of_real_module_and_api_rendering():

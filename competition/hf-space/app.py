@@ -1,6 +1,8 @@
 import datetime as dt
+import hashlib
 import html
 import json
+import math
 import os
 import re
 import threading
@@ -56,6 +58,41 @@ _RFC3339_UTC = re.compile(
 )
 _RELEASE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+_REVISION = re.compile(r"[0-9a-f]{40}\Z")
+_REPOSITORY_ID = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z"
+)
+_FORBIDDEN_PUBLIC_PATH = re.compile(
+    r"(?:^|/)(?:private|attempts/test|projections/test/accounts|"
+    r"exclusions/test|adjudications/test)(?:/|$)",
+    re.IGNORECASE,
+)
+_CONTROL_CHARACTER = re.compile(r"[\x00-\x1f\x7f]")
+
+FINAL_TEST_RELEASE_PATH = "private/test_release.json"
+FINAL_TEST_PROJECTION_PATH = "projections/test/public_final.json"
+FINAL_TEST_AUDIT_PATH = "private/test_finalization_audit.json"
+FINAL_TEST_ARTIFACT_MAX_BYTES = 16 * 1024 * 1024
+FINAL_TEST_MAX_ROWS = 30_000
+FINAL_TEST_PUBLIC_ROW_FIELDS = frozenset(
+    {
+        "rank",
+        "hf_username",
+        "team",
+        "submission_name",
+        "selected_attempt",
+        "answer_accuracy",
+        "evidence_f1",
+    }
+)
+FINAL_TEST_PROJECTION_FIELDS = frozenset(
+    {"schema_version", "split", "release_id", "task_manifest_sha256", "rows"}
+)
+
+
+class FinalLeaderboardError(RuntimeError):
+    """Sanitized refusal when a public final projection cannot be proven."""
+
 
 
 @dataclass(frozen=True)
@@ -169,6 +206,8 @@ TEST_PUBLIC_LEADERBOARD_ENABLED = TEST_DEPLOYMENT.public_leaderboard_enabled
 TEST_TASKS_FILE = os.getenv("TEST_TASKS_FILE", "test/tasks.jsonl")
 VALIDATION_SPLIT_LABEL = "Validation (development)"
 TEST_SPLIT_LABEL = "Test (final)"
+VALIDATION_LEADERBOARD_LABEL = "Validation leaderboard"
+FINAL_TEST_LEADERBOARD_LABEL = "Final test leaderboard"
 
 PORTAL_CSS = """
 html,
@@ -600,15 +639,41 @@ body {
 """
 
 
-def _read_hub_file(repo_id, filename, token=None, force_download=False):
+def _read_hub_file(
+    repo_id,
+    filename,
+    token=None,
+    force_download=False,
+    revision=None,
+    max_bytes=None,
+):
     path = hf_hub_download(
         repo_id=repo_id,
         filename=filename,
         repo_type="dataset",
         token=token,
         force_download=force_download,
+        revision=revision,
     )
-    return Path(path).read_text(encoding="utf-8")
+    file_path = Path(path)
+    if max_bytes is not None:
+        try:
+            size = file_path.stat().st_size
+        except OSError as exc:
+            raise FinalLeaderboardError(
+                "The final test leaderboard is not available."
+            ) from exc
+        if size > max_bytes:
+            raise FinalLeaderboardError("The final test leaderboard is not available.")
+    try:
+        payload = file_path.read_bytes()
+        if max_bytes is not None and len(payload) > max_bytes:
+            raise FinalLeaderboardError("The final test leaderboard is not available.")
+        return payload.decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise FinalLeaderboardError(
+            "The final test leaderboard is not available."
+        ) from exc
 
 
 def _load_gold_rows():
@@ -757,6 +822,404 @@ def leaderboard_html():
         </table>
     </div>
     """
+
+
+def _decode_final_json(raw):
+    """Decode one bounded JSON document while rejecting duplicate keys and NaN."""
+
+    if isinstance(raw, str):
+        try:
+            raw = raw.encode("utf-8")
+        except UnicodeEncodeError:
+            raise FinalLeaderboardError(
+                "The final test leaderboard is not available."
+            ) from None
+    if not isinstance(raw, bytes) or len(raw) > FINAL_TEST_ARTIFACT_MAX_BYTES:
+        raise FinalLeaderboardError("The final test leaderboard is not available.")
+
+    def object_without_duplicates(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError("duplicate key")
+            value[key] = item
+        return value
+
+    try:
+        return json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=object_without_duplicates,
+            parse_constant=lambda _: (_ for _ in ()).throw(ValueError("constant")),
+        )
+    except (UnicodeDecodeError, ValueError, TypeError, json.JSONDecodeError):
+        raise FinalLeaderboardError(
+            "The final test leaderboard is not available."
+        ) from None
+
+
+def _artifact_bytes(raw):
+    if isinstance(raw, str):
+        try:
+            raw = raw.encode("utf-8")
+        except UnicodeEncodeError:
+            raise FinalLeaderboardError(
+                "The final test leaderboard is not available."
+            ) from None
+    if not isinstance(raw, bytes) or len(raw) > FINAL_TEST_ARTIFACT_MAX_BYTES:
+        raise FinalLeaderboardError("The final test leaderboard is not available.")
+    return raw
+
+
+def _valid_public_text(value):
+    return (
+        isinstance(value, str)
+        and bool(value.strip())
+        and len(value) <= 4096
+        and _CONTROL_CHARACTER.search(value) is None
+        and _FORBIDDEN_PUBLIC_PATH.search(value.replace("\\", "/")) is None
+    )
+
+
+def _validate_final_projection(projection, release):
+    if (
+        not isinstance(projection, Mapping)
+        or set(projection) != FINAL_TEST_PROJECTION_FIELDS
+        or type(projection.get("schema_version")) is not int
+        or projection.get("schema_version") != 1
+        or projection.get("split") != "test"
+        or projection.get("release_id") != release.get("release_id")
+        or projection.get("task_manifest_sha256") != release.get("task_manifest_sha256")
+        or not isinstance(projection.get("rows"), list)
+        or len(projection["rows"]) > FINAL_TEST_MAX_ROWS
+    ):
+        raise FinalLeaderboardError("The final test leaderboard is not available.")
+    for expected_rank, row in enumerate(projection["rows"], start=1):
+        if (
+            not isinstance(row, Mapping)
+            or set(row) != FINAL_TEST_PUBLIC_ROW_FIELDS
+            or type(row.get("rank")) is not int
+            or row["rank"] != expected_rank
+            or type(row.get("selected_attempt")) is not int
+            or not 1 <= row["selected_attempt"] <= 3
+            or any(
+                not _valid_public_text(row.get(field))
+                for field in ("hf_username", "team", "submission_name")
+            )
+        ):
+            raise FinalLeaderboardError("The final test leaderboard is not available.")
+        for field in ("answer_accuracy", "evidence_f1"):
+            metric = row.get(field)
+            if (
+                type(metric) is not float
+                or not math.isfinite(metric)
+                or not 0.0 <= metric <= 1.0
+            ):
+                raise FinalLeaderboardError(
+                    "The final test leaderboard is not available."
+                )
+
+
+def _validate_final_release(release, deployment):
+    required = {
+        "schema_version",
+        "release_id",
+        "task_manifest_sha256",
+        "gold_sha256",
+        "enabled",
+        "finalized",
+        "max_attempts",
+        "feedback_policy",
+        "open_at",
+        "close_at",
+        "public_revision",
+        "public_repo_id",
+        "task_manifest_path",
+        "finalized_at",
+        "finalization_source_revision",
+        "finalization_scorer_revision",
+        "finalization_scorer_sha256",
+        "final_projection_sha256",
+        "finalization_audit_sha256",
+    }
+    opened = (
+        _parse_rfc3339_utc(release.get("open_at"))
+        if isinstance(release, Mapping)
+        else None
+    )
+    closed = (
+        _parse_rfc3339_utc(release.get("close_at"))
+        if isinstance(release, Mapping)
+        else None
+    )
+    finalized = (
+        _parse_rfc3339_utc(release.get("finalized_at"))
+        if isinstance(release, Mapping)
+        else None
+    )
+    if (
+        not isinstance(release, Mapping)
+        or not required.issubset(release)
+        or type(release.get("schema_version")) is not int
+        or release.get("schema_version") != 1
+        or release.get("release_id") != getattr(deployment, "release_id", None)
+        or release.get("task_manifest_sha256")
+        != getattr(deployment, "task_manifest_sha256", None)
+        or release.get("gold_sha256") != getattr(deployment, "gold_sha256", None)
+        or _SHA256.fullmatch(str(release.get("task_manifest_sha256", ""))) is None
+        or _SHA256.fullmatch(str(release.get("gold_sha256", ""))) is None
+        or release.get("enabled") is not False
+        or release.get("finalized") is not True
+        or type(release.get("max_attempts")) is not int
+        or release.get("max_attempts") != 3
+        or release.get("feedback_policy") != "first-attempt-only"
+        or opened is None
+        or closed is None
+        or finalized is None
+        or not opened < closed <= finalized
+        or _REVISION.fullmatch(str(release.get("public_revision", ""))) is None
+        or _REPOSITORY_ID.fullmatch(str(release.get("public_repo_id", ""))) is None
+        or release.get("task_manifest_path") != "test/tasks.jsonl"
+        or _REVISION.fullmatch(str(release.get("finalization_source_revision", "")))
+        is None
+        or _REVISION.fullmatch(str(release.get("finalization_scorer_revision", "")))
+        is None
+        or any(
+            _SHA256.fullmatch(str(release.get(field, ""))) is None
+            for field in (
+                "finalization_scorer_sha256",
+                "final_projection_sha256",
+                "finalization_audit_sha256",
+            )
+        )
+    ):
+        raise FinalLeaderboardError("The final test leaderboard is not available.")
+
+
+def _validate_final_audit(audit, release, projection_sha256):
+    required = {
+        "schema_version",
+        "split",
+        "release_id",
+        "source_revision",
+        "finalized_at",
+        "close_at",
+        "task_manifest_sha256",
+        "gold_sha256",
+        "scorer_revision",
+        "scorer_code_sha256",
+        "public_projection_sha256",
+        "selected_account_count",
+    }
+    if (
+        not isinstance(audit, Mapping)
+        or not required.issubset(audit)
+        or type(audit.get("schema_version")) is not int
+        or audit.get("schema_version") != 1
+        or audit.get("split") != "test"
+        or audit.get("release_id") != release.get("release_id")
+        or audit.get("source_revision") != release.get("finalization_source_revision")
+        or audit.get("finalized_at") != release.get("finalized_at")
+        or audit.get("close_at") != release.get("close_at")
+        or audit.get("task_manifest_sha256") != release.get("task_manifest_sha256")
+        or audit.get("gold_sha256") != release.get("gold_sha256")
+        or audit.get("scorer_revision") != release.get("finalization_scorer_revision")
+        or audit.get("scorer_code_sha256") != release.get("finalization_scorer_sha256")
+        or audit.get("public_projection_sha256") != projection_sha256
+        or type(audit.get("selected_account_count")) is not int
+        or audit.get("selected_account_count") < 0
+    ):
+        raise FinalLeaderboardError("The final test leaderboard is not available.")
+
+
+def _load_final_test_projection(
+    *,
+    api=None,
+    artifact_reader=None,
+    deployment=None,
+    repo_id=None,
+    token=None,
+):
+    """Load one sanitized finalized projection from an exact private HEAD."""
+
+    api = _TEST_HUB_API if api is None else api
+    deployment = TEST_DEPLOYMENT if deployment is None else deployment
+    repo_id = SUBMISSIONS_REPO_ID if repo_id is None else repo_id
+    token = WRITE_TOKEN if token is None else token
+    if (
+        not isinstance(repo_id, str)
+        or _REPOSITORY_ID.fullmatch(repo_id) is None
+        or not isinstance(token, str)
+        or not token.strip()
+    ):
+        raise FinalLeaderboardError("The final test leaderboard is not available.")
+    try:
+        info = api.repo_info(
+            repo_id=repo_id,
+            repo_type="dataset",
+            token=token,
+        )
+        revision = getattr(info, "sha", None)
+        if (
+            getattr(info, "private", None) is not True
+            or not isinstance(revision, str)
+            or _REVISION.fullmatch(revision) is None
+        ):
+            raise FinalLeaderboardError("The final test leaderboard is not available.")
+
+        if artifact_reader is None:
+
+            def artifact_reader(path, pinned_revision):
+                return _read_hub_file(
+                    repo_id,
+                    path,
+                    token=token,
+                    force_download=True,
+                    revision=pinned_revision,
+                    max_bytes=FINAL_TEST_ARTIFACT_MAX_BYTES,
+                )
+
+        release_raw = _artifact_bytes(
+            artifact_reader(FINAL_TEST_RELEASE_PATH, revision)
+        )
+        projection_raw = _artifact_bytes(
+            artifact_reader(FINAL_TEST_PROJECTION_PATH, revision)
+        )
+        audit_raw = _artifact_bytes(artifact_reader(FINAL_TEST_AUDIT_PATH, revision))
+
+        release = _decode_final_json(release_raw)
+        projection = _decode_final_json(projection_raw)
+        audit = _decode_final_json(audit_raw)
+        _validate_final_release(release, deployment)
+        projection_sha256 = hashlib.sha256(projection_raw).hexdigest()
+        if projection_sha256 != release.get("final_projection_sha256"):
+            raise FinalLeaderboardError("The final test leaderboard is not available.")
+        if hashlib.sha256(audit_raw).hexdigest() != release.get(
+            "finalization_audit_sha256"
+        ):
+            raise FinalLeaderboardError("The final test leaderboard is not available.")
+        _validate_final_projection(projection, release)
+        _validate_final_audit(audit, release, projection_sha256)
+        if audit.get("selected_account_count") != len(projection["rows"]):
+            raise FinalLeaderboardError("The final test leaderboard is not available.")
+        return projection
+    except FinalLeaderboardError:
+        raise
+    except Exception:
+        raise FinalLeaderboardError(
+            "The final test leaderboard is not available."
+        ) from None
+
+
+def final_test_leaderboard_html(projection):
+    """Render only the seven-field public projection with escaped text."""
+
+    _validate_final_projection(
+        projection,
+        {
+            "release_id": projection.get("release_id")
+            if isinstance(projection, Mapping)
+            else None,
+            "task_manifest_sha256": projection.get("task_manifest_sha256")
+            if isinstance(projection, Mapping)
+            else None,
+        },
+    )
+    body_rows = []
+    for row in projection["rows"]:
+        body_rows.append(
+            "<tr>"
+            f'<td class="leaderboard-rank">{row["rank"]}</td>'
+            f"<td>{html.escape(row['hf_username'])}</td>"
+            f"<td>{html.escape(row['team'])}</td>"
+            f"<td>{html.escape(row['submission_name'])}</td>"
+            f'<td class="leaderboard-attempts">{row["selected_attempt"]}</td>'
+            f'<td class="leaderboard-metric">{_format_metric(row["answer_accuracy"])}</td>'
+            f'<td class="leaderboard-metric">{_format_metric(row["evidence_f1"])}</td>'
+            "</tr>"
+        )
+    if not body_rows:
+        body_rows.append(
+            '<tr><td class="leaderboard-empty" colspan="7">No eligible final test submissions.</td></tr>'
+        )
+    return f"""
+    <div class="leaderboard-table-wrap">
+        <table aria-label="DocSem final test leaderboard">
+            <thead>
+                <tr>
+                    <th class="leaderboard-rank" scope="col">Rank</th>
+                    <th scope="col">Hugging Face account</th>
+                    <th scope="col">Team</th>
+                    <th scope="col">Selected submission</th>
+                    <th class="leaderboard-attempts" scope="col">Selected attempt</th>
+                    <th class="leaderboard-metric" scope="col">Answer accuracy</th>
+                    <th class="leaderboard-metric" scope="col">Evidence F1</th>
+                </tr>
+            </thead>
+            <tbody>{"".join(body_rows)}</tbody>
+        </table>
+    </div>
+    """
+
+
+def _validation_leaderboard_heading():
+    return """
+    <div>
+        <h2>Validation leaderboard</h2>
+        <p>Provisional validation results from each team's latest attempt. Ranked by answer accuracy, then evidence F1. Leaderboard refreshed September 3, 2026 after the organizer-only ground-truth correction; all existing submissions were rescored. Final standings will use the held-out test set.</p>
+    </div>
+    """
+
+
+def _final_test_leaderboard_heading():
+    return """
+    <div>
+        <h2>Final test leaderboard</h2>
+        <p>Final standings use each Hugging Face account's best eligible attempt from at most three accepted test submissions.</p>
+    </div>
+    """
+
+
+def _final_test_notice():
+    return (
+        '<section role="status" class="leaderboard-empty">'
+        "The final test leaderboard is not available yet. The official held-out "
+        "test release and final ranking remain closed while organizers complete "
+        "the release and integrity checks."
+        "</section>"
+    )
+
+
+def leaderboard_view(selection):
+    """Render one server-selected leaderboard surface without client paths."""
+
+    if selection == VALIDATION_LEADERBOARD_LABEL:
+        return (
+            gr.update(value=_validation_leaderboard_heading()),
+            gr.update(value=leaderboard_html()),
+            gr.update(visible=True),
+        )
+    if selection != FINAL_TEST_LEADERBOARD_LABEL:
+        raise gr.Error("Choose a listed leaderboard view.")
+    if not TEST_PUBLIC_LEADERBOARD_ENABLED:
+        return (
+            gr.update(value=_final_test_leaderboard_heading()),
+            gr.update(value=_final_test_notice()),
+            gr.update(visible=False),
+        )
+    try:
+        projection = _load_final_test_projection()
+        content = final_test_leaderboard_html(projection)
+    except FinalLeaderboardError:
+        return (
+            gr.update(value=_final_test_leaderboard_heading()),
+            gr.update(value=_final_test_notice()),
+            gr.update(visible=False),
+        )
+    return (
+        gr.update(value=_final_test_leaderboard_heading()),
+        gr.update(value=content),
+        gr.update(visible=True),
+    )
 
 
 def evaluate_submission(file_obj, team, contact, submission_name, participant_names=None):
@@ -1053,9 +1516,9 @@ with PortalBlocks(**blocks_options) as demo:
             </p>
             <p>
                 <strong>Final rankings will use a held-out test set.</strong>
-                It will be released five days before the September 10, 2026 final submission deadline.
-                Participants will be notified when it is available and asked to submit test-set results;
-                those results will determine the final leaderboard.
+                The official held-out release is not available yet, and test submissions remain closed
+                while organizers complete the release and integrity checks. Participants will be notified
+                when it is available; those results will determine the final leaderboard.
             </p>
         </section>
         """
@@ -1153,14 +1616,18 @@ with PortalBlocks(**blocks_options) as demo:
         api_name="select_split",
     )
     with gr.Column(elem_id="leaderboard-section"):
+        leaderboard_selector = gr.Dropdown(
+            choices=[
+                VALIDATION_LEADERBOARD_LABEL,
+                FINAL_TEST_LEADERBOARD_LABEL,
+            ],
+            value=VALIDATION_LEADERBOARD_LABEL,
+            label="Leaderboard view",
+            interactive=True,
+        )
         with gr.Row(elem_id="leaderboard-heading"):
-            gr.HTML(
-                """
-                <div>
-                    <h2>Validation leaderboard</h2>
-                    <p>Provisional validation results from each team's latest attempt. Ranked by answer accuracy, then evidence F1. Leaderboard refreshed September 3, 2026 after the organizer-only ground-truth correction; all existing submissions were rescored. Final standings will use the held-out test set.</p>
-                </div>
-                """
+            leaderboard_heading = gr.HTML(
+                value=_validation_leaderboard_heading,
             )
             refresh = gr.Button(
                 "Refresh results",
@@ -1173,12 +1640,19 @@ with PortalBlocks(**blocks_options) as demo:
             value=leaderboard_html,
             elem_id="leaderboard-table",
         )
-        refresh.click(leaderboard_html, inputs=None, outputs=leaderboard)
-
-    with gr.Group(elem_id="test-leaderboard-section"):
-        gr.Markdown(
-            "## Test leaderboard\n"
-            "Final test standings will be published here after organizer finalization."
+        leaderboard_selector.change(
+            leaderboard_view,
+            inputs=leaderboard_selector,
+            outputs=[leaderboard_heading, leaderboard, refresh],
+            api_name=False,
+            show_api=False,
+        )
+        refresh.click(
+            leaderboard_view,
+            inputs=leaderboard_selector,
+            outputs=[leaderboard_heading, leaderboard, refresh],
+            api_name=False,
+            show_api=False,
         )
 
 

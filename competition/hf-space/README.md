@@ -24,9 +24,11 @@ The training split was updated on **August 31, 2026** to correct seven annotatio
 
 Three organizer-only validation ground-truth labels have now been corrected, most recently on **September 3, 2026**, following additional data review. All existing submissions were rescored, and the leaderboard now reflects the updated results. Public validation inputs, the task definition, and the data format are unchanged.
 
-The current leaderboard contains provisional validation results. A held-out test set will be released five days before the September 10, 2026 final submission deadline. Participants will be notified when it is available and asked to submit their test-set results. Performance on that held-out test set will determine the final leaderboard.
+The current leaderboard contains provisional validation results. The official held-out test release is not available yet, and test submissions remain closed while the organizers complete the release and integrity checks. Participants will be notified when it is available. Performance on the held-out test set will determine the final leaderboard.
 
-The test workflow is deployed disabled until the organizers publish and pin the official test tasks and private scoring release. When it opens, the first accepted test attempt returns answer accuracy and evidence F1; scores for attempts two and three are withheld until finalization. The public test leaderboard remains a placeholder until organizer finalization.
+The test workflow is deployed disabled until the organizers publish and pin the official test tasks and private scoring release. When it opens, each signed-in Hugging Face account can make up to three accepted test submissions. The first accepted attempt returns answer accuracy and evidence F1 and can be retrieved later with the same login; scores for attempts two and three are withheld until organizer finalization. The best eligible attempt per account is used for the final ranking. The quota is per Hugging Face account, not per team or person, so team members using separate authenticated accounts are treated as separate accounts.
+
+The portal has separate **Validation leaderboard** and **Final test leaderboard** views. The validation view remains available throughout the competition. The final-test view is a notice only until organizer finalization; it exposes no test rows, ranks, per-example results, later-attempt scores, contact details, OAuth subjects, participant names, or predictions. After finalization and explicit operator activation, it reads one sanitized seven-field projection from the exact private repository head and publishes the selected best-of-three rows.
 
 ## Disabled test-release configuration
 
@@ -52,7 +54,7 @@ TEST_GOLD_CONFIG_PATH=<server-only test gold path>
 
 The timestamps must be RFC3339 UTC values ending in `Z`, and the open instant must precede the close instant. The paths have no public default and are configured only as server secrets. The release identifier, digests, window, and attempt limit must agree exactly with the organizer-pinned server release; the server independently verifies the private scoring material before accepting an upload. `TEST_MAX_ATTEMPTS` is fixed at three. A malformed/missing value, a non-UTC or reversed window, missing path, or any attempt-limit value other than `3` leaves test submission and the public-test flag disabled without changing anonymous validation or the validation leaderboard.
 
-Keep `TEST_PUBLIC_LEADERBOARD_ENABLED=false` until organizer finalization. Enabling it is not a substitute for finalization and never exposes private per-example results, participant emails, OAuth subjects, raw predictions, or later-attempt scores.
+Keep `TEST_PUBLIC_LEADERBOARD_ENABLED=false` until organizer finalization. Enabling it is not a substitute for finalization: the server also requires a private exact-SHA repository snapshot, a finalized and disabled release, matching configured release/task/gold digests, and matching final-projection and audit hashes. It downloads only the fixed server-selected release, sanitized final projection, and finalization audit paths. It never accepts a client-provided split or path and never exposes private per-example results, participant emails, OAuth subjects, raw predictions, unselected attempts, or later-attempt scores.
 
 The submission form requires participant name(s), team name, contact email, and submission name. Participant names and contact emails are stored only in the private submission repository and are never rendered on the public leaderboard.
 

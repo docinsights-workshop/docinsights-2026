@@ -62,6 +62,12 @@ permalink: /faq/
     <p>Yes. Three organizer-only validation ground-truth labels have now been corrected, most recently on <strong>September 3, 2026</strong>, following additional data review. All existing submissions were rescored, and the leaderboard now reflects the updated results. Public validation inputs, task definition, and data format are unchanged.</p>
   </article>
   <article>
+    <h2>How will DocSem held-out test submissions work?</h2>
+    <p>The held-out test release is not available yet, and test submissions remain closed while organizers complete the official release and integrity checks. Validation submission and the provisional validation leaderboard remain available.</p>
+    <p>After the official test window opens, the portal will accept up to three accepted submissions per signed-in Hugging Face account. The first accepted attempt returns answer accuracy and evidence F1 and can be retrieved later after signing in with the same account. The scores for attempts two and three remain withheld until organizer finalization. The best eligible attempt per account determines the final ranking.</p>
+    <p>The public portal has separate Validation leaderboard and Final test leaderboard views. It publishes no test ranks during the submission window. The quota is enforced per Hugging Face account rather than per team or person; team members using separate authenticated accounts are treated as separate accounts for quota and ranking.</p>
+  </article>
+  <article>
     <h2>Is Dr.DocBench open for submissions?</h2>
     <p>Yes. Review the <a href="https://drdocbench-challenge.abaka-pages.com/" target="_blank" rel="noopener">challenge website</a> and <a href="https://huggingface.co/datasets/2077AIDataFoundation/DrDocBench" target="_blank" rel="noopener">public dataset</a>, then submit through the <a href="https://eval.ai/web/challenges/challenge-page/2717/overview" target="_blank" rel="noopener">Dr.DocBench EvalAI challenge</a>. Teams may submit up to 3 times per day and select up to 2 submissions for final evaluation.</p>
   </article>

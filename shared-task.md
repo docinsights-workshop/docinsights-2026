@@ -68,7 +68,9 @@ permalink: /shared-task/
             <h3 id="docsem-validation-update">Validation ground truth refreshed Sep 3</h3>
             <p>Three organizer-only validation ground-truth labels have now been corrected, most recently on <strong>September 3, 2026</strong>, following additional data review. All existing submissions were rescored, and the leaderboard now reflects the updated results. Public validation inputs, task definition, and data format are unchanged.</p>
           </aside>
-          <p><strong>Final evaluation:</strong> A held-out test set will be released five days before the September 10, 2026 final submission deadline. Participants will be notified when it becomes available and asked to submit their test-set results. Performance on the held-out test set will determine the final leaderboard.</p>
+          <p><strong>Final evaluation:</strong> The held-out test release is not available yet, and test submissions remain closed while the organizers complete the official release and integrity checks. Participants will be notified when it becomes available and asked to submit their test-set results. Performance on the held-out test set will determine the final leaderboard.</p>
+          <p>When the official test window opens, the portal will accept up to three accepted test submissions per signed-in Hugging Face account. The first accepted test attempt returns answer accuracy and evidence F1; scores for attempts two and three are withheld until organizer finalization. The best eligible attempt from each account determines the final ranking. The public portal will keep separate Validation leaderboard and Final test leaderboard views, with no test ranks published during the submission window.</p>
+          <p>The quota is enforced per Hugging Face account, not per team or person. Team members may submit from their own authenticated accounts, and each qualifying account is ranked independently under the same best-of-three rule.</p>
         </aside>
         <div class="challenge-actions">
           <a class="challenge-action challenge-action-primary" href="https://huggingface.co/datasets/amitbcp/docinsights-2026-shared-task-data" target="_blank" rel="noopener">Dataset and guide</a>
@@ -87,7 +89,7 @@ permalink: /shared-task/
         </div>
         <div>
           <dt>Submission</dt>
-          <dd>Submit one complete validation JSONL now. Participants will be notified and asked for a separate test-set submission when final evaluation opens.</dd>
+          <dd>Submit one complete validation JSONL now. Test submission is currently closed; after the official release opens, sign in with Hugging Face and submit up to three complete test files.</dd>
         </div>
       </dl>
     </div>
