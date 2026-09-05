@@ -134,9 +134,7 @@ def _numeric_rect(value: object, description: str) -> tuple[float, float, float,
     return left, top, right, bottom
 
 
-def _trace_has_rendered_pixels(trace: dict, page_rect: object, pixmap: object) -> bool:
-    left, top, right, bottom = _numeric_rect(trace.get("bbox"), "text bounding box")
-    page_left, page_top, page_right, page_bottom = _numeric_rect(tuple(page_rect), "page bounds")
+def _validate_pixmap(pixmap: object) -> None:
     if (
         not isinstance(pixmap.width, int)
         or not isinstance(pixmap.height, int)
@@ -144,11 +142,34 @@ def _trace_has_rendered_pixels(trace: dict, page_rect: object, pixmap: object) -
         or not isinstance(pixmap.stride, int)
         or pixmap.width <= 0
         or pixmap.height <= 0
-        or pixmap.n <= 0
+        or pixmap.n < 3
         or pixmap.stride < pixmap.width * pixmap.n
         or len(pixmap.samples) < pixmap.stride * pixmap.height
     ):
         _fail("PDF renderer produced an invalid page image.")
+
+
+def _trace_rgb(trace: dict) -> tuple[int, int, int]:
+    color = trace.get("color")
+    if not isinstance(color, (tuple, list)) or len(color) != 3:
+        _fail("PDF text color is malformed.")
+    try:
+        values = tuple(float(component) for component in color)
+    except (TypeError, ValueError) as exc:
+        raise ValidationError("PDF text color is malformed.") from exc
+    if not all(math.isfinite(component) and 0 <= component <= 1 for component in values):
+        _fail("PDF text color is malformed.")
+    return tuple(round(component * 255) for component in values)
+
+
+def _bbox_has_rendered_pixels(
+    bbox: object,
+    page_rect: tuple[float, float, float, float],
+    pixmap: object,
+    expected_rgb: tuple[int, int, int],
+) -> bool:
+    left, top, right, bottom = _numeric_rect(bbox, "text bounding box")
+    page_left, page_top, page_right, page_bottom = page_rect
 
     left = max(left, page_left)
     top = max(top, page_top)
@@ -171,45 +192,87 @@ def _trace_has_rendered_pixels(trace: dict, page_rect: object, pixmap: object) -
         row_offset = y * pixmap.stride
         for x in range(start_x, end_x):
             offset = row_offset + x * pixmap.n
-            if any(samples[offset + component] != 255 for component in range(pixmap.n)):
+            pixel = tuple(samples[offset + component] for component in range(3))
+            if any(component != 255 for component in pixel) and max(
+                abs(component - expected) for component, expected in zip(pixel, expected_rgb)
+            ) <= 128:
                 return True
     return False
 
 
-def _render_visible_pdf_text(path: Path) -> str:
+def _trace_characters(trace: dict) -> list[tuple[str, tuple[float, float, float, float]]]:
+    raw_characters = trace.get("chars")
+    if not isinstance(raw_characters, (tuple, list)) or not raw_characters:
+        _fail("PDF text character geometry is malformed.")
+    characters = []
+    for character in raw_characters:
+        if not isinstance(character, (tuple, list)) or len(character) < 4 or not isinstance(character[0], int):
+            _fail("PDF text character geometry is malformed.")
+        try:
+            text = chr(character[0])
+        except ValueError as exc:
+            raise ValidationError("PDF text character geometry is malformed.") from exc
+        characters.append((text, _numeric_rect(character[3], "character bounding box")))
+    return characters
+
+
+def _block_match_spans(text: str, block_id: str):
+    return re.finditer(rf"(?<![A-Za-z0-9_]){re.escape(block_id)}(?![A-Za-z0-9_])", text)
+
+
+def _matched_blocks_with_rendered_characters(
+    trace: dict,
+    page_rect: tuple[float, float, float, float],
+    pixmap: object,
+    evidence_ids: set[str],
+) -> set[str]:
+    _numeric_rect(trace.get("bbox"), "text bounding box")
+    expected_rgb = _trace_rgb(trace)
+    characters = _trace_characters(trace)
+    text = "".join(character[0] for character in characters)
+    page_left, page_top, page_right, page_bottom = page_rect
+    matched = set()
+    for block_id in evidence_ids:
+        for match in _block_match_spans(text, block_id):
+            matched_characters = characters[match.start() : match.end()]
+            if all(
+                left >= page_left
+                and top >= page_top
+                and right <= page_right
+                and bottom <= page_bottom
+                and _bbox_has_rendered_pixels((left, top, right, bottom), page_rect, pixmap, expected_rgb)
+                for _, (left, top, right, bottom) in matched_characters
+            ):
+                matched.add(block_id)
+    return matched
+
+
+def _render_visible_pdf_evidence_blocks(path: Path, evidence_ids: set[str]) -> set[str]:
     if fitz is None:
         _fail("PDF renderer is unavailable.")
     try:
         with path.open("rb") as source:
             if source.read(5) != b"%PDF-":
                 _fail("PDF is unreadable.")
-        visible_runs = []
+        matched_blocks = set()
         with fitz.open(str(path)) as document:
             if document.needs_pass:
                 _fail("PDF is encrypted and cannot be inspected.")
             for page in document:
                 pixmap = page.get_pixmap(alpha=False)
+                _validate_pixmap(pixmap)
+                page_rect = _numeric_rect(tuple(page.rect), "page bounds")
                 for trace in page.get_texttrace():
                     if trace.get("type") not in {0, 1, 2} or float(trace.get("opacity", 0)) <= 0:
                         continue
-                    if _trace_has_rendered_pixels(trace, page.rect, pixmap):
-                        visible_runs.append("".join(chr(character[0]) for character in trace["chars"]))
-        if not visible_runs:
-            _fail("PDF contains no renderer-visible text.")
-        return "\n".join(visible_runs)
+                    matched_blocks.update(
+                        _matched_blocks_with_rendered_characters(trace, page_rect, pixmap, evidence_ids)
+                    )
+        return matched_blocks
     except ValidationError:
         raise
     except Exception as exc:
         raise ValidationError("PDF is unreadable.") from exc
-
-
-def _has_visible_block(text: str, block_id: str) -> bool:
-    return bool(
-        re.search(
-            rf"(?<![A-Za-z0-9_]){re.escape(block_id)}(?![A-Za-z0-9_])",
-            text,
-        )
-    )
 
 
 def _validate_pdfs(source_root: Path, tasks: dict[str, dict], labels: dict[str, dict]) -> tuple[Path, ...]:
@@ -224,8 +287,8 @@ def _validate_pdfs(source_root: Path, tasks: dict[str, dict], labels: dict[str, 
         _fail("Task IDs and PDF stems are not a bijection.")
     paths_by_id = {path.stem: path for path in pdf_paths}
     for instance_id in sorted(tasks):
-        text = _render_visible_pdf_text(paths_by_id[instance_id])
-        if any(not _has_visible_block(text, block_id) for block_id in labels[instance_id]["evidence"]):
+        required_blocks = set(labels[instance_id]["evidence"])
+        if _render_visible_pdf_evidence_blocks(paths_by_id[instance_id], required_blocks) != required_blocks:
             _fail("PDF does not visibly contain every evidence block ID.")
     return pdf_paths
 

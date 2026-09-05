@@ -22,9 +22,21 @@ def write_jsonl(path, rows):
     )
 
 
-def write_pdf_with_visible_text(path, text, *, rendering_mode=0, x=72, y=720):
+def write_pdf_with_visible_text(
+    path,
+    text,
+    *,
+    rendering_mode=0,
+    x=72,
+    y=720,
+    fill_color=None,
+    underlay_content="",
+):
     """Write a tiny self-contained PDF whose text extractor sees ``text``."""
-    content = f"BT /F1 12 Tf {rendering_mode} Tr {x} {y} Td ({text}) Tj ET".encode("ascii")
+    color = "" if fill_color is None else f"{fill_color[0]} {fill_color[1]} {fill_color[2]} rg "
+    content = (
+        f"{underlay_content}{color}BT /F1 12 Tf {rendering_mode} Tr {x} {y} Td ({text}) Tj ET"
+    ).encode("ascii")
     objects = (
         b"<< /Type /Catalog /Pages 2 0 R >>",
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
@@ -252,6 +264,28 @@ class PrepareDocsemTestReleaseTests(unittest.TestCase):
             source.root / "documents" / "synthetic-1.pdf",
             "Synthetic fixture off-page block b01",
             y=900,
+        )
+        self.assert_rejected(source)
+
+    def test_rejects_evidence_suffix_clipped_after_a_visible_trace_prefix(self):
+        """Catches whole-trace ink being used to validate an off-page evidence suffix."""
+        source = self.make_source()
+        write_pdf_with_visible_text(
+            source.root / "documents" / "synthetic-1.pdf",
+            "visible-prefix-b01",
+            x=540,
+        )
+        self.assert_rejected(source)
+
+    def test_rejects_unrelated_ink_under_white_evidence_characters(self):
+        """Catches unrelated black pixels being mistaken for white evidence glyphs."""
+        source = self.make_source()
+        write_pdf_with_visible_text(
+            source.root / "documents" / "synthetic-1.pdf",
+            "b01",
+            x=500,
+            fill_color=(1, 1, 1),
+            underlay_content="0 0 0 rg 495 728 35 2 re f ",
         )
         self.assert_rejected(source)
 
