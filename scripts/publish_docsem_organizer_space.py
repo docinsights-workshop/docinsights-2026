@@ -109,6 +109,7 @@ class SnapshotAudit:
 class DeploymentResult:
     published: bool
     action: str
+    outcome: str
     source_revision: str
     bundle_tree_sha256: str
     space_revision: str | None
@@ -154,6 +155,7 @@ class DeploymentRequest:
     visibility: str
     collaborators: tuple[str, ...]
     publish: bool = False
+    verify_only: bool = False
     confirmation: str | None = field(default=None, repr=False)
 
 
@@ -361,19 +363,40 @@ def verify_deploy_identity(profile: object) -> str:
     return username
 
 
-def require_separate_tokens(deploy_token: object, runtime_token: object) -> None:
-    if (
-        not isinstance(deploy_token, str)
-        or not deploy_token
-        or len(deploy_token) > 4096
-        or not isinstance(runtime_token, str)
-        or not runtime_token
-        or len(runtime_token) > 4096
-    ):
-        raise DeploymentError("Both organizer deployment tokens are required.")
-    if deploy_token == runtime_token:
+def verify_denied_identity(
+    profile: object,
+    *,
+    collaborators: Sequence[str],
+) -> str:
+    """Require a documented identity outside the private-Space allowlist."""
+
+    allowlist = _owner_only_allowlist(collaborators)
+    try:
+        username, _role = _documented_access_token_role(profile)
+    except DeploymentError as exc:
         raise DeploymentError(
-            "separate deploy-write and runtime-read tokens are required."
+            "The organizer denied-probe token identity is unavailable."
+        ) from exc
+    if username in allowlist or username == SPACE_OWNER:
+        raise DeploymentError(
+            "The organizer denied-probe identity must be outside the allowlist."
+        )
+    return username
+
+
+def require_separate_tokens(
+    deploy_token: object,
+    runtime_token: object,
+    denied_token: object,
+) -> None:
+    tokens = (deploy_token, runtime_token, denied_token)
+    if any(
+        not isinstance(token, str) or not token or len(token) > 4096 for token in tokens
+    ):
+        raise DeploymentError("All three organizer verification tokens are required.")
+    if len(set(tokens)) != len(tokens):
+        raise DeploymentError(
+            "separate deploy-write, runtime-read, and denied-probe tokens are required."
         )
 
 
@@ -392,6 +415,12 @@ def validate_request(request: DeploymentRequest) -> None:
         )
     if has_parent:
         _exact_revision(request.expected_space_parent, "Space parent revision")
+    if request.publish and request.verify_only:
+        raise DeploymentError("Publish and verify-only modes are mutually exclusive.")
+    if request.verify_only and request.expect_absent:
+        raise DeploymentError(
+            "Verify-only mode requires an existing exact Space revision."
+        )
     if request.publish and request.confirmation != PUBLISH_CONFIRMATION:
         raise DeploymentError("The exact private-publication confirmation is required.")
 
@@ -471,14 +500,22 @@ def _reconcile_private_dataset(
     except Exception as exc:
         raise DeploymentError("The private dataset inventory is unavailable.") from exc
     if "private/test_release.json" not in paths:
-        governed_prefixes = (
-            "attempts/test/",
-            "projections/test/",
-            "exclusions/test/",
-            "adjudications/test/",
+        governed_roots = (
+            "attempts/test",
+            "projections/test",
+            "exclusions/test",
+            "adjudications/test",
         )
-        if "private/test_labels.jsonl" in paths or any(
-            path.startswith(governed_prefixes) for path in paths
+        if any(
+            isinstance(path, str)
+            and (
+                path.startswith("private/test_")
+                or any(
+                    path == root or path.startswith(root + "/")
+                    for root in governed_roots
+                )
+            )
+            for path in paths
         ):
             raise DeploymentError(
                 "The private test ledger exists without its release policy."
@@ -711,35 +748,53 @@ def _verify_organizer_runtime(
     state: SpaceState,
     runtime_token: str,
     deploy_token: str,
+    denied_token: str,
 ) -> str:
+    if state.runtime_stage != _READY_STAGE:
+        raise DeploymentError(
+            "Organizer runtime verification is incomplete until stage RUNNING."
+        )
     if not state.host:
-        return "pending"
+        raise DeploymentError("The RUNNING organizer Space host is unavailable.")
     host = state.host.rstrip("/")
     for path in ("/", "/config", "/info"):
         denied = backend.request("GET", host + path)
         if denied.status_code not in {401, 403, 404}:
             raise DeploymentError("Unauthenticated organizer access was not denied.")
-    if state.runtime_stage != _READY_STAGE:
-        return "pending"
+        outsider = backend.request("GET", host + path, token=denied_token)
+        if outsider.status_code not in {401, 403, 404}:
+            raise DeploymentError("Outside organizer access was not denied.")
 
     root = backend.request("GET", host + "/", token=runtime_token)
-    if root.status_code != 200 or len(root.body) > _MAX_HTTP_BYTES:
+    if (
+        root.status_code != 200
+        or not isinstance(root.body, bytes)
+        or len(root.body) > _MAX_HTTP_BYTES
+    ):
         raise DeploymentError("Authenticated organizer access is unavailable.")
     config_response = backend.request("GET", host + "/config", token=runtime_token)
     info_response = backend.request("GET", host + "/info", token=runtime_token)
-    config = _safe_json(config_response, "organizer Space configuration")
-    info = _safe_json(info_response, "organizer Space API information")
-    config_bytes = config_response.body
     forbidden_values = (
         runtime_token.encode("utf-8"),
         deploy_token.encode("utf-8"),
+        denied_token.encode("utf-8"),
         PRIVATE_DATASET_REPO_ID.encode("utf-8"),
         b"ORGANIZER_READ_TOKEN",
         b"PRIVATE_REPO_ID",
+        b"DOCSEM_ORGANIZER_DEPLOY_TOKEN",
+        b"DOCSEM_ORGANIZER_READ_TOKEN",
+        b"DOCSEM_ORGANIZER_DENIED_TOKEN",
         b"HF_WRITE_TOKEN",
     )
-    if any(value and value in config_bytes for value in forbidden_values):
+    response_bodies = (root.body, config_response.body, info_response.body)
+    if any(
+        value and value in body
+        for body in response_bodies
+        for value in forbidden_values
+    ):
         raise DeploymentError("The organizer Space configuration exposes a secret.")
+    config = _safe_json(config_response, "organizer Space configuration")
+    info = _safe_json(info_response, "organizer Space API information")
     dependencies = config.get("dependencies")
     if not isinstance(dependencies, list) or any(
         not isinstance(item, Mapping) or item.get("api_name") not in {False, None}
@@ -793,6 +848,7 @@ def run_deployment(
     *,
     deploy_token: str,
     runtime_token: str,
+    denied_token: str,
     source_backend: SourceBackend | None = None,
     hub_backend: HubBackend | None = None,
     snapshot_auditor: Callable[..., SnapshotAudit] | None = None,
@@ -800,7 +856,7 @@ def run_deployment(
     """Plan or publish one exact private organizer Space deployment."""
 
     validate_request(request)
-    require_separate_tokens(deploy_token, runtime_token)
+    require_separate_tokens(deploy_token, runtime_token, denied_token)
     source = source_backend or GitSourceBackend()
     hub = hub_backend or HuggingFaceBackend()
     bundle = capture_source_bundle(source, request.expected_source_revision)
@@ -808,6 +864,10 @@ def run_deployment(
         verify_deploy_identity(hub.whoami(deploy_token))
         verify_runtime_identity(
             hub.whoami(runtime_token),
+            collaborators=request.collaborators,
+        )
+        verify_denied_identity(
+            hub.whoami(denied_token),
             collaborators=request.collaborators,
         )
     except DeploymentError:
@@ -837,9 +897,59 @@ def run_deployment(
     )
 
     if not request.publish:
+        if request.verify_only:
+            if not space_state.exists:
+                raise DeploymentError(
+                    "Verify-only mode requires an existing exact Space revision."
+                )
+            _verify_exact_space_tree(hub, space_state, bundle, deploy_token)
+            runtime_access = _verify_organizer_runtime(
+                hub,
+                space_state,
+                runtime_token,
+                deploy_token,
+                denied_token,
+            )
+            final_private_state = _require_private_dataset(
+                hub.inspect_dataset(
+                    PRIVATE_DATASET_REPO_ID,
+                    request.expected_private_revision,
+                    runtime_token,
+                ),
+                expected_revision=request.expected_private_revision,
+            )
+            final_snapshot = _reconcile_private_dataset(
+                hub,
+                final_private_state.revision,
+                runtime_token,
+                snapshot_auditor,
+            )
+            if final_snapshot != snapshot:
+                raise DeploymentError(
+                    "The private organizer snapshot changed during verification."
+                )
+            participant_submissions_disabled, participant_final_disabled = (
+                _verify_participant_disabled(hub, deploy_token)
+            )
+            return DeploymentResult(
+                published=False,
+                action="verify",
+                outcome="verified",
+                source_revision=bundle.source_revision,
+                bundle_tree_sha256=bundle.tree_sha256,
+                space_revision=space_state.revision,
+                private_dataset_revision=final_private_state.revision,
+                organizer_reconciliation=final_snapshot.status,
+                organizer_account_count=final_snapshot.account_count,
+                organizer_attempt_count=final_snapshot.attempt_count,
+                participant_test_submissions_disabled=participant_submissions_disabled,
+                participant_final_leaderboard_disabled=participant_final_disabled,
+                runtime_access=runtime_access,
+            )
         return DeploymentResult(
             published=False,
             action=action,
+            outcome="dry-run",
             source_revision=bundle.source_revision,
             bundle_tree_sha256=bundle.tree_sha256,
             space_revision=space_state.revision,
@@ -920,13 +1030,6 @@ def run_deployment(
         description="organizer Space",
     )
     _verify_exact_space_tree(hub, final_state, bundle, deploy_token)
-    runtime_access = _verify_organizer_runtime(
-        hub,
-        final_state,
-        runtime_token,
-        deploy_token,
-    )
-
     final_private_state = _require_private_dataset(
         hub.inspect_dataset(
             PRIVATE_DATASET_REPO_ID,
@@ -948,9 +1051,33 @@ def run_deployment(
     participant_submissions_disabled, participant_final_disabled = (
         _verify_participant_disabled(hub, deploy_token)
     )
+    if final_state.runtime_stage != _READY_STAGE or not final_state.host:
+        return DeploymentResult(
+            published=True,
+            action=action,
+            outcome="published-pending-verification",
+            source_revision=bundle.source_revision,
+            bundle_tree_sha256=bundle.tree_sha256,
+            space_revision=final_state.revision,
+            private_dataset_revision=final_private_state.revision,
+            organizer_reconciliation=final_snapshot.status,
+            organizer_account_count=final_snapshot.account_count,
+            organizer_attempt_count=final_snapshot.attempt_count,
+            participant_test_submissions_disabled=participant_submissions_disabled,
+            participant_final_leaderboard_disabled=participant_final_disabled,
+            runtime_access="pending",
+        )
+    runtime_access = _verify_organizer_runtime(
+        hub,
+        final_state,
+        runtime_token,
+        deploy_token,
+        denied_token,
+    )
     return DeploymentResult(
         published=True,
         action=action,
+        outcome="published-verified",
         source_revision=bundle.source_revision,
         bundle_tree_sha256=bundle.tree_sha256,
         space_revision=final_state.revision,
@@ -974,6 +1101,7 @@ def render_result(result: DeploymentResult) -> str:
             "organizer_accounts": result.organizer_account_count,
             "organizer_attempts": result.organizer_attempt_count,
             "organizer_reconciliation": result.organizer_reconciliation,
+            "outcome": result.outcome,
             "participant_final_leaderboard_disabled": result.participant_final_leaderboard_disabled,
             "participant_test_submissions_disabled": result.participant_test_submissions_disabled,
             "private_dataset_revision": result.private_dataset_revision,
@@ -982,6 +1110,17 @@ def render_result(result: DeploymentResult) -> str:
             "source_revision": result.source_revision,
             "space_revision": result.space_revision,
             "target": SPACE_REPO_ID,
+            "verification_complete": result.runtime_access == "verified",
+            **(
+                {
+                    "next_action": (
+                        "rerun with --verify-only and "
+                        f"--expected-space-parent {result.space_revision}"
+                    )
+                }
+                if result.outcome == "published-pending-verification"
+                else {}
+            ),
         },
         sort_keys=True,
     )
@@ -1372,7 +1511,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--collaborator", action="append", dest="collaborators", required=True
     )
-    parser.add_argument("--publish", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--publish", action="store_true")
+    mode.add_argument("--verify-only", action="store_true")
     parser.add_argument("--confirm")
     return parser
 
@@ -1387,6 +1528,7 @@ def _request_from_argv(argv: Sequence[str] | None = None) -> DeploymentRequest:
         visibility=args.visibility,
         collaborators=tuple(args.collaborators),
         publish=args.publish,
+        verify_only=args.verify_only,
         confirmation=args.confirm,
     )
 
@@ -1406,16 +1548,20 @@ def main(
         validate_request(request)
         deploy_token = environment.get("DOCSEM_ORGANIZER_DEPLOY_TOKEN")
         runtime_token = environment.get("DOCSEM_ORGANIZER_READ_TOKEN")
-        require_separate_tokens(deploy_token, runtime_token)
+        denied_token = environment.get("DOCSEM_ORGANIZER_DENIED_TOKEN")
+        require_separate_tokens(deploy_token, runtime_token, denied_token)
         result = run_deployment(
             request,
             deploy_token=deploy_token,
             runtime_token=runtime_token,
+            denied_token=denied_token,
         )
     except DeploymentError as exc:
         print(f"ERROR: {exc}", file=stderr)
         return 2
     print(render_result(result), file=stdout)
+    if result.outcome == "published-pending-verification":
+        return 3
     return 0
 
 

@@ -15,6 +15,7 @@ import publish_docsem_organizer_space as publisher
 
 WRITE_TOKEN = "hf_deploy_write_sentinel"
 READ_TOKEN = "hf_runtime_read_sentinel"
+DENIED_TOKEN = "hf_denied_probe_sentinel"
 SOURCE_REVISION = "a" * 40
 SPACE_PARENT = "b" * 40
 PRIVATE_REVISION = "c" * 40
@@ -70,6 +71,7 @@ class FakeHubBackend:
         self.identities = {
             WRITE_TOKEN: whoami("write"),
             READ_TOKEN: whoami("read"),
+            DENIED_TOKEN: whoami("read", "outside-reviewer"),
         }
         self.organizer = (
             publisher.SpaceState(
@@ -107,6 +109,8 @@ class FakeHubBackend:
         self.secret_updates = []
         self.create_calls = []
         self.reserved_variable_after_secret = False
+        self.commit_runtime_stage = "RUNNING"
+        self.request_calls = []
         self.source = source
         self.organizer_config = {
             "components": [],
@@ -231,7 +235,7 @@ class FakeHubBackend:
             private=True,
             sdk="gradio",
             host="https://organizer.example.test",
-            runtime_stage="RUNNING",
+            runtime_stage=self.commit_runtime_stage,
         )
         return self.organizer.revision
 
@@ -243,9 +247,12 @@ class FakeHubBackend:
             self.variables[name] = "wrong-channel"
 
     def request(self, method, url, *, token=None, json_body=None):
+        self.request_calls.append((method, url, token, json_body))
         if self.organizer.host and url.startswith(self.organizer.host):
             if token is None:
                 return publisher.HttpResponse(401, b"private", {})
+            if token == DENIED_TOKEN:
+                return publisher.HttpResponse(403, b"forbidden", {})
             if token != READ_TOKEN:
                 return publisher.HttpResponse(403, b"forbidden", {})
             path = url.removeprefix(self.organizer.host)
@@ -316,6 +323,7 @@ def valid_request(**changes):
         "visibility": "private",
         "collaborators": ("amitbcp",),
         "publish": False,
+        "verify_only": False,
         "confirmation": None,
     }
     values.update(changes)
@@ -414,6 +422,32 @@ class IdentityGateTests(unittest.TestCase):
                 with self.assertRaises(publisher.DeploymentError):
                     publisher.verify_deploy_identity(profile)
 
+    def test_denied_probe_identity_must_be_documented_and_outside_allowlist(self):
+        self.assertEqual(
+            publisher.verify_denied_identity(
+                whoami("read", "outside-reviewer"),
+                collaborators=("amitbcp",),
+            ),
+            "outside-reviewer",
+        )
+        self.assertEqual(
+            publisher.verify_denied_identity(
+                whoami("write", "outside-reviewer"),
+                collaborators=("amitbcp",),
+            ),
+            "outside-reviewer",
+        )
+        for profile in (
+            whoami("read"),
+            {"name": "outside-reviewer", "auth": {"type": "oauth"}},
+        ):
+            with self.subTest(profile=profile):
+                with self.assertRaisesRegex(publisher.DeploymentError, "denied-probe"):
+                    publisher.verify_denied_identity(
+                        profile,
+                        collaborators=("amitbcp",),
+                    )
+
 
 class RequestGateTests(unittest.TestCase):
     def valid_request(self, **changes):
@@ -425,6 +459,7 @@ class RequestGateTests(unittest.TestCase):
             "visibility": "private",
             "collaborators": ("amitbcp",),
             "publish": False,
+            "verify_only": False,
             "confirmation": None,
         }
         values.update(changes)
@@ -457,9 +492,24 @@ class RequestGateTests(unittest.TestCase):
             )
         )
 
-    def test_runtime_and_deploy_tokens_must_be_distinct_and_never_rendered(self):
+        with self.assertRaisesRegex(publisher.DeploymentError, "verify-only"):
+            publisher.validate_request(
+                self.valid_request(publish=True, verify_only=True)
+            )
+        with self.assertRaisesRegex(publisher.DeploymentError, "existing"):
+            publisher.validate_request(
+                self.valid_request(
+                    expected_space_parent=None,
+                    expect_absent=True,
+                    verify_only=True,
+                )
+            )
+
+    def test_all_three_tokens_must_be_distinct_and_never_rendered(self):
         with self.assertRaisesRegex(publisher.DeploymentError, "separate"):
-            publisher.require_separate_tokens(WRITE_TOKEN, WRITE_TOKEN)
+            publisher.require_separate_tokens(WRITE_TOKEN, WRITE_TOKEN, DENIED_TOKEN)
+        with self.assertRaisesRegex(publisher.DeploymentError, "separate"):
+            publisher.require_separate_tokens(WRITE_TOKEN, READ_TOKEN, READ_TOKEN)
 
         request = self.valid_request()
         rendered = repr(request)
@@ -477,6 +527,7 @@ class DeploymentWorkflowTests(unittest.TestCase):
             request or valid_request(),
             deploy_token=WRITE_TOKEN,
             runtime_token=READ_TOKEN,
+            denied_token=DENIED_TOKEN,
             source_backend=self.source,
             hub_backend=self.hub,
             snapshot_auditor=snapshot_auditor,
@@ -495,7 +546,7 @@ class DeploymentWorkflowTests(unittest.TestCase):
         self.assertEqual(self.hub.writes, [])
         self.assertEqual(self.hub.secret_updates, [])
         rendered = publisher.render_result(result)
-        for secret in (WRITE_TOKEN, READ_TOKEN):
+        for secret in (WRITE_TOKEN, READ_TOKEN, DENIED_TOKEN):
             self.assertNotIn(secret, rendered)
             self.assertNotIn(secret, repr(result))
 
@@ -601,16 +652,110 @@ class DeploymentWorkflowTests(unittest.TestCase):
     def test_absent_release_rejects_orphaned_test_ledger_state(self):
         for path in (
             "private/test_labels.jsonl",
+            "private/test_finalization_audit.json",
+            "private/test_future",
+            "attempts/test",
             "attempts/test/account/record.json",
+            "projections/test",
             "projections/test/accounts/account.json",
             "projections/test/organizer_leaderboard.json",
+            "exclusions/test",
             "exclusions/test/example.json",
+            "adjudications/test",
             "adjudications/test/example.json",
         ):
             with self.subTest(path=path):
                 self.hub.dataset_files = (path,)
                 with self.assertRaisesRegex(publisher.DeploymentError, "release"):
                     self.execute()
+
+    def test_verify_only_is_zero_write_and_performs_full_three_identity_probe(self):
+        self.hub.space_tree = dict(self.source.files)
+        result = self.execute(valid_request(verify_only=True))
+
+        self.assertEqual(result.outcome, "verified")
+        self.assertEqual(result.action, "verify")
+        self.assertEqual(result.runtime_access, "verified")
+        self.assertFalse(result.published)
+        self.assertEqual(self.hub.writes, [])
+        self.assertEqual(self.hub.secret_updates, [])
+        self.assertEqual(self.hub.create_calls, [])
+        host = self.hub.organizer.host
+        for path in ("/", "/config", "/info"):
+            self.assertIn(("GET", host + path, None, None), self.hub.request_calls)
+            self.assertIn(
+                ("GET", host + path, DENIED_TOKEN, None), self.hub.request_calls
+            )
+            self.assertIn(
+                ("GET", host + path, READ_TOKEN, None), self.hub.request_calls
+            )
+
+    def test_publish_pending_then_verify_only_converges_without_second_write(self):
+        self.hub.commit_runtime_stage = "BUILDING"
+        request = valid_request(
+            publish=True,
+            confirmation=publisher.PUBLISH_CONFIRMATION,
+        )
+        pending = self.execute(request)
+
+        self.assertEqual(pending.outcome, "published-pending-verification")
+        self.assertEqual(pending.runtime_access, "pending")
+        self.assertNotEqual(pending.outcome, "published-verified")
+        self.assertEqual(len(self.hub.writes), 1)
+        first_secret_updates = list(self.hub.secret_updates)
+        self.hub.organizer = publisher.SpaceState(
+            exists=True,
+            revision=pending.space_revision,
+            private=True,
+            sdk="gradio",
+            host="https://organizer.example.test",
+            runtime_stage="RUNNING",
+        )
+
+        verified = self.execute(
+            valid_request(
+                expected_space_parent=pending.space_revision,
+                verify_only=True,
+            )
+        )
+
+        self.assertEqual(verified.outcome, "verified")
+        self.assertEqual(verified.runtime_access, "verified")
+        self.assertEqual(len(self.hub.writes), 1)
+        self.assertEqual(self.hub.secret_updates, first_secret_updates)
+
+    def test_verify_only_refuses_to_claim_success_before_runtime_is_running(self):
+        self.hub.space_tree = dict(self.source.files)
+        self.hub.organizer = publisher.SpaceState(
+            exists=True,
+            revision=SPACE_PARENT,
+            private=True,
+            sdk="gradio",
+            host="https://organizer.example.test",
+            runtime_stage="BUILDING",
+        )
+
+        with self.assertRaisesRegex(publisher.DeploymentError, "RUNNING"):
+            self.execute(valid_request(verify_only=True))
+
+        self.assertEqual(self.hub.writes, [])
+        self.assertEqual(self.hub.secret_updates, [])
+
+    def test_verify_only_requires_denied_identity_to_be_denied_at_every_endpoint(self):
+        self.hub.space_tree = dict(self.source.files)
+        original = self.hub.request
+
+        def outsider_can_read(method, url, *, token=None, json_body=None):
+            if token == DENIED_TOKEN and url.endswith("/info"):
+                return publisher.HttpResponse(200, b'{"named_endpoints":{}}', {})
+            return original(method, url, token=token, json_body=json_body)
+
+        self.hub.request = outsider_can_read
+        with self.assertRaisesRegex(publisher.DeploymentError, "Outside"):
+            self.execute(valid_request(verify_only=True))
+
+        self.assertEqual(self.hub.writes, [])
+        self.assertEqual(self.hub.secret_updates, [])
 
     def test_publish_updates_exact_tree_sets_only_two_secrets_and_verifies_access(self):
         request = valid_request(
@@ -621,6 +766,7 @@ class DeploymentWorkflowTests(unittest.TestCase):
         result = self.execute(request)
 
         self.assertTrue(result.published)
+        self.assertEqual(result.outcome, "published-verified")
         self.assertEqual(result.action, "update")
         self.assertEqual(result.space_revision, "d" * 40)
         self.assertEqual(len(self.hub.writes), 1)
@@ -644,6 +790,7 @@ class DeploymentWorkflowTests(unittest.TestCase):
             self.hub.secrets["PRIVATE_REPO_ID"],
             publisher.PRIVATE_DATASET_REPO_ID,
         )
+        self.assertNotIn(DENIED_TOKEN, self.hub.secrets.values())
 
     def test_publish_can_create_only_an_explicit_private_space(self):
         self.hub = FakeHubBackend(self.source, space_exists=False)
@@ -710,6 +857,74 @@ class DeploymentWorkflowTests(unittest.TestCase):
         ]
         with self.assertRaisesRegex(publisher.DeploymentError, "mutation"):
             self.execute(request)
+
+    def test_postdeploy_scans_root_config_and_info_for_every_forbidden_value(self):
+        forbidden = (
+            WRITE_TOKEN,
+            READ_TOKEN,
+            DENIED_TOKEN,
+            publisher.PRIVATE_DATASET_REPO_ID,
+            "ORGANIZER_READ_TOKEN",
+            "PRIVATE_REPO_ID",
+            "DOCSEM_ORGANIZER_DEPLOY_TOKEN",
+            "DOCSEM_ORGANIZER_READ_TOKEN",
+            "DOCSEM_ORGANIZER_DENIED_TOKEN",
+            "HF_WRITE_TOKEN",
+        )
+        request = valid_request(
+            publish=True,
+            confirmation=publisher.PUBLISH_CONFIRMATION,
+        )
+        for path in ("/", "/config", "/info"):
+            for value in forbidden:
+                with self.subTest(path=path, value=value):
+                    self.setUp()
+                    original = self.hub.request
+
+                    def leaking(
+                        method,
+                        url,
+                        *,
+                        token=None,
+                        json_body=None,
+                        _original=original,
+                        _path=path,
+                        _value=value,
+                    ):
+                        response = _original(
+                            method,
+                            url,
+                            token=token,
+                            json_body=json_body,
+                        )
+                        if token == READ_TOKEN and url.endswith(_path):
+                            if _path == "/":
+                                body = response.body + _value.encode("utf-8")
+                            else:
+                                body_value = json.loads(response.body)
+                                body_value["leak"] = _value
+                                body = json.dumps(body_value).encode("utf-8")
+                            return publisher.HttpResponse(200, body, {})
+                        return response
+
+                    self.hub.request = leaking
+                    with self.assertRaisesRegex(
+                        publisher.DeploymentError, "exposes a secret"
+                    ):
+                        self.execute(request)
+
+    def test_denied_probe_must_be_available_before_any_publish_write(self):
+        del self.hub.identities[DENIED_TOKEN]
+        request = valid_request(
+            publish=True,
+            confirmation=publisher.PUBLISH_CONFIRMATION,
+        )
+
+        with self.assertRaises(publisher.DeploymentError):
+            self.execute(request)
+
+        self.assertEqual(self.hub.writes, [])
+        self.assertEqual(self.hub.secret_updates, [])
 
     def test_postdeploy_rejects_reserved_name_becoming_public_variable(self):
         self.hub.reserved_variable_after_secret = True
@@ -988,12 +1203,34 @@ class ImportAndCliTests(unittest.TestCase):
         )
 
         self.assertFalse(result.publish)
+        self.assertFalse(result.verify_only)
         self.assertIsNone(result.confirmation)
+
+    def test_cli_verify_only_is_explicit_and_mutually_exclusive_with_publish(self):
+        args = [
+            "--expected-source-revision",
+            SOURCE_REVISION,
+            "--expected-private-revision",
+            PRIVATE_REVISION,
+            "--expected-space-parent",
+            SPACE_PARENT,
+            "--visibility",
+            "private",
+            "--collaborator",
+            "amitbcp",
+            "--verify-only",
+        ]
+        request = publisher._request_from_argv(args)
+        self.assertTrue(request.verify_only)
+        self.assertFalse(request.publish)
+        with self.assertRaises(SystemExit):
+            publisher._request_from_argv(args + ["--publish"])
 
     def test_main_uses_only_dedicated_token_environment_names_and_safe_output(self):
         expected = publisher.DeploymentResult(
             published=False,
             action="update",
+            outcome="dry-run",
             source_revision=SOURCE_REVISION,
             bundle_tree_sha256="f" * 64,
             space_revision=SPACE_PARENT,
@@ -1022,6 +1259,7 @@ class ImportAndCliTests(unittest.TestCase):
         environment = {
             "DOCSEM_ORGANIZER_DEPLOY_TOKEN": WRITE_TOKEN,
             "DOCSEM_ORGANIZER_READ_TOKEN": READ_TOKEN,
+            "DOCSEM_ORGANIZER_DENIED_TOKEN": DENIED_TOKEN,
             "HF_TOKEN": "must-not-be-used",
         }
         with mock.patch.object(
@@ -1039,9 +1277,101 @@ class ImportAndCliTests(unittest.TestCase):
         kwargs = run.call_args.kwargs
         self.assertEqual(kwargs["deploy_token"], WRITE_TOKEN)
         self.assertEqual(kwargs["runtime_token"], READ_TOKEN)
+        self.assertEqual(kwargs["denied_token"], DENIED_TOKEN)
         rendered = output.getvalue()
         for secret in (*environment.values(),):
             self.assertNotIn(secret, rendered)
+
+    def test_main_returns_distinct_nonzero_pending_receipt_with_verify_instruction(
+        self,
+    ):
+        pending = publisher.DeploymentResult(
+            published=True,
+            action="update",
+            outcome="published-pending-verification",
+            source_revision=SOURCE_REVISION,
+            bundle_tree_sha256="f" * 64,
+            space_revision="d" * 40,
+            private_dataset_revision=PRIVATE_REVISION,
+            organizer_reconciliation="disabled/no-release",
+            organizer_account_count=0,
+            organizer_attempt_count=0,
+            participant_test_submissions_disabled=True,
+            participant_final_leaderboard_disabled=True,
+            runtime_access="pending",
+        )
+        output = io.StringIO()
+        error = io.StringIO()
+        argv = [
+            "--expected-source-revision",
+            SOURCE_REVISION,
+            "--expected-private-revision",
+            PRIVATE_REVISION,
+            "--expected-space-parent",
+            SPACE_PARENT,
+            "--visibility",
+            "private",
+            "--collaborator",
+            "amitbcp",
+            "--publish",
+            "--confirm",
+            publisher.PUBLISH_CONFIRMATION,
+        ]
+        environment = {
+            "DOCSEM_ORGANIZER_DEPLOY_TOKEN": WRITE_TOKEN,
+            "DOCSEM_ORGANIZER_READ_TOKEN": READ_TOKEN,
+            "DOCSEM_ORGANIZER_DENIED_TOKEN": DENIED_TOKEN,
+        }
+        with mock.patch.object(publisher, "run_deployment", return_value=pending):
+            status = publisher.main(
+                argv,
+                environment=environment,
+                stdout=output,
+                stderr=error,
+            )
+
+        self.assertEqual(status, 3)
+        self.assertEqual(error.getvalue(), "")
+        receipt = json.loads(output.getvalue())
+        self.assertEqual(receipt["outcome"], "published-pending-verification")
+        self.assertFalse(receipt["verification_complete"])
+        self.assertEqual(receipt["space_revision"], "d" * 40)
+        self.assertIn("--verify-only", receipt["next_action"])
+        for secret in environment.values():
+            self.assertNotIn(secret, output.getvalue())
+
+    def test_main_missing_denied_probe_token_is_incomplete_and_never_runs(self):
+        output = io.StringIO()
+        error = io.StringIO()
+        argv = [
+            "--expected-source-revision",
+            SOURCE_REVISION,
+            "--expected-private-revision",
+            PRIVATE_REVISION,
+            "--expected-space-parent",
+            SPACE_PARENT,
+            "--visibility",
+            "private",
+            "--collaborator",
+            "amitbcp",
+            "--verify-only",
+        ]
+        environment = {
+            "DOCSEM_ORGANIZER_DEPLOY_TOKEN": WRITE_TOKEN,
+            "DOCSEM_ORGANIZER_READ_TOKEN": READ_TOKEN,
+        }
+        with mock.patch.object(publisher, "run_deployment") as run:
+            status = publisher.main(
+                argv,
+                environment=environment,
+                stdout=output,
+                stderr=error,
+            )
+
+        self.assertEqual(status, 2)
+        self.assertEqual(output.getvalue(), "")
+        self.assertIn("three", error.getvalue().casefold())
+        run.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -238,12 +238,13 @@ The organizer dashboard is a separate, platform-private Space at
 independent of the participant Space and cannot write submissions, finalize a
 leaderboard, or mutate the private dataset.
 
-Use two different Hugging Face user access tokens from the operator's secure
+Use three different Hugging Face user access tokens from the operator's secure
 environment:
 
 ```text
 DOCSEM_ORGANIZER_DEPLOY_TOKEN=<classic write token owned by amitbcp>
 DOCSEM_ORGANIZER_READ_TOKEN=<classic read token owned by amitbcp>
+DOCSEM_ORGANIZER_DENIED_TOKEN=<access token owned by an account outside the allowlist>
 ```
 
 Do not reuse `HF_WRITE_TOKEN`, the participant submission token, or a
@@ -251,7 +252,12 @@ fine-grained token whose read-only scope cannot be proven by the documented
 `whoami-v2` response. The deployment token is used only for the private Space
 repository and its two required secrets. The runtime token must be read-only
 and must be able to read the private submissions dataset. Token values are
-never command-line arguments, receipts, or local files.
+never command-line arguments, receipts, or local files. The denied-probe token
+must resolve through the documented `whoami-v2` response to an identity other
+than `amitbcp`; it is used only from the local verification process, is never
+installed as a Space secret, and must not belong to any private-Space
+allowlist. Without that independent token, deployment verification is
+incomplete and the command fails closed.
 
 Record the clean source commit, the current private-dataset commit, and either
 the current organizer-Space commit or the fact that the Space is absent. The
@@ -278,6 +284,24 @@ After reviewing the sanitized dry-run receipt, repeat the exact command with:
 --publish --confirm PUBLISH_PRIVATE_ORGANIZER_SPACE
 ```
 
+Publishing starts an asynchronous Space build. If the exact deployed revision
+is not yet `RUNNING`, the command emits outcome
+`published-pending-verification`, includes the new Space revision and a
+`--verify-only` instruction, and exits with status 3. This is not a completed
+deployment receipt. Wait for that exact revision to reach `RUNNING`, then run
+the original command again with the new value for `--expected-space-parent`,
+remove `--publish --confirm ...`, and add:
+
+```text
+--verify-only
+```
+
+`--verify-only` cannot create a Space, commit files, or update secrets. It
+rechecks the clean source revision, exact deployed five-file tree and bytes,
+private dataset revision and snapshot, participant disabled state, and runtime
+access. Only its `verified` outcome (or an immediate `published-verified`
+outcome when the runtime was already `RUNNING`) is a completed verification.
+
 The publisher refuses a dirty or moved checkout, a moved Space or private
 dataset, a public/non-Gradio Space, a non-owner deploy identity, a non-read-only
 runtime token, and reserved values configured as public Space variables. It
@@ -287,13 +311,18 @@ using an exact-parent compare-and-swap commit; tests, caches, and older extra
 Space files are excluded. It updates only the `ORGANIZER_READ_TOKEN` and
 `PRIVATE_REPO_ID` Space secrets and leaves every other existing secret intact.
 
-Post-deployment checks require private visibility, exact five-file bytes,
-unauthenticated denial, and—once the runtime is running—authenticated `/`,
-`/config`, and `/info` access with no named or mutating endpoint and no secret
-in rendered configuration. At the same pinned private-dataset commit, the
+Post-deployment checks require private visibility, exact five-file bytes, and
+three access results on `/`, `/config`, and `/info`: unauthenticated denial,
+denial for the independently identified outside account, and owner runtime-read
+success. All three authenticated response bodies are scanned for every token
+value, credential/configuration name, and the private repository ID; the
+configuration must expose no named or mutating endpoint or mutation control.
+At the same pinned private-dataset commit, the
 organizer reader must reconstruct every immutable test attempt. Until an
 official `private/test_release.json` exists, the expected safe status is
-`disabled/no-release`. The public participant Space must simultaneously report
+`disabled/no-release`; any `private/test_*`, `attempts/test`,
+`projections/test`, `exclusions/test`, or `adjudications/test` artifact without
+that release policy is rejected. The public participant Space must simultaneously report
 test submissions closed and the final-test leaderboard unavailable with no
 rows. The deployment does not activate either public test flag and performs no
 participant-Space, dataset, finalization, or leaderboard write.
