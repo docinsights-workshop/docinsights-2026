@@ -74,14 +74,14 @@ vector-text proof therefore cannot validate the actual release format.
 - Produces: a renderer-backed OCR visibility audit that operates on both
   image-backed and vector PDFs without trusting PDF extraction text.
 
-- [ ] **Step 1: Add failing canonical-format tests**
+- [x] **Step 1: Add failing canonical-format tests**
 
 Add an image-only PDF positive fixture whose evidence header is visually
 readable after rendering. Add negatives for a clipped two-pixel fragment,
 hidden/extraction-only text, missing OCR backend, oversized files/pages/raster
 allocations, OCR timeout, and malformed OCR output.
 
-- [ ] **Step 2: Replace private renderer bindings with bounded raster OCR**
+- [x] **Step 2: Replace private renderer bindings with bounded raster OCR**
 
 Use only public PyMuPDF rendering APIs and an explicit Tesseract CLI contract.
 Require line-anchored `bNN:` evidence headers in OCR output. Bound input bytes,
@@ -89,17 +89,21 @@ page count, page dimensions, rendered pixels, OCR output, and per-page runtime.
 Fail closed if the exact tested OCR runtime contract is unavailable. Never log
 OCR text or private label rows.
 
-- [ ] **Step 3: Record the visibility-audit contract in the release manifest**
+The exact tested release-host contract is PyMuPDF 1.26.3 and Tesseract 5.5.1
+with the English language data. The validator checks both versions at runtime
+before inspecting any release PDF.
+
+- [x] **Step 3: Record the visibility-audit contract in the release manifest**
 
 Record only the method/version and bounded render settings. Do not include OCR
 text, evidence IDs, private paths, or labels.
 
-- [ ] **Step 4: Run focused and canonical-format compatibility checks**
+- [x] **Step 4: Run focused and canonical-format compatibility checks**
 
 Run the full source-validator suite and a sanitized compatibility audit against
 the current public validation PDF format. Report only counts and pass/fail.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add scripts/prepare_docsem_test_release.py scripts/test_prepare_docsem_test_release.py docs/superpowers/plans/2026-09-04-docsem-test-data-release.md

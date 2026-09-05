@@ -1,6 +1,8 @@
 """Fixture-based tests for fail-closed DocSem held-out test source validation."""
 
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import hashlib
+import io
 import json
 import tempfile
 import unittest
@@ -62,6 +64,76 @@ def write_pdf_with_visible_text(
     path.write_bytes(output)
 
 
+def replace_with_image_only_pdf(path, header_text):
+    """Rasterize one readable header into a PDF with no extraction text."""
+    fitz = release_module.fitz
+    source_path = path.with_name(f"{path.stem}-vector.pdf")
+    write_pdf_with_visible_text(source_path, header_text, font_size=24)
+    try:
+        with fitz.open(source_path) as vector_document:
+            page_rect = vector_document[0].rect
+            image_bytes = vector_document[0].get_pixmap(
+                dpi=150,
+                colorspace=fitz.csGRAY,
+                alpha=False,
+            ).tobytes("png")
+        image_document = fitz.open()
+        try:
+            page = image_document.new_page(width=page_rect.width, height=page_rect.height)
+            page.insert_image(page.rect, stream=image_bytes)
+            image_document.save(path)
+        finally:
+            image_document.close()
+    finally:
+        source_path.unlink(missing_ok=True)
+
+
+def duplicate_pdf_page(path):
+    """Turn a one-page fixture into a two-page fixture using public APIs."""
+    fitz = release_module.fitz
+    replacement = path.with_name(f"{path.stem}-two-pages.pdf")
+    with fitz.open(path) as source:
+        output = fitz.open()
+        try:
+            output.insert_pdf(source)
+            output.insert_pdf(source)
+            output.save(replacement)
+        finally:
+            output.close()
+    replacement.replace(path)
+
+
+@contextmanager
+def temporary_module_values(**values):
+    """Temporarily replace dependency/runtime settings at their public boundary."""
+    missing = object()
+    originals = {name: getattr(release_module, name, missing) for name in values}
+    try:
+        for name, value in values.items():
+            setattr(release_module, name, value)
+        yield
+    finally:
+        for name, value in originals.items():
+            if value is missing:
+                delattr(release_module, name)
+            else:
+                setattr(release_module, name, value)
+
+
+def write_fake_tesseract(path, *, version="5.5.1", ocr_body="exit 0"):
+    """Create a real subprocess boundary with one controlled OCR behavior."""
+    path.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = \"--version\" ]; then\n"
+        f"  printf '%s\\n' 'tesseract {version}'\n"
+        "  exit 0\n"
+        "fi\n"
+        f"{ocr_body}\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o700)
+
+
 class SourceFixture:
     """Creates complete synthetic test sources without touching project data."""
 
@@ -91,7 +163,7 @@ class SourceFixture:
         for number in range(1, 4):
             write_pdf_with_visible_text(
                 self.root / "documents" / f"synthetic-{number}.pdf",
-                f"Synthetic fixture visible block b{number:02d}",
+                f"b{number:02d}: Synthetic fixture visible block",
             )
         return self
 
@@ -150,6 +222,7 @@ class PrepareDocsemTestReleaseTests(unittest.TestCase):
                 "tasks_sha256",
                 "pdf_inventory_sha256",
                 "private_labels_sha256",
+                "visibility_audit",
             },
         )
         self.assertEqual(manifest["schema_version"], 1)
@@ -162,6 +235,28 @@ class PrepareDocsemTestReleaseTests(unittest.TestCase):
         self.assertNotIn("private-synthetic-answer", serialized)
         self.assertNotIn('"evidence"', serialized)
         self.assertNotIn('"answer"', serialized)
+        self.assertEqual(
+            manifest["visibility_audit"],
+            {
+                "method": "pymupdf-raster-tesseract-cli",
+                "pymupdf_version": "1.26.3",
+                "tesseract_version": "5.5.1",
+                "render_dpi": 300,
+                "colorspace": "grayscale",
+                "ocr_language": "eng",
+                "page_segmentation_mode": 6,
+                "max_pdf_bytes": 16777216,
+                "max_pages": 16,
+                "max_page_width_points": 1000,
+                "max_page_height_points": 1500,
+                "max_render_pixels_per_page": 12000000,
+                "max_render_pixels_total": 96000000,
+                "max_raster_bytes": 33554432,
+                "max_ocr_output_bytes": 1048576,
+                "ocr_timeout_seconds_per_page": 30,
+            },
+        )
+        self.assertNotIn("b01", serialized)
 
     def test_rejects_duplicate_task_ids(self):
         """Catches a release whose task identifiers are not unique."""
@@ -248,12 +343,40 @@ class PrepareDocsemTestReleaseTests(unittest.TestCase):
         source.write_labels()
         self.assert_rejected(source)
 
+    def test_accepts_an_image_only_pdf_with_a_readable_evidence_header(self):
+        """Catches depending on extraction text instead of rendered page pixels."""
+        source = self.make_source()
+        pdf_path = source.root / "documents" / "synthetic-1.pdf"
+        replace_with_image_only_pdf(pdf_path, "b01: Raster evidence header")
+        with release_module.fitz.open(pdf_path) as document:
+            self.assertEqual(document[0].get_text().strip(), "")
+
+        try:
+            validated = validate_source(source.root, (), ())
+        except ValidationError as exc:
+            self.fail(f"Image-only readable evidence was rejected: {type(exc).__name__}")
+
+        self.assertEqual(validated.ids, ("synthetic-1", "synthetic-2", "synthetic-3"))
+
+    def test_rejects_a_clipped_two_pixel_evidence_fragment(self):
+        """Catches treating a rendered fragment as a readable evidence header."""
+        source = self.make_source()
+        write_pdf_with_visible_text(
+            source.root / "documents" / "synthetic-1.pdf",
+            "b01: clipped header",
+            font_size=24,
+            x=72,
+            y=720,
+            underlay_content="72 719 0.48 0.48 re W n ",
+        )
+        self.assert_rejected(source)
+
     def test_rejects_evidence_text_hidden_by_a_nonrendering_pdf_mode(self):
         """Catches extraction-only checks that mistake invisible text for rendered evidence."""
         source = self.make_source()
         write_pdf_with_visible_text(
             source.root / "documents" / "synthetic-1.pdf",
-            "Synthetic fixture hidden block b01",
+            "b01: Synthetic fixture hidden block",
             rendering_mode=3,
         )
         self.assert_rejected(source)
@@ -263,7 +386,7 @@ class PrepareDocsemTestReleaseTests(unittest.TestCase):
         source = self.make_source()
         write_pdf_with_visible_text(
             source.root / "documents" / "synthetic-1.pdf",
-            "Synthetic fixture off-page block b01",
+            "b01: Synthetic fixture off-page block",
             y=900,
         )
         self.assert_rejected(source)
@@ -273,7 +396,7 @@ class PrepareDocsemTestReleaseTests(unittest.TestCase):
         source = self.make_source()
         write_pdf_with_visible_text(
             source.root / "documents" / "synthetic-1.pdf",
-            "visible-prefix-b01",
+            "visible-prefix-b01:",
             x=540,
         )
         self.assert_rejected(source)
@@ -283,7 +406,7 @@ class PrepareDocsemTestReleaseTests(unittest.TestCase):
         source = self.make_source()
         write_pdf_with_visible_text(
             source.root / "documents" / "synthetic-1.pdf",
-            "b01",
+            "b01:",
             x=500,
             fill_color=(1, 1, 1),
             underlay_content="0 0 0 rg 495 728 35 2 re f ",
@@ -301,7 +424,7 @@ class PrepareDocsemTestReleaseTests(unittest.TestCase):
                 source = self.make_source()
                 write_pdf_with_visible_text(
                     source.root / "documents" / "synthetic-1.pdf",
-                    "b01",
+                    "b01:",
                     x=500,
                     fill_color=(0.5, 0.5, 0.5),
                     underlay_content=(
@@ -317,7 +440,7 @@ class PrepareDocsemTestReleaseTests(unittest.TestCase):
         source = self.make_source()
         write_pdf_with_visible_text(
             source.root / "documents" / "synthetic-1.pdf",
-            "b01",
+            "b01:",
             x=500,
             fill_color=(0.5, 0.5, 0.5),
             underlay_content=(
@@ -332,7 +455,7 @@ class PrepareDocsemTestReleaseTests(unittest.TestCase):
         source = self.make_source()
         write_pdf_with_visible_text(
             source.root / "documents" / "synthetic-1.pdf",
-            "b01",
+            "b01:",
             font_size=8,
             fill_color=(0.5, 0.5, 0.5),
         )
@@ -354,6 +477,94 @@ class PrepareDocsemTestReleaseTests(unittest.TestCase):
                 release_module.fitz = original_renderer
             else:
                 delattr(release_module, "fitz")
+
+    def test_fails_closed_when_tesseract_is_missing_or_the_wrong_version(self):
+        """Catches an implicit OCR fallback or an untested backend runtime."""
+        source = self.make_source()
+        with temporary_module_values(TESSERACT_BINARY="/definitely/not/tesseract"):
+            self.assert_rejected(source)
+
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        wrong_version = Path(tempdir.name) / "tesseract-wrong-version"
+        write_fake_tesseract(wrong_version, version="5.4.0")
+        with temporary_module_values(TESSERACT_BINARY=str(wrong_version)):
+            self.assert_rejected(source)
+
+    def test_rejects_pdf_and_raster_resource_excess(self):
+        """Catches unbounded file, page, geometry, and raster allocations."""
+        cases = []
+
+        source = self.make_source()
+        cases.append((source, {"MAX_PDF_BYTES": 64}))
+
+        source = self.make_source()
+        duplicate_pdf_page(source.root / "documents" / "synthetic-1.pdf")
+        cases.append((source, {"MAX_PAGES": 1}))
+
+        source = self.make_source()
+        cases.append((source, {"MAX_PAGE_WIDTH_POINTS": 100}))
+
+        source = self.make_source()
+        cases.append((source, {"MAX_RENDER_PIXELS_PER_PAGE": 1000}))
+
+        source = self.make_source()
+        cases.append((source, {"MAX_RENDER_PIXELS_TOTAL": 1000}))
+
+        source = self.make_source()
+        cases.append((source, {"MAX_RASTER_BYTES": 100}))
+
+        for number, (bounded_source, settings) in enumerate(cases, start=1):
+            with self.subTest(resource_case=number), temporary_module_values(**settings):
+                self.assert_rejected(bounded_source)
+
+    def test_rejects_ocr_timeout_malformed_and_oversized_output(self):
+        """Catches trusting a stalled or structurally unsafe OCR subprocess."""
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        fake_root = Path(tempdir.name)
+        cases = (
+            (
+                "timeout",
+                "sleep 1",
+                {"OCR_TIMEOUT_SECONDS": 0.05},
+            ),
+            (
+                "malformed",
+                "printf '\\377' > \"$2.txt\"",
+                {},
+            ),
+            (
+                "oversized",
+                "printf '%s\\n' 'b01: output-over-limit' > \"$2.txt\"",
+                {"MAX_OCR_OUTPUT_BYTES": 8},
+            ),
+            (
+                "not-line-anchored",
+                "printf '%s\\n' 'prefix b01: not a header' > \"$2.txt\"",
+                {},
+            ),
+        )
+        for name, body, settings in cases:
+            with self.subTest(ocr_case=name):
+                source = self.make_source()
+                fake_binary = fake_root / f"tesseract-{name}"
+                write_fake_tesseract(fake_binary, ocr_body=body)
+                with temporary_module_values(TESSERACT_BINARY=str(fake_binary), **settings):
+                    self.assert_rejected(source)
+
+    def test_validation_never_emits_ocr_or_private_label_text(self):
+        """Catches subprocess output or private values escaping to visible logs."""
+        source = self.make_source()
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            validate_source(source.root, (), ())
+
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertNotIn("private-synthetic-answer", stdout.getvalue() + stderr.getvalue())
 
     def test_rejects_a_zip_instead_of_an_explicit_source_directory(self):
         """Catches treating an archive as an implicitly selected release source."""
