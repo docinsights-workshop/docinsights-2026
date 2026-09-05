@@ -603,6 +603,56 @@ class PrepareDocsemTestReleaseTests(unittest.TestCase):
         source.write_labels()
         self.assert_rejected(source)
 
+    def test_accepts_an_opaque_evidence_token_in_an_image_only_ocr_workflow(self):
+        """Catches rejecting the bounded opaque grammar after raster OCR."""
+        source = self.make_source()
+        token = "A#&/-9"
+        source.labels[0]["evidence"] = [token]
+        source.write_labels()
+        pdf_path = source.root / "documents" / "synthetic-1.pdf"
+        replace_with_image_only_pdf(pdf_path, f"{token}: Raster evidence header")
+        with release_module.fitz.open(pdf_path) as document:
+            self.assertEqual(document[0].get_text().strip(), "")
+
+        validated = validate_source(source.root, (), ())
+
+        self.assertEqual(validated.label_rows[0]["evidence"], [token])
+
+    def test_rejects_an_opaque_header_near_miss_in_an_image_only_ocr_workflow(self):
+        """Catches accepting an overlong token that merely starts with required evidence."""
+        source = self.make_source()
+        token = "A#&/-9"
+        source.labels[0]["evidence"] = [token]
+        source.write_labels()
+        replace_with_image_only_pdf(
+            source.root / "documents" / "synthetic-1.pdf",
+            f"{token}X: Raster evidence header",
+        )
+
+        self.assert_rejected(source)
+
+    def test_rejects_opaque_evidence_tokens_outside_the_bounded_grammar(self):
+        """Catches broadening opaque evidence to printable or non-ASCII text."""
+        invalid_tokens = (
+            "A#",
+            "A#&/-9Z",
+            "A 9",
+            "A\x019",
+            "Aé9",
+            "A:9",
+            "A\\9",
+            "A.9",
+            "A_9",
+            'A"9',
+            "A+9",
+        )
+        for token in invalid_tokens:
+            with self.subTest(token=ascii(token)):
+                source = self.make_source()
+                source.labels[0]["evidence"] = [token]
+                source.write_labels()
+                self.assert_rejected(source)
+
     def test_rejects_an_evidence_set_larger_than_the_bounded_worker_protocol(self):
         """Catches unbounded page-worker result allocation from private labels."""
         source = self.make_source()

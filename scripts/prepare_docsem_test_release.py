@@ -36,8 +36,8 @@ except ImportError:
 SCHEMA_VERSION = 1
 TASK_KEYS = frozenset(("instance_id", "user_query", "document_pdf"))
 LABEL_KEYS = frozenset(("instance_id", "answer", "evidence"))
-BLOCK_ID = re.compile(r"b[0-9]+$")
-OCR_HEADER = re.compile(r"^[ \t]*(b[0-9]+):")
+BLOCK_ID = re.compile(r"(?:b[0-9]+|[A-Za-z0-9#&/\-]{3,6})\Z")
+OCR_HEADER = re.compile(r"^[ \t]*((?:b[0-9]+|[A-Za-z0-9#&/\-]{3,6})):")
 RELEASE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
 PYMUPDF_VERSION = "1.26.3"
