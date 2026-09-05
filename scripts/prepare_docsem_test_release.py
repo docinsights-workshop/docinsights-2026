@@ -16,8 +16,12 @@ from typing import Iterable
 
 try:
     import fitz
+    from pymupdf import _mupdf as _fitz_raw
+    from pymupdf import mupdf as _fitz_mupdf
 except ImportError:
     fitz = None
+    _fitz_raw = None
+    _fitz_mupdf = None
 
 
 SCHEMA_VERSION = 1
@@ -30,6 +34,145 @@ GLYPH_CORE_EDGE = 2
 
 class ValidationError(ValueError):
     """Raised for a structural source error without exposing private rows."""
+
+
+if _fitz_mupdf is not None:
+
+    class _TextOperationOmittingDevice(_fitz_mupdf.FzDevice2):
+        """Replay a MuPDF page while suppressing one paint operation."""
+
+        def __init__(self, target: object, omitted_seqno: int | None):
+            super().__init__()
+            self._target = target
+            self._omitted_seqno = omitted_seqno
+            self._seqno = 0
+            for callback in (
+                "fill_path",
+                "stroke_path",
+                "clip_path",
+                "clip_stroke_path",
+                "fill_text",
+                "stroke_text",
+                "clip_text",
+                "clip_stroke_text",
+                "ignore_text",
+                "fill_shade",
+                "fill_image",
+                "fill_image_mask",
+                "clip_image_mask",
+                "pop_clip",
+                "begin_mask",
+                "end_mask",
+                "begin_group",
+                "end_group",
+                "begin_tile",
+                "end_tile",
+                "render_flags",
+                "set_default_colorspaces",
+                "begin_layer",
+                "end_layer",
+                "begin_structure",
+                "end_structure",
+                "begin_metatext",
+                "end_metatext",
+            ):
+                getattr(self, f"use_virtual_{callback}")()
+
+        def _forward(self, operation: str, *args):
+            callback = getattr(_fitz_raw, f"ll_fz_{operation}")
+            return callback(self._target.m_internal, *args)
+
+        def _paint(self, operation: str, *args) -> None:
+            if self._seqno != self._omitted_seqno:
+                self._forward(operation, *args)
+            self._seqno += 1
+
+        def fill_path(self, _context, *args):
+            self._paint("fill_path", *args)
+
+        def stroke_path(self, _context, *args):
+            self._paint("stroke_path", *args)
+
+        def clip_path(self, _context, *args):
+            self._forward("clip_path", *args)
+
+        def clip_stroke_path(self, _context, *args):
+            self._forward("clip_stroke_path", *args)
+
+        def fill_text(self, _context, *args):
+            self._paint("fill_text", *args)
+
+        def stroke_text(self, _context, *args):
+            self._paint("stroke_text", *args)
+
+        def clip_text(self, _context, *args):
+            self._forward("clip_text", *args)
+
+        def clip_stroke_text(self, _context, *args):
+            self._forward("clip_stroke_text", *args)
+
+        def ignore_text(self, _context, *args):
+            self._paint("ignore_text", *args)
+
+        def fill_shade(self, _context, *args):
+            self._paint("fill_shade", *args)
+
+        def fill_image(self, _context, *args):
+            self._paint("fill_image", *args)
+
+        def fill_image_mask(self, _context, *args):
+            self._paint("fill_image_mask", *args)
+
+        def clip_image_mask(self, _context, *args):
+            self._forward("clip_image_mask", *args)
+
+        def pop_clip(self, _context):
+            self._forward("pop_clip")
+
+        def begin_mask(self, _context, *args):
+            self._forward("begin_mask", *args)
+
+        def end_mask(self, _context, transfer_function):
+            self._forward("end_mask_tr", transfer_function)
+
+        def begin_group(self, _context, *args):
+            self._forward("begin_group", *args)
+
+        def end_group(self, _context):
+            self._forward("end_group")
+
+        def begin_tile(self, _context, *args):
+            return self._forward("begin_tile_id", *args)
+
+        def end_tile(self, _context):
+            self._forward("end_tile")
+
+        def render_flags(self, _context, *args):
+            self._forward("render_flags", *args)
+
+        def set_default_colorspaces(self, _context, *args):
+            self._forward("set_default_colorspaces", *args)
+
+        def begin_layer(self, _context, *args):
+            self._forward("begin_layer", *args)
+
+        def end_layer(self, _context):
+            self._forward("end_layer")
+
+        def begin_structure(self, _context, *args):
+            self._forward("begin_structure", *args)
+
+        def end_structure(self, _context):
+            self._forward("end_structure")
+
+        def begin_metatext(self, _context, *args):
+            self._forward("begin_metatext", *args)
+
+        def end_metatext(self, _context):
+            self._forward("end_metatext")
+
+else:
+    _TextOperationOmittingDevice = None
 
 
 @dataclass(frozen=True)
@@ -164,22 +307,63 @@ def _trace_rgb(trace: dict) -> tuple[int, int, int]:
     return tuple(int(component * 255) for component in values)
 
 
-def _pixmap_has_exact_color_core(pixmap: object, expected_rgb: tuple[int, int, int]) -> bool:
+def _pixmaps_have_contributed_color_core(
+    rendered: object,
+    replayed_with_text_operation: object,
+    without_text_operation: object,
+    expected_rgb: tuple[int, int, int],
+) -> bool:
     if expected_rgb == (255, 255, 255):
         return False
-    samples = pixmap.samples
-    for y in range(pixmap.height - GLYPH_CORE_EDGE + 1):
-        for x in range(pixmap.width - GLYPH_CORE_EDGE + 1):
+    _validate_pixmap(rendered)
+    _validate_pixmap(replayed_with_text_operation)
+    _validate_pixmap(without_text_operation)
+    geometry = (rendered.width, rendered.height, rendered.n, rendered.stride)
+    if geometry != (
+        replayed_with_text_operation.width,
+        replayed_with_text_operation.height,
+        replayed_with_text_operation.n,
+        replayed_with_text_operation.stride,
+    ) or geometry != (
+        without_text_operation.width,
+        without_text_operation.height,
+        without_text_operation.n,
+        without_text_operation.stride,
+    ):
+        _fail("PDF differential renderer produced incompatible page images.")
+    rendered_samples = rendered.samples
+    replayed_samples = replayed_with_text_operation.samples
+    baseline_samples = without_text_operation.samples
+    for y in range(rendered.height - GLYPH_CORE_EDGE + 1):
+        for x in range(rendered.width - GLYPH_CORE_EDGE + 1):
             if all(
-                tuple(
-                    samples[
-                        (y + delta_y) * pixmap.stride
-                        + (x + delta_x) * pixmap.n
-                        + component
-                    ]
-                    for component in range(3)
+                (
+                    tuple(
+                        rendered_samples[
+                            (y + delta_y) * rendered.stride
+                            + (x + delta_x) * rendered.n
+                            + component
+                        ]
+                        for component in range(3)
+                    )
+                    == expected_rgb
+                    and tuple(
+                        replayed_samples[
+                            (y + delta_y) * replayed_with_text_operation.stride
+                            + (x + delta_x) * replayed_with_text_operation.n
+                            + component
+                        ]
+                        for component in range(3)
+                    )
+                    != tuple(
+                        baseline_samples[
+                            (y + delta_y) * without_text_operation.stride
+                            + (x + delta_x) * without_text_operation.n
+                            + component
+                        ]
+                        for component in range(3)
+                    )
                 )
-                == expected_rgb
                 for delta_y in range(GLYPH_CORE_EDGE)
                 for delta_x in range(GLYPH_CORE_EDGE)
             ):
@@ -187,20 +371,77 @@ def _pixmap_has_exact_color_core(pixmap: object, expected_rgb: tuple[int, int, i
     return False
 
 
-def _bbox_has_rendered_glyph_core(
+def _render_bbox_omitting_operation(
+    page: object,
+    bbox: object,
+    omitted_seqno: int | None,
+) -> object:
+    if _TextOperationOmittingDevice is None or _fitz_mupdf is None:
+        _fail("PDF differential renderer is unavailable.")
+    left, top, right, bottom = _numeric_rect(bbox, "text bounding box")
+    matrix = fitz.Matrix(GLYPH_RENDER_SCALE, GLYPH_RENDER_SCALE)
+    device_bounds = (fitz.Rect(left, top, right, bottom) * matrix).irect
+    pixmap = fitz.Pixmap(fitz.csRGB, device_bounds, False)
+    pixmap.clear_with(255)
+    draw_device = _fitz_mupdf.fz_new_draw_device(
+        _fitz_mupdf.FzMatrix(GLYPH_RENDER_SCALE, 0, 0, GLYPH_RENDER_SCALE, 0, 0),
+        pixmap.this,
+    )
+    replay_device = _TextOperationOmittingDevice(draw_device, omitted_seqno)
+    try:
+        _fitz_mupdf.fz_run_page(
+            page.this,
+            replay_device,
+            _fitz_mupdf.FzMatrix(),
+            _fitz_mupdf.FzCookie(),
+        )
+    finally:
+        try:
+            _fitz_mupdf.fz_close_device(replay_device)
+        finally:
+            _fitz_mupdf.fz_close_device(draw_device)
+    _validate_pixmap(pixmap)
+    return pixmap
+
+
+def _bbox_has_text_operation_glyph_core(
     page: object,
     bbox: object,
     expected_rgb: tuple[int, int, int],
+    text_seqno: int,
 ) -> bool:
     left, top, right, bottom = _numeric_rect(bbox, "text bounding box")
-    pixmap = page.get_pixmap(
+    rendered = page.get_pixmap(
         matrix=fitz.Matrix(GLYPH_RENDER_SCALE, GLYPH_RENDER_SCALE),
         clip=fitz.Rect(left, top, right, bottom),
         alpha=False,
         colorspace=fitz.csRGB,
     )
-    _validate_pixmap(pixmap)
-    return _pixmap_has_exact_color_core(pixmap, expected_rgb)
+    replayed_with_text_operation = _render_bbox_omitting_operation(page, bbox, None)
+    without_text_operation = _render_bbox_omitting_operation(page, bbox, text_seqno)
+    return _pixmaps_have_contributed_color_core(
+        rendered,
+        replayed_with_text_operation,
+        without_text_operation,
+        expected_rgb,
+    )
+
+
+def _text_paint_seqno(trace: dict, bbox_log: list) -> int:
+    seqno = trace.get("seqno")
+    if type(seqno) is not int or seqno < 0 or seqno >= len(bbox_log):
+        _fail("PDF text paint sequence is malformed.")
+    record = bbox_log[seqno]
+    expected_kind = {0: "fill-text", 1: "stroke-text"}.get(trace.get("type"))
+    if (
+        expected_kind is None
+        or not isinstance(record, (tuple, list))
+        or len(record) < 2
+        or record[0] != expected_kind
+    ):
+        _fail("PDF text paint sequence is malformed.")
+    _numeric_rect(record[1], "text paint bounding box")
+    return seqno
 
 
 def _trace_characters(trace: dict) -> list[tuple[str, tuple[float, float, float, float]]]:
@@ -227,10 +468,12 @@ def _matched_blocks_with_rendered_characters(
     trace: dict,
     page: object,
     page_rect: tuple[float, float, float, float],
+    bbox_log: list,
     evidence_ids: set[str],
 ) -> set[str]:
     _numeric_rect(trace.get("bbox"), "text bounding box")
     expected_rgb = _trace_rgb(trace)
+    text_seqno = _text_paint_seqno(trace, bbox_log)
     characters = _trace_characters(trace)
     text = "".join(character[0] for character in characters)
     page_left, page_top, page_right, page_bottom = page_rect
@@ -243,7 +486,12 @@ def _matched_blocks_with_rendered_characters(
                 and top >= page_top
                 and right <= page_right
                 and bottom <= page_bottom
-                and _bbox_has_rendered_glyph_core(page, (left, top, right, bottom), expected_rgb)
+                and _bbox_has_text_operation_glyph_core(
+                    page,
+                    (left, top, right, bottom),
+                    expected_rgb,
+                    text_seqno,
+                )
                 for _, (left, top, right, bottom) in matched_characters
             ):
                 matched.add(block_id)
@@ -263,11 +511,20 @@ def _render_visible_pdf_evidence_blocks(path: Path, evidence_ids: set[str]) -> s
                 _fail("PDF is encrypted and cannot be inspected.")
             for page in document:
                 page_rect = _numeric_rect(tuple(page.rect), "page bounds")
+                bbox_log = page.get_bboxlog()
+                if not isinstance(bbox_log, list):
+                    _fail("PDF renderer paint log is malformed.")
                 for trace in page.get_texttrace():
-                    if trace.get("type") not in {0, 1, 2} or float(trace.get("opacity", 0)) <= 0:
+                    if trace.get("type") not in {0, 1} or float(trace.get("opacity", 0)) <= 0:
                         continue
                     matched_blocks.update(
-                        _matched_blocks_with_rendered_characters(trace, page, page_rect, evidence_ids)
+                        _matched_blocks_with_rendered_characters(
+                            trace,
+                            page,
+                            page_rect,
+                            bbox_log,
+                            evidence_ids,
+                        )
                     )
         return matched_blocks
     except ValidationError:

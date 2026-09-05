@@ -312,6 +312,21 @@ class PrepareDocsemTestReleaseTests(unittest.TestCase):
                 )
                 self.assert_rejected(source)
 
+    def test_rejects_same_color_underlay_beneath_clipped_evidence_characters(self):
+        """Catches crediting same-color paint from an unrelated draw operation."""
+        source = self.make_source()
+        write_pdf_with_visible_text(
+            source.root / "documents" / "synthetic-1.pdf",
+            "b01",
+            x=500,
+            fill_color=(0.5, 0.5, 0.5),
+            underlay_content=(
+                "0.5 0.5 0.5 rg 495 728 35 2 re f "
+                "0 0 1 1 re W n "
+            ),
+        )
+        self.assert_rejected(source)
+
     def test_accepts_visible_antialiased_mid_gray_evidence_at_small_text_size(self):
         """Catches strict raster proof that rejects a normal small gray glyph core."""
         source = self.make_source()
