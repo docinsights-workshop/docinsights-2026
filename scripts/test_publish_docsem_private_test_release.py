@@ -15,6 +15,8 @@ import tempfile
 import unittest
 from unittest import mock
 
+import prepare_docsem_test_release as preparer
+
 try:
     import publish_docsem_private_test_release as publisher
 except ModuleNotFoundError:
@@ -168,6 +170,14 @@ class FakeHub:
         self.trees[(repository, self.private_revision)] = current
         self.private_history.insert(0, self.private_revision)
         return self.private_revision
+
+
+class PinnedDefaultTests(unittest.TestCase):
+    def test_default_private_label_source_is_the_exact_approved_file(self):
+        self.assertEqual(
+            publisher.PRIVATE_LABEL_SOURCE,
+            Path("/private/tmp/docsem-private-source-a4205880-r1/labels.jsonl"),
+        )
 
 
 class PrivateContinuationTests(unittest.TestCase):
@@ -393,6 +403,10 @@ class PrivateContinuationTests(unittest.TestCase):
         with self.assertRaises(publisher.ReleaseError):
             self.prepare()
         self.private_source.unlink()
+        self.private_source.mkdir()
+        with self.assertRaises(publisher.ReleaseError):
+            self.prepare()
+        self.private_source.rmdir()
         self.private_source.write_bytes(self.label_bytes)
         original = publisher._read_bounded_regular_file
 
@@ -512,6 +526,61 @@ class PrivateContinuationTests(unittest.TestCase):
                 self.prepare()
         self.assertFalse(self.private_stage.exists())
         self.assertFalse(any(self.root.glob(".docsem-private-stage-*")))
+
+    def test_private_stage_rejects_all_input_ancestor_and_descendant_overlaps(self):
+        before = {
+            path.relative_to(self.public_stage): path.read_bytes()
+            for path in self.public_stage.rglob("*")
+            if path.is_file()
+        }
+        cases = (
+            self.public_stage,
+            self.public_stage / "nested-stage",
+            self.private_source,
+            self.private_source.parent,
+            self.private_source.parent / "nested-stage",
+            self.root,
+        )
+        for stage in cases:
+            with self.subTest(stage=stage):
+                config = publisher.ReleaseConfig(
+                    self.public_stage,
+                    self.private_source,
+                    stage,
+                    "b" * 40,
+                )
+                with self.assertRaises(publisher.ReleaseError):
+                    publisher.prepare_stage(config, public_auditor=self.audit)
+        self.assertEqual(
+            before,
+            {
+                path.relative_to(self.public_stage): path.read_bytes()
+                for path in self.public_stage.rglob("*")
+                if path.is_file()
+            },
+        )
+
+    def test_default_cli_prepare_uses_no_renderer_or_ocr(self):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with mock.patch.object(
+            preparer,
+            "_run_bounded_document_probe",
+            side_effect=AssertionError("renderer must not run"),
+        ) as renderer:
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = publisher.main(
+                    [
+                        "--public-stage",
+                        str(self.public_stage),
+                        "--private-label-source",
+                        str(self.private_source),
+                        "--private-stage",
+                        str(self.private_stage),
+                        "--prepare-stage",
+                    ]
+                )
+        self.assertEqual(code, 0)
+        renderer.assert_not_called()
 
     def test_prepare_stage_rolls_back_install_when_parent_fsync_fails(self):
         original = publisher._fsync_directory
@@ -940,6 +1009,46 @@ class PrivateContinuationTests(unittest.TestCase):
         self.assertEqual(value, {"test/release.json": b"abc"})
         self.assertEqual(len(session.calls), 1)
         self.assertTrue(session.calls[0][1]["stream"])
+
+    def test_concrete_file_inventory_skips_repo_folders(self):
+        class Lfs:
+            sha256 = "1" * 64
+
+        class File:
+            path = "test/documents/test_010001.pdf"
+            size = 123
+            lfs = Lfs()
+
+        class Folder:
+            path = "test/documents"
+
+        class Api:
+            def list_repo_tree(self, **kwargs):
+                return (Folder(), File())
+
+        backend = publisher.HuggingFaceBackend()
+        metadata = {
+            path: self.hub.trees[
+                (publisher.PUBLIC_HF_REPOSITORY, self.hub.public_revision)
+            ][path]
+            for path in publisher._PUBLIC_METADATA_PATHS
+        }
+        with (
+            mock.patch.object(
+                backend,
+                "_imports",
+                return_value=(object, lambda token: Api(), object),
+            ),
+            mock.patch.object(backend, "read_files", return_value=metadata),
+        ):
+            inventory = backend.file_inventory(
+                publisher.PUBLIC_HF_REPOSITORY, "a" * 40, "token"
+            )
+        self.assertEqual(
+            set(inventory),
+            set(publisher._PUBLIC_METADATA_PATHS) | {"test/documents/test_010001.pdf"},
+        )
+        self.assertNotIn("test/documents", inventory)
 
     def test_private_history_uses_one_no_blob_path_only_git_fetch(self):
         remote = self.root / "history.git"

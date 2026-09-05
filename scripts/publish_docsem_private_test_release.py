@@ -26,6 +26,7 @@ import tempfile
 from typing import Callable, Mapping, Sequence
 
 from prepare_docsem_test_release import (
+    MAX_PDF_BYTES,
     MAX_PUBLIC_CHECKSUM_BYTES,
     MAX_PUBLIC_MANIFEST_BYTES,
     MAX_PUBLIC_TASKS_BYTES,
@@ -34,7 +35,6 @@ from prepare_docsem_test_release import (
     _validate_labels,
     _visibility_audit_contract,
     _write_new_file,
-    audit_public_payload,
 )
 from publish_docsem_test_release import (
     Artifact,
@@ -64,7 +64,9 @@ PUBLIC_HF_REPOSITORY = "amitbcp/docinsights-2026-shared-task-data"
 PRIVATE_HF_REPOSITORY = "amitbcp/docinsights-2026-shared-task-submissions"
 PUBLIC_REVISION = "d9e1a394b46d2ac0a4dd87e12dd4a917a69f46e2"
 PUBLIC_STAGE = Path("/private/tmp/docsem-public-test-stage-a4205880-r1")
-PRIVATE_LABEL_SOURCE = Path("/private/tmp/docsem-private-source-a4205880-r1")
+PRIVATE_LABEL_SOURCE = Path(
+    "/private/tmp/docsem-private-source-a4205880-r1/labels.jsonl"
+)
 PRIVATE_LABELS_SHA256 = (
     "67f91982261dbc38fc8ab0dea2402f470c8d0634f654dd8a1319e9699987a8f4"
 )
@@ -214,10 +216,15 @@ def _validate_local_config(config: ReleaseConfig) -> None:
     if Path(config.private_label_source).absolute() != PRIVATE_LABEL_SOURCE.absolute():
         raise ReleaseError("The approved private label source was not selected.")
     stage = Path(config.private_stage).absolute()
-    if stage in {
-        Path(config.public_stage).absolute(),
-        Path(config.private_label_source).absolute(),
-    }:
+    public_root = Path(config.public_stage).absolute()
+    private_source = Path(config.private_label_source).absolute()
+    input_roots = (public_root, private_source.parent, private_source)
+    if any(
+        stage == input_path
+        or stage in input_path.parents
+        or input_path in stage.parents
+        for input_path in input_roots
+    ):
         raise ReleaseError("The private stage is not separate from its inputs.")
     try:
         parent_mode = stage.parent.lstat().st_mode
@@ -347,6 +354,16 @@ def _audit_local_public(
     )
     if _sha256(pdf_inventory) != PDF_INVENTORY_SHA256:
         raise ReleaseError("The public PDF digest differs from its approved anchor.")
+    for path in pdf_paths:
+        try:
+            payload = _read_bounded_regular_file(
+                root / path, MAX_PDF_BYTES, "Pinned public PDF"
+            )
+        except ValidationError as exc:
+            raise ReleaseError("A pinned public PDF is unsafe.") from exc
+        if _sha256(payload) != checksums[path.removeprefix("test/")]:
+            raise ReleaseError("A pinned public PDF differs from its checksum.")
+        del payload
     final = _tree_fingerprint(root)
     if final != initial:
         raise ReleaseError("The public stage changed while it was audited.")
@@ -507,7 +524,7 @@ def _receipt(
 def prepare_stage(
     config: ReleaseConfig,
     *,
-    public_auditor: Callable[[Path], Mapping[str, object]] = audit_public_payload,
+    public_auditor: Callable[[Path], Mapping[str, object]] | None = None,
 ) -> dict[str, object]:
     """Atomically create only the disabled private stage."""
     _validate_local_config(config)
@@ -820,7 +837,7 @@ def run_private_continuation(
     token: str,
     publish: bool = False,
     confirmation: str | None = None,
-    public_auditor: Callable[[Path], Mapping[str, object]] = audit_public_payload,
+    public_auditor: Callable[[Path], Mapping[str, object]] | None = None,
 ) -> dict[str, object]:
     """Dry-run or exact-parent publish the two-file disabled private release."""
     _validate_remote_config(config)
@@ -989,9 +1006,13 @@ class HuggingFaceBackend(_GuardedHuggingFaceBackend):
             result = {}
             for entry in entries:
                 path = getattr(entry, "rfilename", None) or getattr(entry, "path", None)
-                if not isinstance(path, str) or not path.startswith("test/"):
-                    continue
                 size = getattr(entry, "size", None)
+                if (
+                    not isinstance(path, str)
+                    or not path.startswith("test/")
+                    or type(size) is not int
+                ):
+                    continue
                 lfs = getattr(entry, "lfs", None)
                 value = getattr(lfs, "sha256", None)
                 if value is None and isinstance(lfs, Mapping):
@@ -1296,7 +1317,7 @@ def main(
     *,
     hf_backend=None,
     token: str | None = None,
-    public_auditor: Callable[[Path], Mapping[str, object]] = audit_public_payload,
+    public_auditor: Callable[[Path], Mapping[str, object]] | None = None,
 ) -> int:
     args = parse_args(argv)
     config = ReleaseConfig(
