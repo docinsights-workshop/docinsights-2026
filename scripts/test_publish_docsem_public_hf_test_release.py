@@ -52,6 +52,7 @@ class PublicReleaseTests(unittest.TestCase):
     def setUp(self):
         if publisher is None: self.fail("dedicated public-only publisher is missing")
         self.original_audit = publisher.audit_public_payload; self.original_renderer = publisher.render_test_ready_dataset_card
+        self.original_source_root = publisher.SOURCE_TASK_ROOT
         publisher.audit_public_payload = self.audit_fixture
         publisher.render_test_ready_dataset_card = self.render_fixture
         self.temp = tempfile.TemporaryDirectory(); root = Path(self.temp.name)
@@ -61,12 +62,12 @@ class PublicReleaseTests(unittest.TestCase):
         self.rows = [{"instance_id": item, "user_query": "PUBLIC-QUERY-NOT-PRINTED", "document_pdf": f"documents/{item}.pdf"} for item in self.ids]
         (self.source / "tasks.jsonl").write_bytes(b"".join(canonical(row) for row in self.rows))
         for item in self.ids: (self.source / "documents" / f"{item}.pdf").write_bytes(pdf_bytes())
-        (self.source / "release.json").write_bytes(canonical({"source": "public"}))
         self.train, self.validation = root / "train.jsonl", root / "validation.jsonl"
         self.train.write_bytes(canonical({"instance_id":"train_000001","user_query":"q","document_pdf":"documents/train_000001.pdf"})); self.validation.write_bytes(canonical({"instance_id":"val_000001","user_query":"q","document_pdf":"documents/val_000001.pdf"}))
         self.readme = b"---\nconfigs:\n- config_name: tasks\n  data_files:\n  - split: validation\n    path: val/tasks.jsonl\n- config_name: labels\n  data_files:\n  - split: train\n    path: train/labels.jsonl\n---\nBase.\n"; self.instructions = b"Existing train and validation behavior.\n"
         (self.dataset / "README.md").write_bytes(self.readme); (self.dataset / "INSTRUCTIONS.md").write_bytes(self.instructions); (self.dataset / "train").mkdir(); (self.dataset / "train/labels.jsonl").write_bytes(b"train labels permitted\n")
         self.hf = Hf(self.dataset, self.BASE)
+        publisher.SOURCE_TASK_ROOT = self.source
         self.state = publisher.SourceState(publisher.SOURCE_CHECKOUT, publisher.SOURCE_HEAD, publisher.SOURCE_PARENT, False, publisher.SOURCE_MANIFEST_SHA256)
         self.config = publisher.ReleaseConfig(self.source, self.stage, self.train, self.validation, self.BASE)
     def audit_fixture(self, stage):
@@ -76,9 +77,11 @@ class PublicReleaseTests(unittest.TestCase):
     def render_fixture(self, stage, *, card_template_path):
         return Path(card_template_path).read_bytes().replace(b"  - split: validation\n    path: val/tasks.jsonl\n", b"  - split: validation\n    path: val/tasks.jsonl\n  - split: test\n    path: test/tasks.jsonl\n")
     def cleanup(self):
-        publisher.audit_public_payload = self.original_audit; publisher.render_test_ready_dataset_card = self.original_renderer
+        publisher.audit_public_payload = self.original_audit; publisher.render_test_ready_dataset_card = self.original_renderer; publisher.SOURCE_TASK_ROOT = self.original_source_root
     def tearDown(self): self.cleanup(); self.temp.cleanup()
-    def release(self, **kwargs): return publisher.run_release(self.config, source=Source(self.state), hf=self.hf, **kwargs)
+    def release(self, **kwargs):
+        if not self.stage.exists(): publisher.prepare_stage(self.config, source=Source(self.state))
+        return publisher.run_release(self.config, source=Source(self.state), hf=self.hf, **kwargs)
 
     def test_default_dry_run_is_write_free_and_sanitized(self):
         result = self.release(); self.assertEqual(result["mode"], "dry-run"); self.assertEqual(self.hf.events, []); self.assertNotIn("PUBLIC-QUERY", json.dumps(result)); self.assertNotIn("private", json.dumps(result).lower())
@@ -120,6 +123,28 @@ class PublicReleaseTests(unittest.TestCase):
     def test_private_target_or_public_history_test_labels_are_refused(self):
         self.hf.private = True
         with self.assertRaises(publisher.ReleaseError): self.release()
+
+    def test_fix_round_exposes_explicit_read_only_and_prepare_operations(self):
+        self.assertTrue(hasattr(publisher, "prepare_stage"), "prepare_stage is required so default dry-run cannot write")
+
+    def test_fix_round_binds_the_stage_to_the_approved_source_root(self):
+        self.assertTrue(hasattr(publisher, "SOURCE_TASK_ROOT"), "approved source task root must be fixed")
+
+    def test_fix_round_uses_tracked_templates_and_safe_upload_adapter(self):
+        self.assertTrue(hasattr(publisher, "TRACKED_README"), "release docs must derive from tracked templates")
+
+    def test_prepared_stage_is_read_only_during_default_dry_run(self):
+        publisher.prepare_stage(self.config, source=Source(self.state))
+        before = {path.relative_to(self.stage).as_posix(): path.stat().st_ino for path in self.stage.rglob("*") if path.is_file()}
+        self.assertEqual(self.release()["mode"], "dry-run")
+        after = {path.relative_to(self.stage).as_posix(): path.stat().st_ino for path in self.stage.rglob("*") if path.is_file()}
+        self.assertEqual(after, before)
+
+    def test_unapproved_caller_source_root_is_refused(self):
+        other = self.temp.name and Path(self.temp.name) / "other"
+        other.mkdir()
+        config = publisher.ReleaseConfig(other, self.stage, self.train, self.validation, self.BASE)
+        with self.assertRaises(publisher.ReleaseError): publisher.prepare_stage(config, source=Source(self.state))
         self.hf.private = False; self.hf.history.append(("a" * 40, {"test/labels.jsonl": b"not allowed"}))
         with self.assertRaises(publisher.ReleaseError): self.release()
 

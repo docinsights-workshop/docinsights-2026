@@ -25,11 +25,15 @@ from prepare_docsem_hf_dataset import render_test_ready_dataset_card
 from prepare_docsem_test_release import audit_public_payload
 
 SOURCE_CHECKOUT = Path("/private/tmp/gsm-sem-docsem-test-release-a420588")
+SOURCE_TASK_ROOT = SOURCE_CHECKOUT / "docsem/test"
 SOURCE_HEAD = "41c675bda8fa93662675f3dcd90fb7af4000cc22"
 SOURCE_PARENT = "a4205880bfdd47aa3683050cd4a6ddf923fadffb"
 SOURCE_MANIFEST_SHA256 = "3872e0beb953f91a4fc89558a0981fcf12553505bc744e80b68f53ae130e9d83"
 RELEASE_ID = "docsem-test-a4205880-r1"
 PUBLIC_HF_REPOSITORY = "amitbcp/docinsights-2026-shared-task-data"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+TRACKED_README = REPO_ROOT / "competition/hf-dataset/README.md"
+TRACKED_INSTRUCTIONS = REPO_ROOT / "competition/hf-dataset/INSTRUCTIONS.md"
 _REVISION = re.compile(r"[0-9a-f]{40}\Z")
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 _FORBIDDEN = re.compile(r"(?:label|answer|evidence|gold|private|source.?mapping|archive|link|solution)", re.I)
@@ -65,6 +69,13 @@ class RemoteFile:
 
 
 @dataclass(frozen=True)
+class LocalFile:
+    path: Path
+    size: int
+    sha256: str
+
+
+@dataclass(frozen=True)
 class ReleaseConfig:
     source_root: Path
     stage: Path
@@ -82,7 +93,7 @@ class HfBackend(Protocol):
     def inventory(self, revision: str) -> Mapping[str, RemoteFile]: ...
     def read(self, revision: str, paths: Sequence[str]) -> Mapping[str, bytes]: ...
     def history_snapshots(self) -> Sequence[tuple[str, Mapping[str, bytes]]]: ...
-    def upload_large_folder(self, stage: Path, expected_parent: str) -> str: ...
+    def upload_large_folder(self, stage: Path, expected_parent: str) -> None: ...
     def commit_docs(self, files: Mapping[str, bytes], expected_parent: str) -> str: ...
 
 
@@ -101,6 +112,25 @@ def _read(path: Path, description: str) -> bytes:
             raise ReleaseError(f"{description} is unsafe.")
         with path.open("rb") as handle:
             return handle.read()
+    except ReleaseError:
+        raise
+    except OSError as exc:
+        raise ReleaseError(f"{description} is unavailable.") from exc
+
+
+def _file_digest(path: Path, description: str) -> LocalFile:
+    try:
+        item = path.lstat()
+        if not stat.S_ISREG(item.st_mode) or stat.S_ISLNK(item.st_mode):
+            raise ReleaseError(f"{description} is unsafe.")
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+        final = path.stat()
+        if final.st_ino != item.st_ino or final.st_size != item.st_size:
+            raise ReleaseError(f"{description} changed while being read.")
+        return LocalFile(path, item.st_size, digest.hexdigest())
     except ReleaseError:
         raise
     except OSError as exc:
@@ -129,7 +159,7 @@ def _walk(root: Path, description: str) -> tuple[set[str], set[str]]:
     return files, directories
 
 
-def _require_source_identity(source: SourceInspector) -> None:
+def _require_source_identity(source: SourceInspector, config: ReleaseConfig) -> None:
     state = source.inspect(SOURCE_CHECKOUT)
     if not isinstance(state, SourceState) or (
         Path(state.checkout) != SOURCE_CHECKOUT or state.head != SOURCE_HEAD or
@@ -137,6 +167,11 @@ def _require_source_identity(source: SourceInspector) -> None:
         state.manifest_sha256 != SOURCE_MANIFEST_SHA256
     ):
         raise ReleaseError("The selected public source is not the approved clean release.")
+    try:
+        if Path(config.source_root).resolve() != SOURCE_TASK_ROOT.resolve():
+            raise ReleaseError("The staged source root is not the approved checkout path.")
+    except OSError as exc:
+        raise ReleaseError("The approved source root is unavailable.") from exc
 
 
 def _task_rows(path: Path, description: str) -> list[dict]:
@@ -156,10 +191,12 @@ def _ids(path: Path, description: str) -> set[str]:
     return values
 
 
-def _build_stage(config: ReleaseConfig) -> tuple[dict, dict[str, bytes]]:
+def prepare_stage(config: ReleaseConfig, *, source: SourceInspector) -> dict:
+    """Explicit local write action; dry-run release planning never calls this."""
+    _require_source_identity(source, config)
     files, directories = _walk(Path(config.source_root), "Public source")
     if directories != {"documents"} or any(
-        name not in {"tasks.jsonl", "release.json"} and not name.startswith("documents/")
+        name != "tasks.jsonl" and not name.startswith("documents/")
         for name in files
     ):
         raise ReleaseError("Public source inventory is not exact.")
@@ -178,13 +215,14 @@ def _build_stage(config: ReleaseConfig) -> tuple[dict, dict[str, bytes]]:
     if ids != sorted(set(ids)) or set(ids) & (_ids(config.train_tasks, "Training tasks") | _ids(config.validation_tasks, "Validation tasks")):
         raise ReleaseError("Public task IDs are unsafe.")
     document_files = {f"documents/{item}.pdf" for item in ids}
-    if files != {"tasks.jsonl", "release.json"} | document_files:
+    if files != {"tasks.jsonl"} | document_files:
         raise ReleaseError("Public task PDFs are not an exact bijection.")
 
     normalized = [{**row, "document_pdf": f"test/documents/{row['instance_id']}.pdf"} for row in rows]
     task_bytes = b"".join(_json(row) for row in normalized)
     source_documents = [config.source_root / "documents" / f"{item}.pdf" for item in ids]
-    pdf_digests = {path.name: _sha(_read(path, "Public PDF")) for path in source_documents}
+    source_pdfs = {f"test/documents/{path.name}": _file_digest(path, "Public PDF") for path in source_documents}
+    pdf_digests = {Path(name).name: item.sha256 for name, item in source_pdfs.items()}
     manifest = {
         "schema_version": 1, "release_id": RELEASE_ID,
         "counts": {"tasks": len(ids), "pdfs": len(ids)},
@@ -195,17 +233,20 @@ def _build_stage(config: ReleaseConfig) -> tuple[dict, dict[str, bytes]]:
     manifest_bytes = _json(manifest)
     checksums = {"tasks.jsonl": _sha(task_bytes), "release.json": _sha(manifest_bytes), **{f"documents/{name}": digest for name, digest in pdf_digests.items()}}
     checksum_bytes = b"".join(f"{digest}  {name}\n".encode() for name, digest in sorted(checksums.items()))
-    expected = {"test/tasks.jsonl": task_bytes, "test/release.json": manifest_bytes, "test/SHA256SUMS": checksum_bytes}
-    expected.update({f"test/documents/{path.name}": _read(path, "Public PDF") for path in source_documents})
+    metadata = {"test/tasks.jsonl": task_bytes, "test/release.json": manifest_bytes, "test/SHA256SUMS": checksum_bytes}
 
     stage = Path(config.stage)
     if stage.exists():
         try:
             audit_public_payload(stage)
-            current = {p.relative_to(stage).as_posix(): _read(p, "Existing public stage") for p in stage.rglob("*") if p.is_file()}
+            current = {p.relative_to(stage).as_posix(): _read(p, "Existing public stage") for p in stage.rglob("*") if p.is_file() and not p.as_posix().endswith(".pdf")}
         except Exception as exc: raise ReleaseError("Existing public stage is ambiguous.") from exc
-        if current != expected: raise ReleaseError("Existing public stage differs from the approved payload.")
-        return manifest, expected
+        if current != metadata: raise ReleaseError("Existing public stage differs from the approved payload.")
+        for remote_name, source_pdf in source_pdfs.items():
+            staged = _file_digest(stage / remote_name, "Existing public PDF")
+            if (staged.size, staged.sha256) != (source_pdf.size, source_pdf.sha256):
+                raise ReleaseError("Existing public stage differs from the approved payload.")
+        return manifest
     if os.stat(config.source_root).st_dev != os.stat(stage.parent).st_dev:
         raise ReleaseError("Public stage is not on the source device for hardlinking.")
     stage.mkdir(mode=0o700)
@@ -222,13 +263,41 @@ def _build_stage(config: ReleaseConfig) -> tuple[dict, dict[str, bytes]]:
     except Exception:
         shutil.rmtree(stage, ignore_errors=True)
         raise
-    return manifest, expected
+    return manifest
 
 
-def _release_docs(stage: Path, base_readme: bytes, base_instructions: bytes) -> dict[str, bytes]:
-    with tempfile.TemporaryDirectory(prefix="docsem-card-") as temporary:
-        template = Path(temporary) / "README.md"; template.write_bytes(base_readme)
-        readme = render_test_ready_dataset_card(stage, card_template_path=template)
+def _audited_stage_manifest(config: ReleaseConfig, *, source: SourceInspector) -> dict:
+    """Read-only stage audit for dry-runs and publication.
+
+    Source data is read one file at a time; no PDF corpus is materialized.
+    """
+    _require_source_identity(source, config)
+    stage = Path(config.stage)
+    if not stage.exists():
+        raise ReleaseError("No prepared audited public stage exists; run --prepare-stage first.")
+    try:
+        manifest = audit_public_payload(stage)
+    except Exception as exc:
+        raise ReleaseError("Prepared public stage audit failed.") from exc
+    rows = _task_rows(SOURCE_TASK_ROOT / "tasks.jsonl", "Public tasks")
+    normalized = [{**row, "document_pdf": f"test/documents/{row['instance_id']}.pdf"} for row in rows]
+    if manifest.get("task_manifest_sha256") != _sha(b"".join(_json(row) for row in normalized)):
+        raise ReleaseError("Prepared public stage does not match the approved source.")
+    for row in rows:
+        source_pdf = _file_digest(SOURCE_TASK_ROOT / row["document_pdf"], "Public PDF")
+        staged_pdf = _file_digest(stage / f"test/documents/{row['instance_id']}.pdf", "Prepared public PDF")
+        if (source_pdf.size, source_pdf.sha256) != (staged_pdf.size, staged_pdf.sha256):
+            raise ReleaseError("Prepared public stage does not match the approved source.")
+    return manifest
+
+
+def _release_docs() -> dict[str, bytes]:
+    base_readme = _read(TRACKED_README, "Tracked dataset card")
+    base_instructions = _read(TRACKED_INSTRUCTIONS, "Tracked participant instructions")
+    marker = b"  - split: validation\n    path: val/tasks.jsonl\n"
+    if base_readme.count(marker) != 1:
+        raise ReleaseError("Tracked dataset card cannot be rendered deterministically.")
+    readme = base_readme.replace(marker, marker + b"  - split: test\n    path: test/tasks.jsonl\n", 1)
     readme += (
         b"\n## Held-out test release\n\n"
         b"Public held-out test inputs are available in the `test` task split; submissions remain closed. "
@@ -241,6 +310,27 @@ def _release_docs(stage: Path, base_readme: bytes, base_instructions: bytes) -> 
         b"Do not infer a closed token grammar. Test submissions remain closed.\n"
     )
     return {"README.md": readme, "INSTRUCTIONS.md": instructions}
+
+
+def _make_upload_root(stage: Path) -> Path:
+    """Make an uploader cache outside the audited stage without copying PDFs."""
+    try:
+        root = Path(tempfile.mkdtemp(prefix="docsem-public-upload-", dir=stage.parent))
+        if root == stage or stage in root.parents:
+            raise ReleaseError("Upload cache overlaps the audited stage.")
+        (root / "test/documents").mkdir(parents=True)
+        for name in ("tasks.jsonl", "release.json", "SHA256SUMS"):
+            shutil.copyfile(stage / "test" / name, root / "test" / name)
+        for source in (stage / "test/documents").glob("*.pdf"):
+            destination = root / "test/documents" / source.name
+            os.link(source, destination)
+            if source.stat().st_dev != destination.stat().st_dev or source.stat().st_ino != destination.stat().st_ino:
+                raise ReleaseError("Upload cache PDF hardlink verification failed.")
+        return root
+    except ReleaseError:
+        raise
+    except OSError as exc:
+        raise ReleaseError("A separate resumable upload cache could not be prepared.") from exc
 
 
 def _forbidden_public_path(path: str) -> bool:
@@ -263,67 +353,77 @@ def _expect_state(hf: HfBackend, base: str) -> RemoteState:
     return state
 
 
-def _test_status(hf: HfBackend, revision: str, expected: Mapping[str, bytes]) -> str:
+def _stage_expectations(stage: Path) -> tuple[dict[str, bytes], dict[str, RemoteFile]]:
+    metadata = {name: _read(stage / name, "Prepared public metadata") for name in ("test/tasks.jsonl", "test/release.json", "test/SHA256SUMS")}
+    remote = {name: RemoteFile(len(payload), _sha(payload)) for name, payload in metadata.items()}
+    for path in (stage / "test/documents").glob("*.pdf"):
+        item = _file_digest(path, "Prepared public PDF")
+        remote[f"test/documents/{path.name}"] = RemoteFile(item.size, item.sha256)
+    return metadata, remote
+
+
+def _test_status(hf: HfBackend, revision: str, metadata: Mapping[str, bytes], expected: Mapping[str, RemoteFile]) -> str:
     inventory = dict(hf.inventory(revision)); names = {name for name in inventory if name.startswith("test/")}
     if not names: return "missing"
     if names != set(expected): raise ReleaseError("Remote test inventory is not exact.")
-    if any(inventory[name] != RemoteFile(len(data), _sha(data)) for name, data in expected.items()): raise ReleaseError("Remote test file hash or size differs.")
-    metadata = hf.read(revision, ("test/tasks.jsonl", "test/release.json", "test/SHA256SUMS"))
-    if metadata != {name: expected[name] for name in metadata} or len(metadata) != 3: raise ReleaseError("Remote test metadata differs.")
+    if any(
+        inventory[name] != expected[name]
+        for name in expected
+        if name.startswith("test/documents/")
+    ) or any(inventory[name].size != len(payload) for name, payload in metadata.items()):
+        raise ReleaseError("Remote test file hash or size differs.")
+    actual = hf.read(revision, tuple(metadata))
+    if actual != metadata: raise ReleaseError("Remote test metadata differs.")
     return "complete"
 
 
 def run_release(config: ReleaseConfig, *, source: SourceInspector, hf: HfBackend, publish: bool = False, confirm: str | None = None, expected_complete_base: str | None = None) -> dict:
     if not _REVISION.fullmatch(config.public_hf_base): raise ReleaseError("An exact public Hugging Face base is required.")
     if publish and confirm != "PUBLISH": raise ReleaseError("Publishing requires --confirm PUBLISH.")
-    _require_source_identity(source)
-    manifest, expected = _build_stage(config)
+    manifest = _audited_stage_manifest(config, source=source)
+    metadata, expected = _stage_expectations(Path(config.stage))
     state = _expect_state(hf, expected_complete_base or config.public_hf_base)
     _scan_history(hf)
     before = dict(hf.inventory(state.revision))
     if any(_forbidden_public_path(path) for path in before): raise ReleaseError("Public target contains a forbidden validation/test path.")
-    base_docs = hf.read(state.revision, ("README.md", "INSTRUCTIONS.md"))
-    if set(base_docs) != {"README.md", "INSTRUCTIONS.md"}: raise ReleaseError("Public documentation templates are unavailable.")
-    test = _test_status(hf, state.revision, expected)
-    if test == "complete" and (
-        RELEASE_ID.encode() in base_docs["README.md"]
-        and b"immediately before the block colon" in base_docs["INSTRUCTIONS.md"]
-    ):
-        # A prior completed public-only release is already the exact terminal
-        # documentation state.  Do not render its release text a second time.
-        docs, docs_complete = dict(base_docs), True
-    else:
-        docs = _release_docs(Path(config.stage), base_docs["README.md"], base_docs["INSTRUCTIONS.md"])
-        docs_complete = False
+    docs = _release_docs()
+    test = _test_status(hf, state.revision, metadata, expected)
+    docs_complete = hf.read(state.revision, ("README.md", "INSTRUCTIONS.md")) == docs
     result = {"mode": "dry-run", "release_id": RELEASE_ID, "counts": dict(manifest["counts"]), "aggregate_digests": {key: manifest[key] for key in ("sorted_ids_sha256", "task_manifest_sha256", "pdf_inventory_sha256")}, "base_revision": state.revision}
     if not publish: return result
     if test == "complete" and docs_complete:
         return {**result, "mode": "already-complete", "revision": state.revision}
     current = state.revision
     if test == "missing":
-        current = hf.upload_large_folder(Path(config.stage), current)
-        if not _REVISION.fullmatch(current): raise ReleaseError("Test upload did not return an exact revision.")
+        hf.upload_large_folder(_make_upload_root(Path(config.stage)), current)
+        current = hf.state().revision
+        if not _REVISION.fullmatch(current): raise ReleaseError("Test upload did not produce an exact revision.")
         after_upload = dict(hf.inventory(current))
         if {name: info for name, info in after_upload.items() if not name.startswith("test/")} != {name: info for name, info in before.items() if not name.startswith("test/")}:
             raise ReleaseError("A non-test path changed before documentation publication.")
-        _scan_history(hf); _test_status(hf, current, expected)
+        _scan_history(hf); _test_status(hf, current, metadata, expected)
     else:
         current = state.revision
     # Exact-parent CAS for both documents is intentionally the final operation.
     final = hf.commit_docs(docs, current)
     if not _REVISION.fullmatch(final): raise ReleaseError("Documentation publication did not return an exact revision.")
-    final_inventory = dict(hf.inventory(final)); _scan_history(hf); _test_status(hf, final, expected)
+    if _expect_state(hf, final).revision != final: raise ReleaseError("Final public revision changed unexpectedly.")
+    final_inventory = dict(hf.inventory(final)); _scan_history(hf); _test_status(hf, final, metadata, expected)
     if hf.read(final, ("README.md", "INSTRUCTIONS.md")) != docs: raise ReleaseError("Release documentation differs after publication.")
     if any(_forbidden_public_path(path) for path in final_inventory): raise ReleaseError("Final public target contains a forbidden path.")
+    if set(final_inventory) != set(before) | {name for name in expected if name not in before}:
+        raise ReleaseError("Final public inventory changed unexpectedly.")
+    for name, item in before.items():
+        if name not in {"README.md", "INSTRUCTIONS.md"} and final_inventory.get(name) != item:
+            raise ReleaseError("A non-test public file changed unexpectedly.")
     return {**result, "mode": "published", "revision": final}
 
 
 class LocalSourceInspector:
-    def __init__(self, source_manifest: Path): self.source_manifest = source_manifest
     def inspect(self, checkout: Path) -> SourceState:
         def git(*args: str) -> str: return subprocess.check_output(["git", "-C", str(checkout), *args], text=True).strip()
         try:
-            return SourceState(checkout, git("rev-parse", "HEAD"), git("rev-parse", "HEAD^"), bool(git("status", "--porcelain")), _sha(_read(self.source_manifest, "Source manifest")))
+            return SourceState(checkout, git("rev-parse", "HEAD"), git("rev-parse", "HEAD^"), bool(git("status", "--porcelain")), _sha(_read(SOURCE_TASK_ROOT / "tasks.jsonl", "Source manifest")))
         except (OSError, subprocess.CalledProcessError) as exc: raise ReleaseError("Public source checkout cannot be inspected.") from exc
 
 
@@ -361,12 +461,15 @@ class HuggingFaceHubBackend:
     def inventory(self, revision: str) -> Mapping[str, RemoteFile]:
         inventory = {}
         for entry in self._paths(revision):
+            # RepoFolder has a tree_id but no byte size; never download it.
+            if getattr(entry, "size", None) is None:
+                continue
             path = getattr(entry, "path", None) or getattr(entry, "rfilename", None)
             if not isinstance(path, str): continue
             lfs = getattr(entry, "lfs", None)
             if lfs and getattr(lfs, "sha256", None): inventory[path] = RemoteFile(int(getattr(lfs, "size", 0)), lfs.sha256)
             else:
-                payload = self._download(revision, path); inventory[path] = RemoteFile(len(payload), _sha(payload))
+                inventory[path] = RemoteFile(int(entry.size), str(getattr(entry, "blob_id", "")))
         return inventory
 
     def read(self, revision: str, paths: Sequence[str]) -> Mapping[str, bytes]:
@@ -379,11 +482,10 @@ class HuggingFaceHubBackend:
         except ReleaseError: raise
         except Exception as exc: raise ReleaseError("Public Hugging Face history cannot be inspected.") from exc
 
-    def upload_large_folder(self, stage: Path, expected_parent: str) -> str:
+    def upload_large_folder(self, stage: Path, expected_parent: str) -> None:
         if self.state().revision != expected_parent: raise RemoteMovedError("The public Hugging Face base moved before test upload.")
         try:
-            result = self.api.upload_large_folder(self.repository, repo_type="dataset", folder_path=str(stage / "test"), path_in_repo="test")
-            return result.oid
+            self.api.upload_large_folder(self.repository, repo_type="dataset", folder_path=str(stage))
         except Exception as exc: raise ReleaseError("Public test upload failed.") from exc
 
     def commit_docs(self, files: Mapping[str, bytes], expected_parent: str) -> str:
@@ -397,13 +499,16 @@ class HuggingFaceHubBackend:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Dry-run public-only DocSem held-out test release")
-    parser.add_argument("--source-root", type=Path, required=True); parser.add_argument("--source-manifest", type=Path, required=True)
     parser.add_argument("--stage", type=Path, required=True); parser.add_argument("--train-tasks", type=Path, required=True); parser.add_argument("--validation-tasks", type=Path, required=True)
-    parser.add_argument("--public-hf-base", required=True); parser.add_argument("--publish", action="store_true"); parser.add_argument("--confirm")
+    parser.add_argument("--public-hf-base", required=True); parser.add_argument("--prepare-stage", action="store_true"); parser.add_argument("--publish", action="store_true"); parser.add_argument("--confirm")
     args = parser.parse_args(argv)
-    config = ReleaseConfig(args.source_root, args.stage, args.train_tasks, args.validation_tasks, args.public_hf_base)
+    config = ReleaseConfig(SOURCE_TASK_ROOT, args.stage, args.train_tasks, args.validation_tasks, args.public_hf_base)
     try:
-        result = run_release(config, source=LocalSourceInspector(args.source_manifest), hf=HuggingFaceHubBackend(), publish=args.publish, confirm=args.confirm)
+        inspector = LocalSourceInspector()
+        if args.prepare_stage:
+            result = {"mode": "prepared", "release_id": RELEASE_ID, "counts": prepare_stage(config, source=inspector)["counts"]}
+        else:
+            result = run_release(config, source=inspector, hf=HuggingFaceHubBackend(), publish=args.publish, confirm=args.confirm)
     except ReleaseError as exc:
         print(str(exc), file=os.sys.stderr)
         return 2
@@ -412,4 +517,4 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
