@@ -327,6 +327,15 @@ def _release_docs() -> dict[str, bytes]:
     ).replace(
         b"Only answer accuracy and evidence F1 are returned for the first held-out test attempt; later-attempt metrics and all per-example test results remain organizer-only until finalization.",
         b"Test submissions and scoring remain closed; no held-out test metrics or per-example results are returned in this release.",
+    ).replace(
+        b"This Hugging Face package mirrors the source release's 908 training tasks, 908 training labels, 217 validation tasks, and all 1,125 PDFs. The PDF files are byte-identical. The Hugging Face task manifests only prefix `document_pdf` with `train/` or `val/` so files resolve directly from this repository's root.",
+        b"This Hugging Face package contains 908 training tasks and labels, 217 validation tasks, and 1,730 public test tasks with PDFs. Test labels are not installed or public; the labels config remains train-only. PDFs are byte-identical and task paths resolve from this repository root.",
+    ).replace(
+        b"Validation and test labels are not included in this public dataset. They remain in the access-restricted organizer evaluation repository and are used only by the submission services.",
+        b"Validation labels remain organizer-only. Test labels are not installed in this public release or a submission service; public test inputs are available while submissions and scoring remain closed.",
+    ).replace(
+        b"# After the official release, reloading this config will also provide tasks[\"test\"].",
+        b"# This audited release provides tasks[\"test\"] public inputs; test submissions and scoring remain closed.",
     )
     readme += (
         b"\n## Held-out test release\n\n"
@@ -340,12 +349,30 @@ def _release_docs() -> dict[str, bytes]:
     ).replace(
         b"Every content block begins with `b01: content`.",
         b"Train and validation use visible block identifiers; test uses the opaque token before the colon exactly, including punctuation.",
+    ).replace(
+        b"The public package contains labelled train data and unlabelled validation inputs.\nValidation labels remain private and are used only by the official submission portal.",
+        b"The public package contains labelled train data, unlabelled validation inputs, and 1,730 unlabelled public test inputs. Validation labels remain private. Test labels are not installed, and test submissions/scoring remain closed.",
     ) + (
         b"\n## Held-out test evidence\n\n"
         b"For test instances, copy the opaque visible token immediately before the block colon exactly, including punctuation. "
         b"Do not infer a closed token grammar. Test submissions remain closed.\n"
     )
-    return {"README.md": readme, "INSTRUCTIONS.md": instructions}
+    docs = {"README.md": readme, "INSTRUCTIONS.md": instructions}
+    _audit_release_docs(docs)
+    return docs
+
+
+def _audit_release_docs(docs: Mapping[str, bytes]) -> None:
+    required = {
+        "README.md": (b"1,730 test tasks and PDFs", b"labels config remains train-only", b"submissions remain closed", b"scoring remains closed"),
+        "INSTRUCTIONS.md": (b"before the colon exactly, including punctuation", b"Test labels are not installed", b"test submissions/scoring remain closed"),
+    }
+    forbidden = (
+        b"After the official release", b"all 1,125 PDFs", b"used only by the submission services",
+        b"Validation and test labels are not included in this public dataset", b"Every content block begins with a visible identifier",
+    )
+    if set(docs) != set(required) or any(item not in docs[name] for name, items in required.items() for item in items) or any(item in payload for payload in docs.values() for item in forbidden):
+        raise ReleaseError("Generated release documentation is internally inconsistent.")
 
 
 def _make_upload_root(stage: Path) -> Path:
@@ -354,24 +381,61 @@ def _make_upload_root(stage: Path) -> Path:
         root = stage.parent / f".{stage.name}-upload-{RELEASE_ID}"
         if root == stage or stage in root.parents:
             raise ReleaseError("Upload cache overlaps the audited stage.")
-        if root.exists():
-            if not root.is_dir() or root.is_symlink() or not (root / "test").is_dir():
-                raise ReleaseError("Existing upload cache is unsafe.")
-            return root
-        root.mkdir(mode=0o700)
-        (root / "test/documents").mkdir(parents=True)
-        for name in ("tasks.jsonl", "release.json", "SHA256SUMS"):
-            shutil.copyfile(stage / "test" / name, root / "test" / name)
-        for source in (stage / "test/documents").glob("*.pdf"):
-            destination = root / "test/documents" / source.name
-            os.link(source, destination)
-            if source.stat().st_dev != destination.stat().st_dev or source.stat().st_ino != destination.stat().st_ino:
-                raise ReleaseError("Upload cache PDF hardlink verification failed.")
+        if not root.exists(): root.mkdir(mode=0o700)
+        _reconcile_upload_root(root, stage)
         return root
     except ReleaseError:
         raise
     except OSError as exc:
         raise ReleaseError("A separate resumable upload cache could not be prepared.") from exc
+
+
+def _reconcile_upload_root(root: Path, stage: Path) -> None:
+    """Audit a reusable uploader cache before it can be uploaded.
+
+    Only exact stage files and the uploader-owned .cache/.huggingface subtree
+    may exist. Matching incomplete payload files are completed without
+    overwriting an existing path.
+    """
+    if root.is_symlink() or not root.is_dir(): raise ReleaseError("Existing upload cache is unsafe.")
+    expected = {p.relative_to(stage).as_posix(): p for p in (stage / "test").rglob("*") if p.is_file()}
+    seen = set()
+    for path in root.rglob("*"):
+        relative = path.relative_to(root).as_posix()
+        mode = path.lstat().st_mode
+        if stat.S_ISLNK(mode) or not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+            raise ReleaseError("Existing upload cache contains an unsafe entry.")
+        if relative == ".cache":
+            if not stat.S_ISDIR(mode): raise ReleaseError("Existing upload cache contains an unsafe cache entry.")
+            continue
+        if relative.startswith(".cache/"):
+            if relative != ".cache/huggingface" and not relative.startswith(".cache/huggingface/"):
+                raise ReleaseError("Existing upload cache contains an unexpected cache entry.")
+            if relative == ".cache/huggingface" and not stat.S_ISDIR(mode):
+                raise ReleaseError("Existing upload cache contains an unsafe cache entry.")
+            continue
+        if stat.S_ISDIR(mode):
+            if relative not in {"test", "test/documents"}:
+                raise ReleaseError("Existing upload cache contains an unexpected directory.")
+            continue
+        if relative not in expected:
+            raise ReleaseError("Existing upload cache contains an unexpected payload file.")
+        source = _file_digest(expected[relative], "Prepared public payload")
+        current = _file_digest(path, "Existing upload payload")
+        if (source.size, source.sha256) != (current.size, current.sha256):
+            raise ReleaseError("Existing upload cache differs from the audited stage.")
+        seen.add(relative)
+    (root / "test/documents").mkdir(parents=True, exist_ok=True)
+    for relative, source in expected.items():
+        destination = root / relative
+        if destination.exists(): continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if relative.startswith("test/documents/"):
+            os.link(source, destination)
+            if source.stat().st_ino != destination.stat().st_ino:
+                raise ReleaseError("Upload cache PDF hardlink verification failed.")
+        else:
+            shutil.copyfile(source, destination)
 
 
 def _forbidden_public_path(path: str) -> bool:
@@ -529,7 +593,13 @@ class HuggingFaceHubBackend:
     def upload_large_folder(self, stage: Path, expected_parent: str) -> None:
         if self.state().revision != expected_parent: raise RemoteMovedError("The public Hugging Face base moved before test upload.")
         try:
-            self.api.upload_large_folder(self.repository, repo_type="dataset", folder_path=str(stage))
+            self.api.upload_large_folder(
+                self.repository,
+                repo_type="dataset",
+                folder_path=str(stage),
+                allow_patterns="test/**",
+                ignore_patterns=[".cache/**", "**/.cache/**"],
+            )
         except Exception as exc: raise ReleaseError("Public test upload failed.") from exc
 
     def commit_docs(self, files: Mapping[str, bytes], expected_parent: str) -> str:

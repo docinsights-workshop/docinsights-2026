@@ -70,7 +70,7 @@ class PublicReleaseTests(unittest.TestCase):
         for item in self.ids: (self.source / "documents" / f"{item}.pdf").write_bytes(pdf_bytes())
         self.train, self.validation = root / "train.jsonl", root / "validation.jsonl"
         self.train.write_bytes(canonical({"instance_id":"train_000001","user_query":"q","document_pdf":"documents/train_000001.pdf"})); self.validation.write_bytes(canonical({"instance_id":"val_000001","user_query":"q","document_pdf":"documents/val_000001.pdf"}))
-        self.readme = b"---\nconfigs:\n- config_name: tasks\n  data_files:\n  - split: validation\n    path: val/tasks.jsonl\n- config_name: labels\n  data_files:\n  - split: train\n    path: train/labels.jsonl\n---\nHeld-out test: not released in the current public payload.\nNo official held-out test payload is present in this revision.\n"; self.instructions = b"Train and validation behavior remains accurate. Every content block begins with `b01: content`.\n"
+        self.readme = b"---\nconfigs:\n- config_name: tasks\n  data_files:\n  - split: validation\n    path: val/tasks.jsonl\n- config_name: labels\n  data_files:\n  - split: train\n    path: train/labels.jsonl\n---\nHeld-out test: not released in the current public payload.\nNo official held-out test payload is present in this revision.\n"; self.instructions = b"Train and validation behavior remains accurate. Every content block begins with `b01: content`.\nThe public package contains labelled train data and unlabelled validation inputs.\nValidation labels remain private and are used only by the official submission portal.\n"
         (self.dataset / "README.md").write_bytes(self.readme); (self.dataset / "INSTRUCTIONS.md").write_bytes(self.instructions); (self.dataset / "train").mkdir(); (self.dataset / "train/labels.jsonl").write_bytes(b"train labels permitted\n")
         (self.templates / "README.md").write_bytes(self.readme); (self.templates / "INSTRUCTIONS.md").write_bytes(self.instructions)
         self.hf = Hf(self.dataset, self.BASE)
@@ -144,6 +144,32 @@ class PublicReleaseTests(unittest.TestCase):
         self.assertIn(b"labels config remains train-only", docs["README.md"])
         self.assertNotIn(b"Every content block begins with `b01", docs["INSTRUCTIONS.md"])
         self.assertIn(b"before the colon exactly, including punctuation", docs["INSTRUCTIONS.md"])
+
+    def test_poisoned_or_incomplete_upload_cache_is_refused_and_clean_cache_reused(self):
+        self.release()
+        root = self.stage.parent / f".{self.stage.name}-upload-{publisher.RELEASE_ID}"
+        (root / "test").mkdir(parents=True)
+        (root / "test/unexpected.bin").write_bytes(b"poison")
+        with self.assertRaises(publisher.ReleaseError): publisher._make_upload_root(self.stage)
+        import shutil
+        shutil.rmtree(root)
+        first = publisher._make_upload_root(self.stage)
+        self.assertEqual(first, publisher._make_upload_root(self.stage))
+        (first / "test/tasks.jsonl").write_bytes(b"mismatch")
+        with self.assertRaises(publisher.ReleaseError): publisher._make_upload_root(self.stage)
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlinks unavailable")
+    def test_upload_cache_symlink_is_refused(self):
+        self.release()
+        root = self.stage.parent / f".{self.stage.name}-upload-{publisher.RELEASE_ID}"
+        (root / "test").mkdir(parents=True)
+        (root / "test/tasks.jsonl").symlink_to(self.stage / "test/tasks.jsonl")
+        with self.assertRaises(publisher.ReleaseError): publisher._make_upload_root(self.stage)
+
+    def test_actual_template_release_docs_pass_required_forbidden_phrase_audit(self):
+        publisher.TRACKED_README = self.original_readme; publisher.TRACKED_INSTRUCTIONS = self.original_instructions
+        docs = publisher._release_docs()
+        publisher._audit_release_docs(docs)
     def test_private_target_or_public_history_test_labels_are_refused(self):
         self.hf.private = True
         with self.assertRaises(publisher.ReleaseError): self.release()
