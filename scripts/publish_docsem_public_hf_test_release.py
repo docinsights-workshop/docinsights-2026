@@ -599,6 +599,7 @@ class HuggingFaceHubBackend:
                 folder_path=str(stage),
                 allow_patterns="test/**",
                 ignore_patterns=[".cache/**", "**/.cache/**"],
+                num_workers=2,
             )
         except Exception as exc: raise ReleaseError("Public test upload failed.") from exc
 

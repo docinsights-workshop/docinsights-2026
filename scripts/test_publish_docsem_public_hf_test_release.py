@@ -52,6 +52,24 @@ class Hf:
         for path, data in files.items(): (self.root / path).write_bytes(data)
         self.revision = "d" * 40; self.history.append((self.revision, self.tree())); return self.revision
 
+class InstalledUploadLargeFolderApi:
+    """Offline fake matching huggingface_hub 0.29.3's upload boundary."""
+    def __init__(self, revision): self.revision, self.upload = revision, None
+    def repo_info(self, repo_id, *, repo_type):
+        return type("RepoInfo", (), {"sha": self.revision, "private": False})()
+    def upload_large_folder(
+        self, repo_id, folder_path, *, repo_type, revision=None, private=None,
+        allow_patterns=None, ignore_patterns=None, num_workers=None,
+        print_report=True, print_report_every=60,
+    ):
+        self.upload = {
+            "repo_id": repo_id, "folder_path": folder_path,
+            "repo_type": repo_type, "revision": revision, "private": private,
+            "allow_patterns": allow_patterns, "ignore_patterns": ignore_patterns,
+            "num_workers": num_workers, "print_report": print_report,
+            "print_report_every": print_report_every,
+        }
+
 class PublicReleaseTests(unittest.TestCase):
     BASE = "b" * 40
     def setUp(self):
@@ -182,6 +200,21 @@ class PublicReleaseTests(unittest.TestCase):
 
     def test_fix_round_uses_tracked_templates_and_safe_upload_adapter(self):
         self.assertTrue(hasattr(publisher, "TRACKED_README"), "release docs must derive from tracked templates")
+
+    def test_hub_adapter_bounds_large_folder_workers_and_preserves_upload_filters(self):
+        backend = object.__new__(publisher.HuggingFaceHubBackend)
+        backend.repository = publisher.PUBLIC_HF_REPOSITORY
+        backend.api = InstalledUploadLargeFolderApi(self.BASE)
+        backend.upload_large_folder(self.stage, self.BASE)
+        self.assertEqual(backend.api.upload, {
+            "repo_id": publisher.PUBLIC_HF_REPOSITORY,
+            "folder_path": str(self.stage),
+            "repo_type": "dataset", "revision": None, "private": None,
+            "allow_patterns": "test/**",
+            "ignore_patterns": [".cache/**", "**/.cache/**"],
+            "num_workers": 2, "print_report": True,
+            "print_report_every": 60,
+        })
 
     def test_prepared_stage_is_read_only_during_default_dry_run(self):
         publisher.prepare_stage(self.config, source=Source(self.state))
