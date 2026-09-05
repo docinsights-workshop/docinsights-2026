@@ -31,12 +31,16 @@ SOURCE_PARENT = "a4205880bfdd47aa3683050cd4a6ddf923fadffb"
 SOURCE_MANIFEST_SHA256 = "3872e0beb953f91a4fc89558a0981fcf12553505bc744e80b68f53ae130e9d83"
 RELEASE_ID = "docsem-test-a4205880-r1"
 PUBLIC_HF_REPOSITORY = "amitbcp/docinsights-2026-shared-task-data"
+PUBLIC_HF_ORIGINAL_BASE = "e6c9c75bea7575a64279072dcdf0f6050fef9e9f"
+PUBLIC_HF_GITATTRIBUTES_SHA256 = "9778c3c37d9a3a1cbfa1e28d446d10c85aea6b2b135a4a3210650089fb573301"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TRACKED_README = REPO_ROOT / "competition/hf-dataset/README.md"
 TRACKED_INSTRUCTIONS = REPO_ROOT / "competition/hf-dataset/INSTRUCTIONS.md"
 _REVISION = re.compile(r"[0-9a-f]{40}\Z")
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 _FORBIDDEN = re.compile(r"(?:label|answer|evidence|gold|private|source.?mapping|archive|link|solution)", re.I)
+_TEST_PDF_LFS_SUFFIX = b" filter=lfs diff=lfs merge=lfs -text\n"
+_MAX_GITATTRIBUTES_BYTES = 1024 * 1024
 
 
 class ReleaseError(RuntimeError):
@@ -483,6 +487,84 @@ def _test_status(hf: HfBackend, revision: str, metadata: Mapping[str, bytes], ex
     return "complete" if names == set(expected) else "partial"
 
 
+def _remote_bytes(hf: HfBackend, revision: str, paths: Sequence[str], description: str) -> dict[str, bytes]:
+    try:
+        payloads = hf.read(revision, paths)
+    except ReleaseError:
+        raise
+    except Exception as exc:
+        raise ReleaseError(f"{description} is unavailable.") from exc
+    if not isinstance(payloads, Mapping) or set(payloads) != set(paths) or any(
+        not isinstance(payload, bytes) for payload in payloads.values()
+    ):
+        raise ReleaseError(f"{description} is invalid.")
+    return dict(payloads)
+
+
+def _audit_test_pdf_attributes(
+    hf: HfBackend,
+    revision: str,
+    inventory: Mapping[str, RemoteFile],
+    expected: Mapping[str, RemoteFile],
+) -> None:
+    info = inventory.get(".gitattributes")
+    if not isinstance(info, RemoteFile) or info.size < 0 or info.size > _MAX_GITATTRIBUTES_BYTES:
+        raise ReleaseError("Public Git attributes are invalid.")
+    payload = _remote_bytes(hf, revision, (".gitattributes",), "Public Git attributes")[".gitattributes"]
+    if len(payload) != info.size or len(payload) > _MAX_GITATTRIBUTES_BYTES:
+        raise ReleaseError("Public Git attributes are invalid.")
+    expected_rules = {
+        path.encode("utf-8") + _TEST_PDF_LFS_SUFFIX
+        for path in inventory
+        if path.startswith("test/documents/") and path.endswith(".pdf") and path in expected
+    }
+    rules, baseline = [], []
+    for line in payload.splitlines(keepends=True):
+        if line in expected_rules:
+            rules.append(line)
+        else:
+            baseline.append(line)
+    if len(rules) != len(expected_rules) or set(rules) != expected_rules:
+        raise ReleaseError("Public test PDF Git LFS rules are not exact.")
+    if _sha(b"".join(baseline)) != PUBLIC_HF_GITATTRIBUTES_SHA256:
+        raise ReleaseError("Public Git attributes differ from the approved baseline.")
+
+
+def _original_public_inventory(hf: HfBackend, expected: Mapping[str, RemoteFile]) -> dict[str, RemoteFile]:
+    try:
+        baseline = dict(hf.inventory(PUBLIC_HF_ORIGINAL_BASE))
+    except ReleaseError:
+        raise
+    except Exception as exc:
+        raise ReleaseError("Original public Hugging Face inventory is unavailable.") from exc
+    if any(path.startswith("test/") or _forbidden_public_path(path) for path in baseline):
+        raise ReleaseError("Original public Hugging Face inventory is invalid.")
+    _audit_test_pdf_attributes(hf, PUBLIC_HF_ORIGINAL_BASE, baseline, expected)
+    return baseline
+
+
+def _audit_non_test_state(
+    hf: HfBackend,
+    revision: str,
+    inventory: Mapping[str, RemoteFile],
+    baseline: Mapping[str, RemoteFile],
+    expected: Mapping[str, RemoteFile],
+    docs: Mapping[str, bytes],
+) -> bool:
+    current = {name: info for name, info in inventory.items() if not name.startswith("test/")}
+    if set(current) != set(baseline):
+        raise ReleaseError("Public non-test inventory differs from the approved baseline.")
+    for name, info in baseline.items():
+        if name not in {".gitattributes", "README.md", "INSTRUCTIONS.md"} and current.get(name) != info:
+            raise ReleaseError("A non-test public file differs from the approved baseline.")
+    _audit_test_pdf_attributes(hf, revision, inventory, expected)
+    if all(current.get(name) == baseline.get(name) for name in docs):
+        return False
+    if _remote_bytes(hf, revision, tuple(docs), "Public release documentation") != docs:
+        raise ReleaseError("Public release documentation is neither approved baseline nor exact release content.")
+    return True
+
+
 def run_release(config: ReleaseConfig, *, source: SourceInspector, hf: HfBackend, publish: bool = False, confirm: str | None = None, expected_complete_base: str | None = None) -> dict:
     if not _REVISION.fullmatch(config.public_hf_base): raise ReleaseError("An exact public Hugging Face base is required.")
     if publish and confirm != "PUBLISH": raise ReleaseError("Publishing requires --confirm PUBLISH.")
@@ -490,11 +572,12 @@ def run_release(config: ReleaseConfig, *, source: SourceInspector, hf: HfBackend
     metadata, expected = _stage_expectations(Path(config.stage))
     state = _expect_state(hf, expected_complete_base or config.public_hf_base)
     _scan_history(hf)
+    baseline = _original_public_inventory(hf, expected)
     before = dict(hf.inventory(state.revision))
     if any(_forbidden_public_path(path) for path in before): raise ReleaseError("Public target contains a forbidden validation/test path.")
     docs = _release_docs()
     test = _test_status(hf, state.revision, metadata, expected)
-    docs_complete = hf.read(state.revision, ("README.md", "INSTRUCTIONS.md")) == docs
+    docs_complete = _audit_non_test_state(hf, state.revision, before, baseline, expected, docs)
     result = {"mode": "dry-run", "release_id": RELEASE_ID, "counts": dict(manifest["counts"]), "aggregate_digests": {key: manifest[key] for key in ("sorted_ids_sha256", "task_manifest_sha256", "pdf_inventory_sha256")}, "base_revision": state.revision}
     if not publish: return result
     if test == "complete" and docs_complete:
@@ -505,8 +588,8 @@ def run_release(config: ReleaseConfig, *, source: SourceInspector, hf: HfBackend
         current = hf.state().revision
         if not _REVISION.fullmatch(current): raise ReleaseError("Test upload did not produce an exact revision.")
         after_upload = dict(hf.inventory(current))
-        if {name: info for name, info in after_upload.items() if not name.startswith("test/")} != {name: info for name, info in before.items() if not name.startswith("test/")}:
-            raise ReleaseError("A non-test path changed before documentation publication.")
+        if _audit_non_test_state(hf, current, after_upload, baseline, expected, docs):
+            raise ReleaseError("Release documentation changed during test upload.")
         _scan_history(hf)
         if _test_status(hf, current, metadata, expected) == "partial":
             return {**result, "mode": "partial-upload", "revision": current}
@@ -517,13 +600,11 @@ def run_release(config: ReleaseConfig, *, source: SourceInspector, hf: HfBackend
     if not _REVISION.fullmatch(final): raise ReleaseError("Documentation publication did not return an exact revision.")
     if _expect_state(hf, final).revision != final: raise ReleaseError("Final public revision changed unexpectedly.")
     final_inventory = dict(hf.inventory(final)); _scan_history(hf); _test_status(hf, final, metadata, expected)
-    if hf.read(final, ("README.md", "INSTRUCTIONS.md")) != docs: raise ReleaseError("Release documentation differs after publication.")
+    if not _audit_non_test_state(hf, final, final_inventory, baseline, expected, docs):
+        raise ReleaseError("Release documentation differs after publication.")
     if any(_forbidden_public_path(path) for path in final_inventory): raise ReleaseError("Final public target contains a forbidden path.")
-    if set(final_inventory) != set(before) | {name for name in expected if name not in before}:
+    if set(final_inventory) != set(baseline) | set(expected):
         raise ReleaseError("Final public inventory changed unexpectedly.")
-    for name, item in before.items():
-        if name not in {"README.md", "INSTRUCTIONS.md"} and final_inventory.get(name) != item:
-            raise ReleaseError("A non-test public file changed unexpectedly.")
     return {**result, "mode": "published", "revision": final}
 
 

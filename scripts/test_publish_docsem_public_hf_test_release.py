@@ -12,6 +12,9 @@ except ModuleNotFoundError:
 def canonical(value): return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
 def sha(value): return hashlib.sha256(value).hexdigest()
 
+BASE_ATTRIBUTES = b"*.pdf filter=lfs diff=lfs merge=lfs -text\n"
+LFS_SUFFIX = " filter=lfs diff=lfs merge=lfs -text\n"
+
 def pdf_bytes():
     body = b"BT /F1 12 Tf 72 720 Td (opaque-token: value) Tj ET"
     objects = (b"<< /Type /Catalog /Pages 2 0 R >>", b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>", b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>", b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>", b"<< /Length " + str(len(body)).encode() + b" >>\nstream\n" + body + b"\nendstream")
@@ -29,27 +32,37 @@ class Hf:
     def __init__(self, root, base):
         self.root, self.revision, self.private = Path(root), base, False
         self.events = []; self.history = [(base, self.tree())]; self.partial_once = False; self.upload_roots = []
-    def tree(self): return {p.relative_to(self.root).as_posix(): p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
+        self.commit_attribute_suffix = b""
+    def tree(self, revision=None):
+        if revision is not None and revision != self.revision:
+            return dict(next(paths for item, paths in self.history if item == revision))
+        return {p.relative_to(self.root).as_posix(): p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
     def state(self): return publisher.RemoteState(self.revision, self.private)
-    def inventory(self, revision): return {name: publisher.RemoteFile(len(data), sha(data)) for name, data in self.tree().items()}
-    def read(self, revision, paths): return {path: self.tree()[path] for path in paths}
+    def inventory(self, revision): return {name: publisher.RemoteFile(len(data), sha(data)) for name, data in self.tree(revision).items()}
+    def read(self, revision, paths): return {path: self.tree(revision)[path] for path in paths}
     def history_snapshots(self): return tuple(self.history)
     def upload_large_folder(self, stage, expected_parent):
         self.events.append("upload")
         self.upload_roots.append(Path(stage))
         if expected_parent != self.revision: raise publisher.RemoteMovedError("moved")
-        sources = [source for source in (Path(stage) / "test").rglob("*") if source.is_file()]
+        sources = sorted(source for source in (Path(stage) / "test").rglob("*") if source.is_file())
         if self.partial_once:
-            sources = sources[:1]; self.partial_once = False
+            sources = [next(source for source in sources if source.suffix == ".pdf")]; self.partial_once = False
         for source in sources:
             if source.is_file():
                 destination = self.root / source.relative_to(stage); destination.parent.mkdir(parents=True, exist_ok=True)
                 if not destination.exists(): os.link(source, destination)
+        attributes = BASE_ATTRIBUTES
+        for pdf in sorted((self.root / "test/documents").glob("*.pdf")):
+            attributes += f"test/documents/{pdf.name}{LFS_SUFFIX}".encode()
+        (self.root / ".gitattributes").write_bytes(attributes)
         self.revision = "c" * 40; self.history.append((self.revision, self.tree())); return self.revision
     def commit_docs(self, files, expected_parent):
         self.events.append("docs")
         if expected_parent != self.revision: raise publisher.RemoteMovedError("moved")
         for path, data in files.items(): (self.root / path).write_bytes(data)
+        if self.commit_attribute_suffix:
+            with (self.root / ".gitattributes").open("ab") as handle: handle.write(self.commit_attribute_suffix)
         self.revision = "d" * 40; self.history.append((self.revision, self.tree())); return self.revision
 
 class InstalledUploadLargeFolderApi:
@@ -77,6 +90,8 @@ class PublicReleaseTests(unittest.TestCase):
         self.original_audit = publisher.audit_public_payload; self.original_renderer = publisher.render_test_ready_dataset_card
         self.original_source_root = publisher.SOURCE_TASK_ROOT
         self.original_readme = publisher.TRACKED_README; self.original_instructions = publisher.TRACKED_INSTRUCTIONS
+        self.original_hf_base = getattr(publisher, "PUBLIC_HF_ORIGINAL_BASE", None)
+        self.original_attributes_sha = getattr(publisher, "PUBLIC_HF_GITATTRIBUTES_SHA256", None)
         publisher.audit_public_payload = self.audit_fixture
         publisher.render_test_ready_dataset_card = self.render_fixture
         self.temp = tempfile.TemporaryDirectory(); root = Path(self.temp.name)
@@ -89,11 +104,13 @@ class PublicReleaseTests(unittest.TestCase):
         self.train, self.validation = root / "train.jsonl", root / "validation.jsonl"
         self.train.write_bytes(canonical({"instance_id":"train_000001","user_query":"q","document_pdf":"documents/train_000001.pdf"})); self.validation.write_bytes(canonical({"instance_id":"val_000001","user_query":"q","document_pdf":"documents/val_000001.pdf"}))
         self.readme = b"---\nconfigs:\n- config_name: tasks\n  data_files:\n  - split: validation\n    path: val/tasks.jsonl\n- config_name: labels\n  data_files:\n  - split: train\n    path: train/labels.jsonl\n---\nHeld-out test: not released in the current public payload.\nNo official held-out test payload is present in this revision.\n"; self.instructions = b"Train and validation behavior remains accurate. Every content block begins with `b01: content`.\nThe public package contains labelled train data and unlabelled validation inputs.\nValidation labels remain private and are used only by the official submission portal.\n"
-        (self.dataset / "README.md").write_bytes(self.readme); (self.dataset / "INSTRUCTIONS.md").write_bytes(self.instructions); (self.dataset / "train").mkdir(); (self.dataset / "train/labels.jsonl").write_bytes(b"train labels permitted\n")
+        (self.dataset / "README.md").write_bytes(self.readme); (self.dataset / "INSTRUCTIONS.md").write_bytes(self.instructions); (self.dataset / ".gitattributes").write_bytes(BASE_ATTRIBUTES); (self.dataset / "train").mkdir(); (self.dataset / "train/labels.jsonl").write_bytes(b"train labels permitted\n")
         (self.templates / "README.md").write_bytes(self.readme); (self.templates / "INSTRUCTIONS.md").write_bytes(self.instructions)
         self.hf = Hf(self.dataset, self.BASE)
         publisher.SOURCE_TASK_ROOT = self.source
         publisher.TRACKED_README = self.templates / "README.md"; publisher.TRACKED_INSTRUCTIONS = self.templates / "INSTRUCTIONS.md"
+        publisher.PUBLIC_HF_ORIGINAL_BASE = self.BASE
+        publisher.PUBLIC_HF_GITATTRIBUTES_SHA256 = sha(BASE_ATTRIBUTES)
         self.state = publisher.SourceState(publisher.SOURCE_CHECKOUT, publisher.SOURCE_HEAD, publisher.SOURCE_PARENT, False, publisher.SOURCE_MANIFEST_SHA256)
         self.config = publisher.ReleaseConfig(self.source, self.stage, self.train, self.validation, self.BASE)
     def audit_fixture(self, stage):
@@ -104,10 +121,23 @@ class PublicReleaseTests(unittest.TestCase):
         return Path(card_template_path).read_bytes().replace(b"  - split: validation\n    path: val/tasks.jsonl\n", b"  - split: validation\n    path: val/tasks.jsonl\n  - split: test\n    path: test/tasks.jsonl\n")
     def cleanup(self):
         publisher.audit_public_payload = self.original_audit; publisher.render_test_ready_dataset_card = self.original_renderer; publisher.SOURCE_TASK_ROOT = self.original_source_root; publisher.TRACKED_README = self.original_readme; publisher.TRACKED_INSTRUCTIONS = self.original_instructions
+        if self.original_hf_base is None: delattr(publisher, "PUBLIC_HF_ORIGINAL_BASE")
+        else: publisher.PUBLIC_HF_ORIGINAL_BASE = self.original_hf_base
+        if self.original_attributes_sha is None: delattr(publisher, "PUBLIC_HF_GITATTRIBUTES_SHA256")
+        else: publisher.PUBLIC_HF_GITATTRIBUTES_SHA256 = self.original_attributes_sha
     def tearDown(self): self.cleanup(); self.temp.cleanup()
     def release(self, **kwargs):
         if not self.stage.exists(): publisher.prepare_stage(self.config, source=Source(self.state))
         return publisher.run_release(self.config, source=Source(self.state), hf=self.hf, **kwargs)
+    def complete_remote_without_docs(self):
+        self.release()
+        self.hf.upload_large_folder(self.stage, self.BASE)
+        self.hf.events.clear()
+        self.config = publisher.ReleaseConfig(self.source, self.stage, self.train, self.validation, "c" * 40)
+    def valid_attributes(self):
+        return BASE_ATTRIBUTES + b"".join(
+            f"test/documents/{item}.pdf{LFS_SUFFIX}".encode() for item in self.ids
+        )
 
     def test_default_dry_run_is_write_free_and_sanitized(self):
         result = self.release(); self.assertEqual(result["mode"], "dry-run"); self.assertEqual(self.hf.events, []); self.assertNotIn("PUBLIC-QUERY", json.dumps(result)); self.assertNotIn("private", json.dumps(result).lower())
@@ -138,6 +168,49 @@ class PublicReleaseTests(unittest.TestCase):
     def test_private_backend_is_never_addressed_upload_precedes_atomic_docs(self):
         result = self.release(publish=True, confirm="PUBLISH"); self.assertEqual(result["mode"], "published"); self.assertEqual(self.hf.events, ["upload", "docs"])
         self.assertIn(b"submissions remain closed", (self.dataset / "README.md").read_bytes()); instructions = (self.dataset / "INSTRUCTIONS.md").read_text(); self.assertIn("immediately before the block colon", instructions); self.assertIn("including punctuation", instructions); self.assertNotIn("bNN", instructions)
+        self.assertEqual((self.dataset / ".gitattributes").read_bytes(), self.valid_attributes())
+
+    def test_complete_hub_upload_with_lfs_rules_publishes_docs_only(self):
+        self.complete_remote_without_docs()
+        result = self.release(publish=True, confirm="PUBLISH")
+        self.assertEqual(result["mode"], "published")
+        self.assertEqual(self.hf.events, ["docs"])
+
+    def test_missing_changed_duplicate_or_extra_test_lfs_rule_fails_before_docs(self):
+        self.complete_remote_without_docs()
+        expected = self.valid_attributes()
+        variants = {
+            "missing": expected.replace(f"test/documents/{self.ids[0]}.pdf{LFS_SUFFIX}".encode(), b""),
+            "changed": expected.replace(
+                f"test/documents/{self.ids[0]}.pdf filter=lfs".encode(),
+                f"test/documents/{self.ids[0]}.pdf filter=other".encode(),
+            ),
+            "duplicate": expected + f"test/documents/{self.ids[0]}.pdf{LFS_SUFFIX}".encode(),
+            "extra": expected + f"test/documents/not-present.pdf{LFS_SUFFIX}".encode(),
+            "other-test-rule": expected + b"test/** -diff\n",
+        }
+        for label, attributes in variants.items():
+            with self.subTest(label=label):
+                (self.dataset / ".gitattributes").write_bytes(attributes)
+                self.hf.events.clear()
+                with self.assertRaises(publisher.ReleaseError): self.release(publish=True, confirm="PUBLISH")
+                self.assertEqual(self.hf.events, [])
+
+    def test_baseline_attribute_or_other_non_test_drift_fails_before_docs(self):
+        self.complete_remote_without_docs()
+        (self.dataset / ".gitattributes").write_bytes(b"# drift\n" + self.valid_attributes())
+        with self.assertRaises(publisher.ReleaseError): self.release(publish=True, confirm="PUBLISH")
+        self.assertEqual(self.hf.events, [])
+        (self.dataset / ".gitattributes").write_bytes(self.valid_attributes())
+        (self.dataset / "train/labels.jsonl").write_bytes(b"changed\n")
+        with self.assertRaises(publisher.ReleaseError): self.release(publish=True, confirm="PUBLISH")
+        self.assertEqual(self.hf.events, [])
+
+    def test_documentation_cas_attribute_drift_is_detected(self):
+        self.complete_remote_without_docs()
+        self.hf.commit_attribute_suffix = b"test/** -diff\n"
+        with self.assertRaises(publisher.ReleaseError): self.release(publish=True, confirm="PUBLISH")
+        self.assertEqual(self.hf.events, ["docs"])
     def test_remote_extra_path_size_sha_or_non_test_drift_prevents_docs(self):
         self.release(); self.hf.upload_large_folder(self.stage, self.BASE); (self.dataset / "test/extra.pdf").write_bytes(b"extra")
         self.config = publisher.ReleaseConfig(self.source, self.stage, self.train, self.validation, "c" * 40)
