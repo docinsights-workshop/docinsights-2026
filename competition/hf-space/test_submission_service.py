@@ -543,10 +543,10 @@ class InMemoryConfigHub:
 
     def __init__(self, release, gold, tasks):
         self.files = {
-            ("private/repo", "private/test_release.json"): json.dumps(release).encode(
+            ("private/repo", "sealed/release.json"): json.dumps(release).encode(
                 "utf-8"
             ),
-            ("private/repo", "private/test_labels.jsonl"): gold,
+            ("private/repo", "sealed/gold.jsonl"): gold,
             ("public/repo", "test/tasks.jsonl"): tasks,
         }
         self.repo_calls = []
@@ -593,6 +593,9 @@ class HubTestConfigLoaderTests(unittest.TestCase):
             public_api=hub,
             public_repo_id="public/repo",
             task_manifest_path="test/tasks.jsonl",
+            release_config_path="sealed/release.json",
+            gold_config_path="sealed/gold.jsonl",
+            expected_policy=self._expected_policy(),
             enabled=True,
         )(NOW)
 
@@ -607,11 +610,82 @@ class HubTestConfigLoaderTests(unittest.TestCase):
         self.assertEqual(
             hub.download_calls,
             [
-                ("private/repo", "private/test_release.json", "private-sha"),
-                ("private/repo", "private/test_labels.jsonl", "private-sha"),
+                ("private/repo", "sealed/release.json", "private-sha"),
+                ("private/repo", "sealed/gold.jsonl", "private-sha"),
                 ("public/repo", "test/tasks.jsonl", "f" * 40),
             ],
         )
+
+    def test_loader_rejects_policy_that_differs_from_deployment_pin_before_upload_read(self):
+        hub = InMemoryConfigHub(self.release, self.gold, self.tasks)
+        expected = self._expected_policy()
+        for changes in (
+            {"release_id": "deployment-release"},
+            {"task_manifest_sha256": "c" * 64},
+            {"gold_sha256": "d" * 64},
+            {"open_at": dt.datetime(2026, 9, 2, tzinfo=dt.timezone.utc)},
+            {"close_at": dt.datetime(2026, 9, 30, tzinfo=dt.timezone.utc)},
+        ):
+            with self.subTest(changes=changes):
+                expected_policy = TestReleasePolicy(
+                    release_id=changes.get("release_id", expected.release_id),
+                    task_manifest_sha256=changes.get(
+                        "task_manifest_sha256", expected.task_manifest_sha256
+                    ),
+                    gold_sha256=changes.get("gold_sha256", expected.gold_sha256),
+                    open_at=changes.get("open_at", expected.open_at),
+                    close_at=changes.get("close_at", expected.close_at),
+                    enabled=True,
+                    max_attempts=3,
+                )
+                loader = HubTestConfigLoader(
+                    hub,
+                    "private/repo",
+                    public_api=hub,
+                    public_repo_id="public/repo",
+                    task_manifest_path="test/tasks.jsonl",
+                    release_config_path="sealed/release.json",
+                    gold_config_path="sealed/gold.jsonl",
+                    expected_policy=expected_policy,
+                    enabled=True,
+                )
+                service = SubmissionService(
+                    validation_submitter=lambda file_obj, metadata: None,
+                    test_store=None,
+                    test_config_loader=loader,
+                    now_provider=lambda: NOW,
+                )
+                unreadable = FileProbe()
+
+                with self.assertRaisesRegex(SubmissionError, "temporarily unavailable"):
+                    service.submit_for_split("test", unreadable, TEST_META, PROFILE)
+
+                self.assertFalse(unreadable.was_read)
+
+        invalid_attempt_hub = InMemoryConfigHub(
+            {**self.release, "max_attempts": 4}, self.gold, self.tasks
+        )
+        invalid_attempt_loader = HubTestConfigLoader(
+            invalid_attempt_hub,
+            "private/repo",
+            public_api=invalid_attempt_hub,
+            public_repo_id="public/repo",
+            task_manifest_path="test/tasks.jsonl",
+            release_config_path="sealed/release.json",
+            gold_config_path="sealed/gold.jsonl",
+            expected_policy=expected,
+            enabled=True,
+        )
+        invalid_attempt_service = SubmissionService(
+            validation_submitter=lambda file_obj, metadata: None,
+            test_store=None,
+            test_config_loader=invalid_attempt_loader,
+            now_provider=lambda: NOW,
+        )
+        unreadable = FileProbe()
+        with self.assertRaisesRegex(SubmissionError, "temporarily unavailable"):
+            invalid_attempt_service.submit_for_split("test", unreadable, TEST_META, PROFILE)
+        self.assertFalse(unreadable.was_read)
 
     def test_loader_rejects_malformed_server_digest(self):
         release = {**self.release, "task_manifest_sha256": "not-a-sha256"}
@@ -754,7 +828,7 @@ class HubTestConfigLoaderTests(unittest.TestCase):
         }
         hub = InMemoryConfigHub(release, gold, tasks)
 
-        config = self._loader(hub)(NOW)
+        config = self._loader(hub, release)(NOW)
 
         self.assertEqual(
             [row["instance_id"] for row in config.labels],
@@ -781,20 +855,37 @@ class HubTestConfigLoaderTests(unittest.TestCase):
                 public_api=hub,
                 public_repo_id="public/repo",
                 task_manifest_path="test/tasks.jsonl",
+                release_config_path="sealed/release.json",
+                gold_config_path="sealed/gold.jsonl",
+                expected_policy=self._expected_policy(),
                 enabled=False,
             )(NOW)
 
         self.assertEqual(hub.repo_calls, [])
         self.assertEqual(hub.download_calls, [])
 
-    @staticmethod
-    def _loader(hub):
+    def _expected_policy(self, release=None):
+        release = self.release if release is None else release
+        return TestReleasePolicy(
+            release_id=release["release_id"],
+            task_manifest_sha256=release["task_manifest_sha256"],
+            gold_sha256=release["gold_sha256"],
+            open_at=dt.datetime(2026, 9, 1, tzinfo=dt.timezone.utc),
+            close_at=dt.datetime(2026, 10, 1, tzinfo=dt.timezone.utc),
+            enabled=True,
+            max_attempts=3,
+        )
+
+    def _loader(self, hub, release=None):
         return HubTestConfigLoader(
             hub,
             "private/repo",
             public_api=hub,
             public_repo_id="public/repo",
             task_manifest_path="test/tasks.jsonl",
+            release_config_path="sealed/release.json",
+            gold_config_path="sealed/gold.jsonl",
+            expected_policy=self._expected_policy(release),
             enabled=True,
         )
 

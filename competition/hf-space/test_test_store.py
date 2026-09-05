@@ -91,8 +91,8 @@ class InMemoryHub:
 
     def __init__(self, *, files=None, create_barrier=None, conflicts=0):
         initial = {
-            "private/test_release.json": release_bytes(),
-            "private/test_labels.jsonl": GOLD,
+            "sealed/release.json": release_bytes(),
+            "sealed/gold.jsonl": GOLD,
         }
         initial.update(files or {})
         self._lock = threading.Lock()
@@ -204,6 +204,16 @@ class InMemoryHub:
 
 
 class HubTestStoreTests(unittest.TestCase):
+    def test_missing_server_config_paths_fail_before_repository_io(self):
+        hub = InMemoryHub()
+        store = HubTestStore(hub, repo_id="private/repo")
+
+        with self.assertRaisesRegex(TestStoreError, "temporarily unavailable"):
+            store.submit(IDENTITY, META, PREDICTIONS, METRICS, NOW)
+
+        self.assertEqual(hub.repo_info_calls, 0)
+        self.assertEqual(hub.download_calls, [])
+
     def setUp(self):
         self.downloads = tempfile.TemporaryDirectory()
         self.addCleanup(self.downloads.cleanup)
@@ -211,7 +221,7 @@ class HubTestStoreTests(unittest.TestCase):
 
     def test_three_concurrent_attempts_commit_and_fourth_is_rejected(self):
         hub = InMemoryHub(create_barrier=threading.Barrier(4))
-        store = HubTestStore(hub, repo_id="private/repo")
+        store = HubTestStore(hub, repo_id="private/repo", release_config_path="sealed/release.json", gold_config_path="sealed/gold.jsonl")
 
         def submit(index):
             predictions = [
@@ -232,7 +242,7 @@ class HubTestStoreTests(unittest.TestCase):
 
     def test_exact_retry_returns_existing_receipt(self):
         hub = InMemoryHub()
-        store = HubTestStore(hub, repo_id="private/repo")
+        store = HubTestStore(hub, repo_id="private/repo", release_config_path="sealed/release.json", gold_config_path="sealed/gold.jsonl")
 
         first = store.submit(IDENTITY, META, PREDICTIONS, METRICS, NOW)
         replay = store.submit(IDENTITY, META, PREDICTIONS, METRICS, NOW)
@@ -244,7 +254,7 @@ class HubTestStoreTests(unittest.TestCase):
 
     def test_canonical_duplicate_hash_is_idempotent(self):
         hub = InMemoryHub()
-        store = HubTestStore(hub, repo_id="private/repo")
+        store = HubTestStore(hub, repo_id="private/repo", release_config_path="sealed/release.json", gold_config_path="sealed/gold.jsonl")
         first = store.submit(IDENTITY, META, PREDICTIONS, METRICS, NOW)
         equivalent = [
             {
@@ -261,7 +271,7 @@ class HubTestStoreTests(unittest.TestCase):
 
     def test_acceptance_is_one_exact_parent_commit_with_test_only_paths(self):
         hub = InMemoryHub()
-        store = HubTestStore(hub, repo_id="private/repo")
+        store = HubTestStore(hub, repo_id="private/repo", release_config_path="sealed/release.json", gold_config_path="sealed/gold.jsonl")
 
         receipt = store.submit(IDENTITY, META, PREDICTIONS, METRICS, NOW)
 
@@ -283,7 +293,7 @@ class HubTestStoreTests(unittest.TestCase):
 
     def test_snapshot_reads_are_pinned_to_one_base_sha(self):
         hub = InMemoryHub()
-        store = HubTestStore(hub, repo_id="private/repo")
+        store = HubTestStore(hub, repo_id="private/repo", release_config_path="sealed/release.json", gold_config_path="sealed/gold.jsonl")
 
         store.submit(IDENTITY, META, PREDICTIONS, METRICS, NOW)
 
@@ -292,7 +302,7 @@ class HubTestStoreTests(unittest.TestCase):
 
     def test_conflicts_reload_rederive_and_use_fresh_operations(self):
         hub = InMemoryHub(conflicts=2)
-        store = HubTestStore(hub, repo_id="private/repo")
+        store = HubTestStore(hub, repo_id="private/repo", release_config_path="sealed/release.json", gold_config_path="sealed/gold.jsonl")
 
         receipt = store.submit(IDENTITY, META, PREDICTIONS, METRICS, NOW)
 
@@ -314,16 +324,16 @@ class HubTestStoreTests(unittest.TestCase):
         }
         for name, release in cases.items():
             with self.subTest(name=name):
-                hub = InMemoryHub(files={"private/test_release.json": release})
-                store = HubTestStore(hub, repo_id="private/repo")
+                hub = InMemoryHub(files={"sealed/release.json": release})
+                store = HubTestStore(hub, repo_id="private/repo", release_config_path="sealed/release.json", gold_config_path="sealed/gold.jsonl")
                 with self.assertRaisesRegex(TestStoreError, "not open"):
                     store.submit(IDENTITY, META, PREDICTIONS, METRICS, NOW)
                 self.assertEqual(hub.create_calls, [])
 
     def test_missing_gold_fails_closed_without_commit(self):
         hub = InMemoryHub()
-        del hub._snapshots["sha-0"]["private/test_labels.jsonl"]
-        store = HubTestStore(hub, repo_id="private/repo")
+        del hub._snapshots["sha-0"]["sealed/gold.jsonl"]
+        store = HubTestStore(hub, repo_id="private/repo", release_config_path="sealed/release.json", gold_config_path="sealed/gold.jsonl")
 
         with self.assertRaisesRegex(TestStoreError, "temporarily unavailable"):
             store.submit(IDENTITY, META, PREDICTIONS, METRICS, NOW)
@@ -338,13 +348,13 @@ class HubTestStoreTests(unittest.TestCase):
         for name, metadata in cases.items():
             with self.subTest(name=name):
                 hub = InMemoryHub()
-                store = HubTestStore(hub, repo_id="private/repo")
+                store = HubTestStore(hub, repo_id="private/repo", release_config_path="sealed/release.json", gold_config_path="sealed/gold.jsonl")
                 with self.assertRaisesRegex(TestStoreError, "temporarily unavailable"):
                     store.submit(IDENTITY, metadata, PREDICTIONS, METRICS, NOW)
                 self.assertEqual(hub.create_calls, [])
 
-        hub = InMemoryHub(files={"private/test_release.json": release_bytes(gold_digest="c" * 64)})
-        store = HubTestStore(hub, repo_id="private/repo")
+        hub = InMemoryHub(files={"sealed/release.json": release_bytes(gold_digest="c" * 64)})
+        store = HubTestStore(hub, repo_id="private/repo", release_config_path="sealed/release.json", gold_config_path="sealed/gold.jsonl")
         with self.assertRaisesRegex(TestStoreError, "temporarily unavailable"):
             store.submit(IDENTITY, META, PREDICTIONS, METRICS, NOW)
         self.assertEqual(hub.create_calls, [])
@@ -357,11 +367,11 @@ class HubTestStoreTests(unittest.TestCase):
         changed_digest = hashlib.sha256(changed_gold).hexdigest()
         hub = InMemoryHub(
             files={
-                "private/test_release.json": release_bytes(gold_digest=changed_digest),
-                "private/test_labels.jsonl": changed_gold,
+                "sealed/release.json": release_bytes(gold_digest=changed_digest),
+                "sealed/gold.jsonl": changed_gold,
             }
         )
-        store = HubTestStore(hub, repo_id="private/repo")
+        store = HubTestStore(hub, repo_id="private/repo", release_config_path="sealed/release.json", gold_config_path="sealed/gold.jsonl")
 
         with self.assertRaisesRegex(TestStoreError, "temporarily unavailable"):
             store.submit(IDENTITY, META, PREDICTIONS, METRICS, NOW)
@@ -374,7 +384,7 @@ class HubTestStoreTests(unittest.TestCase):
             updated = dict(hub._snapshots[hub._sha])
             updated["unrelated/audit.json"] = b"{}"
             hub._advance(updated)
-        store = HubTestStore(hub, repo_id="private/repo")
+        store = HubTestStore(hub, repo_id="private/repo", release_config_path="sealed/release.json", gold_config_path="sealed/gold.jsonl")
 
         receipt = store.submit(IDENTITY, META, PREDICTIONS, METRICS, NOW)
 
@@ -383,7 +393,7 @@ class HubTestStoreTests(unittest.TestCase):
 
     def test_attempt_record_retains_scoring_snapshot_audit_metadata(self):
         hub = InMemoryHub()
-        store = HubTestStore(hub, repo_id="private/repo")
+        store = HubTestStore(hub, repo_id="private/repo", release_config_path="sealed/release.json", gold_config_path="sealed/gold.jsonl")
 
         store.submit(IDENTITY, META, PREDICTIONS, METRICS, NOW)
         record = store.account_history(IDENTITY)[0]
@@ -410,7 +420,7 @@ class HubTestStoreTests(unittest.TestCase):
 
     def test_existing_attempt_with_unbound_scoring_gold_fails_closed(self):
         hub = InMemoryHub()
-        store = HubTestStore(hub, repo_id="private/repo")
+        store = HubTestStore(hub, repo_id="private/repo", release_config_path="sealed/release.json", gold_config_path="sealed/gold.jsonl")
         receipt = store.submit(IDENTITY, META, PREDICTIONS, METRICS, NOW)
         key = account_key(IDENTITY)
         hub.replace_json(
@@ -432,7 +442,7 @@ class HubTestStoreTests(unittest.TestCase):
 
     def test_old_release_attempt_is_rejected_instead_of_counted(self):
         hub = InMemoryHub()
-        store = HubTestStore(hub, repo_id="private/repo")
+        store = HubTestStore(hub, repo_id="private/repo", release_config_path="sealed/release.json", gold_config_path="sealed/gold.jsonl")
         receipt = store.submit(IDENTITY, META, PREDICTIONS, METRICS, NOW)
         key = account_key(IDENTITY)
         hub.replace_json(
@@ -458,7 +468,7 @@ class HubTestStoreTests(unittest.TestCase):
         for projection in cases:
             with self.subTest(projection=projection):
                 hub = InMemoryHub()
-                store = HubTestStore(hub, repo_id="private/repo")
+                store = HubTestStore(hub, repo_id="private/repo", release_config_path="sealed/release.json", gold_config_path="sealed/gold.jsonl")
                 store.submit(IDENTITY, META, PREDICTIONS, METRICS, NOW)
                 if projection == "account":
                     hub.replace_json(
@@ -488,7 +498,7 @@ class HubTestStoreTests(unittest.TestCase):
 
     def test_invalid_account_is_rejected_with_value_free_error(self):
         hub = InMemoryHub()
-        store = HubTestStore(hub, repo_id="private/repo")
+        store = HubTestStore(hub, repo_id="private/repo", release_config_path="sealed/release.json", gold_config_path="sealed/gold.jsonl")
 
         with self.assertRaisesRegex(TestStoreError, "could not be accepted") as caught:
             store.submit(object(), META, PREDICTIONS, METRICS, NOW)
@@ -498,7 +508,7 @@ class HubTestStoreTests(unittest.TestCase):
 
     def test_subject_only_identity_is_rejected_before_repository_access(self):
         hub = InMemoryHub()
-        store = HubTestStore(hub, repo_id="private/repo")
+        store = HubTestStore(hub, repo_id="private/repo", release_config_path="sealed/release.json", gold_config_path="sealed/gold.jsonl")
         incomplete = OAuthIdentity(sub="subject-only", username="", email="")
 
         with self.assertRaisesRegex(TestStoreError, "could not be accepted"):
@@ -509,7 +519,7 @@ class HubTestStoreTests(unittest.TestCase):
 
     def test_fourth_distinct_attempt_is_rejected_without_persistence(self):
         hub = InMemoryHub()
-        store = HubTestStore(hub, repo_id="private/repo")
+        store = HubTestStore(hub, repo_id="private/repo", release_config_path="sealed/release.json", gold_config_path="sealed/gold.jsonl")
         receipts = []
         for index in range(4):
             predictions = [
@@ -528,7 +538,7 @@ class HubTestStoreTests(unittest.TestCase):
         hub.create_error = outage_error(
             "private@example.org oauth-subject-private private prediction score=0.25"
         )
-        store = HubTestStore(hub, repo_id="private/repo")
+        store = HubTestStore(hub, repo_id="private/repo", release_config_path="sealed/release.json", gold_config_path="sealed/gold.jsonl")
 
         with self.assertRaisesRegex(TestStoreError, "temporarily unavailable") as caught:
             store.submit(IDENTITY, META, PREDICTIONS, METRICS, NOW)
@@ -539,7 +549,7 @@ class HubTestStoreTests(unittest.TestCase):
     def test_read_side_http_409_is_not_treated_as_a_cas_conflict(self):
         hub = InMemoryHub()
         hub.repo_error = conflict_error("read-side conflict")
-        store = HubTestStore(hub, repo_id="private/repo")
+        store = HubTestStore(hub, repo_id="private/repo", release_config_path="sealed/release.json", gold_config_path="sealed/gold.jsonl")
 
         with self.assertRaisesRegex(TestStoreError, "temporarily unavailable"):
             store.submit(IDENTITY, META, PREDICTIONS, METRICS, NOW)
@@ -549,7 +559,7 @@ class HubTestStoreTests(unittest.TestCase):
 
     def test_exhausted_conflicts_fail_without_writing_an_attempt(self):
         hub = InMemoryHub(conflicts=5)
-        store = HubTestStore(hub, repo_id="private/repo")
+        store = HubTestStore(hub, repo_id="private/repo", release_config_path="sealed/release.json", gold_config_path="sealed/gold.jsonl")
 
         with self.assertRaisesRegex(TestStoreError, "temporarily unavailable"):
             store.submit(IDENTITY, META, PREDICTIONS, METRICS, NOW)
@@ -562,7 +572,7 @@ class HubTestStoreTests(unittest.TestCase):
         hub.repo_error = ValueError(
             "private@example.org oauth-subject-private private prediction score=0.25"
         )
-        store = HubTestStore(hub, repo_id="private/repo")
+        store = HubTestStore(hub, repo_id="private/repo", release_config_path="sealed/release.json", gold_config_path="sealed/gold.jsonl")
 
         with self.assertRaises(TestStoreError) as caught:
             store.submit(IDENTITY, META, PREDICTIONS, METRICS, NOW)
@@ -579,7 +589,7 @@ class HubTestStoreTests(unittest.TestCase):
 
     def test_commit_messages_do_not_contain_private_values(self):
         hub = InMemoryHub()
-        store = HubTestStore(hub, repo_id="private/repo")
+        store = HubTestStore(hub, repo_id="private/repo", release_config_path="sealed/release.json", gold_config_path="sealed/gold.jsonl")
 
         store.submit(IDENTITY, META, PREDICTIONS, METRICS, NOW)
 
@@ -595,7 +605,7 @@ class HubTestStoreTests(unittest.TestCase):
 
     def test_account_history_reads_current_immutable_records(self):
         hub = InMemoryHub()
-        store = HubTestStore(hub, repo_id="private/repo")
+        store = HubTestStore(hub, repo_id="private/repo", release_config_path="sealed/release.json", gold_config_path="sealed/gold.jsonl")
         receipt = store.submit(IDENTITY, META, PREDICTIONS, METRICS, NOW)
 
         history = store.account_history(IDENTITY)

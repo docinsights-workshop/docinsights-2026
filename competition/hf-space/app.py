@@ -25,6 +25,7 @@ from scoring import (
     score_predictions,
 )
 from submission_service import HubTestConfigLoader, SubmissionService
+from test_policy import TestReleasePolicy
 from test_store import HubTestStore
 
 
@@ -68,7 +69,23 @@ class TestDeploymentConfig:
     gold_sha256: str | None
     open_at: dt.datetime | None
     close_at: dt.datetime | None
+    release_config_path: str | None
+    gold_config_path: str | None
     max_attempts: int = 3
+
+    @property
+    def expected_policy(self) -> TestReleasePolicy | None:
+        if not self.submissions_enabled:
+            return None
+        return TestReleasePolicy(
+            release_id=self.release_id,
+            task_manifest_sha256=self.task_manifest_sha256,
+            gold_sha256=self.gold_sha256,
+            open_at=self.open_at,
+            close_at=self.close_at,
+            enabled=True,
+            max_attempts=self.max_attempts,
+        )
 
 
 def _enabled_value(value) -> bool:
@@ -91,6 +108,17 @@ def _parse_rfc3339_utc(value: str | None) -> dt.datetime | None:
     return parsed if parsed.utcoffset() == dt.timedelta(0) else None
 
 
+def _safe_server_path(value: str | None) -> str | None:
+    if not value or value.startswith("/"):
+        return None
+    parts = value.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        return None
+    if any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", part) for part in parts):
+        return None
+    return value
+
+
 def load_test_deployment_config(
     environment: Mapping[str, object] | None = None,
 ) -> TestDeploymentConfig:
@@ -106,6 +134,10 @@ def load_test_deployment_config(
     gold_sha256 = _required_value(environment, "TEST_GOLD_SHA256")
     open_at = _parse_rfc3339_utc(_required_value(environment, "TEST_OPEN_AT"))
     close_at = _parse_rfc3339_utc(_required_value(environment, "TEST_CLOSE_AT"))
+    release_config_path = _safe_server_path(
+        _required_value(environment, "TEST_RELEASE_CONFIG_PATH")
+    )
+    gold_config_path = _safe_server_path(_required_value(environment, "TEST_GOLD_CONFIG_PATH"))
     configured_attempts = _required_value(environment, "TEST_MAX_ATTEMPTS") or "3"
     valid = (
         bool(release_id and _RELEASE_ID.fullmatch(release_id))
@@ -114,6 +146,8 @@ def load_test_deployment_config(
         and open_at is not None
         and close_at is not None
         and open_at < close_at
+        and release_config_path is not None
+        and gold_config_path is not None
         and configured_attempts == "3"
     )
     return TestDeploymentConfig(
@@ -124,6 +158,8 @@ def load_test_deployment_config(
         gold_sha256=gold_sha256,
         open_at=open_at,
         close_at=close_at,
+        release_config_path=release_config_path,
+        gold_config_path=gold_config_path,
     )
 
 
@@ -778,13 +814,21 @@ _TEST_HUB_API = HfApi(token=WRITE_TOKEN)
 _PUBLIC_HUB_API = HfApi()
 _SUBMISSION_SERVICE = SubmissionService(
     validation_submitter=_legacy_validation_submitter,
-    test_store=HubTestStore(_TEST_HUB_API, repo_id=SUBMISSIONS_REPO_ID),
+    test_store=HubTestStore(
+        _TEST_HUB_API,
+        repo_id=SUBMISSIONS_REPO_ID,
+        release_config_path=TEST_DEPLOYMENT.release_config_path,
+        gold_config_path=TEST_DEPLOYMENT.gold_config_path,
+    ),
     test_config_loader=HubTestConfigLoader(
         _TEST_HUB_API,
         repo_id=SUBMISSIONS_REPO_ID,
         public_api=_PUBLIC_HUB_API,
         public_repo_id=PUBLIC_DATASET_REPO,
         task_manifest_path=TEST_TASKS_FILE,
+        release_config_path=TEST_DEPLOYMENT.release_config_path,
+        gold_config_path=TEST_DEPLOYMENT.gold_config_path,
+        expected_policy=TEST_DEPLOYMENT.expected_policy,
         enabled=TEST_SUBMISSIONS_ENABLED and bool(WRITE_TOKEN),
     ),
 )

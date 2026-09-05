@@ -56,7 +56,7 @@ class PortalLayoutTests(unittest.TestCase):
         for private_value in (
             "server-oauth-subject",
             "server@example.org",
-            "private/test_labels.jsonl",
+            "sealed/gold.jsonl",
             "projections/test/organizer_leaderboard.json",
             "test rank",
             "test score",

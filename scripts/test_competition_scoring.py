@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -17,15 +18,17 @@ from test_policy import participant_test_response
 import app
 
 
-TEST_LEAKAGE_FIXTURES = {
-    "test gold path": "private/releases/docsem-test-2026/gold.jsonl",
-    "test answer": "correct-test-answer-987",
-    "test evidence": "b_test_gold_19",
-    "later score": "0.987654",
-    "email": "test-secret@example.org",
-    "oauth subject": "test-oauth-subject-9",
-    "private per-example metric": "private_per_example_metric_123",
+PRIVATE_TEST_PATH = re.compile(r"(?:private|sealed)/[A-Za-z0-9._/-]+")
+ALLOWED_VALIDATION_SERVER_PATHS = {"private/val_labels.jsonl"}
+EMAIL_VALUE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+PUBLIC_COMPONENT_EMAILS = {"lead@example.org"}
+PRIVATE_TEST_FIELDS = {
+    "gold_sha256",
+    "oauth_sub",
+    "predictions",
+    "scoring_gold_sha256",
 }
+LATER_SCORE_FIELDS = {"answer_accuracy", "evidence_f1", "evidence_exact_match"}
 
 COMPATIBILITY_LABELS = [
     {"instance_id": "fixture-1", "answer": "10", "evidence": ["b01", "b02"]},
@@ -37,15 +40,40 @@ COMPATIBILITY_ROWS = [
 ]
 
 
-def assert_no_test_leakage(*artifacts):
-    """Reject release-specific private values from public deployment artifacts."""
+def _assert_no_private_path(*artifacts):
+    paths = {
+        path
+        for artifact in artifacts
+        for path in PRIVATE_TEST_PATH.findall(str(artifact))
+    }
+    if paths - ALLOWED_VALIDATION_SERVER_PATHS:
+        raise AssertionError("test deployment leakage detected: private path")
 
-    rendered = "\n".join(str(artifact).casefold() for artifact in artifacts)
-    leaked = [
-        label for label, value in TEST_LEAKAGE_FIXTURES.items() if value.casefold() in rendered
-    ]
-    if leaked:
-        raise AssertionError(f"test deployment leakage detected: {', '.join(leaked)}")
+
+def _assert_only_public_component_emails(*artifacts):
+    emails = {
+        email.casefold()
+        for artifact in artifacts
+        for email in EMAIL_VALUE.findall(str(artifact))
+    }
+    if not emails <= PUBLIC_COMPONENT_EMAILS:
+        raise AssertionError("test deployment leakage detected: email")
+
+
+def assert_no_test_leakage(source, rendered_config, api_schema, response, failure_log):
+    """Apply class-aware rules without rejecting participant input schema terms."""
+
+    _assert_no_private_path(source, rendered_config, api_schema, response, failure_log)
+    _assert_only_public_component_emails(rendered_config, api_schema)
+    if not isinstance(response, dict):
+        raise AssertionError("test deployment leakage detected: malformed response")
+    if PRIVATE_TEST_FIELDS & set(response):
+        raise AssertionError("test deployment leakage detected: private field")
+    if "per_example" in response:
+        raise AssertionError("test deployment leakage detected: per_example")
+    if response.get("attempt") in {2, 3} and LATER_SCORE_FIELDS & set(response):
+        raise AssertionError("test deployment leakage detected: later score")
+    _assert_only_public_component_emails(response, failure_log)
 
 
 def test_numeric_equivalence():
@@ -136,43 +164,35 @@ def test_disabled_test_deployment_has_no_release_specific_leakage():
         if not path.name.startswith("test_")
     )
     rendered_config = json.dumps(app.demo.get_config_file(), sort_keys=True)
-    api_schema = json.dumps(
-        {
-            "named_endpoints": sorted(
-                f"/{block_fn.api_name}"
-                for block_fn in app.demo.fns.values()
-                if block_fn.api_name
-            )
-        }
-    )
-    assert '"/submit_predictions"' in api_schema
-    assert '"/my_test_submissions"' in api_schema
+    api_schema = app.demo.get_api_info()
+    serialized_api_schema = json.dumps(api_schema, sort_keys=True)
+    assert "/submit_predictions" in api_schema["named_endpoints"]
+    assert "/my_test_submissions" in api_schema["named_endpoints"]
     participant_response = participant_test_response(
         2,
         {
-            "answer_accuracy": 0.987654,
+            "answer_accuracy": 0.5,
             "evidence_f1": 0.75,
             "per_example": [
                 {
-                    "answer": "correct-test-answer-987",
-                    "evidence": ["b_test_gold_19"],
-                    "private_per_example_metric_123": 1.0,
+                    "answer": "withheld",
+                    "evidence": ["b1"],
                 }
             ],
         },
         "test-receipt",
     )
     profile = {
-        "sub": "test-oauth-subject-9",
+        "sub": "subject-fixture",
         "preferred_username": "private-test-user",
-        "email": "test-secret@example.org",
+        "email": "fixture@example.org",
         "email_verified": True,
     }
     service = SubmissionService(
         validation_submitter=lambda file_obj, metadata: None,
         test_store=None,
         test_config_loader=lambda now: (_ for _ in ()).throw(
-            RuntimeError("private/releases/docsem-test-2026/gold.jsonl")
+            RuntimeError("sensitive release unavailable")
         ),
     )
     try:
@@ -182,19 +202,20 @@ def test_disabled_test_deployment_has_no_release_specific_leakage():
     else:
         raise AssertionError("failure fixture must fail closed")
 
-    assert_no_test_leakage(
-        source,
-        rendered_config,
-        api_schema,
-        json.dumps(participant_response, sort_keys=True),
-        failure_log,
-    )
+    assert_no_test_leakage(source, rendered_config, serialized_api_schema, participant_response, failure_log)
 
 
 def test_test_leakage_scanner_rejects_every_forbidden_class():
-    for label, value in TEST_LEAKAGE_FIXTURES.items():
+    clean = ("source", "{}", "{}", {"attempt": 2, "score": "withheld"}, "failure")
+    for label, artifacts in (
+        ("private path", ("sealed/gold.jsonl", *clean[1:])),
+        ("email", (clean[0], "{\"email\": \"leak@example.org\"}", *clean[2:])),
+        ("private field", (*clean[:3], {"attempt": 1, "predictions": []}, clean[4])),
+        ("per_example", (*clean[:3], {"attempt": 1, "per_example": []}, clean[4])),
+        ("later score", (*clean[:3], {"attempt": 2, "answer_accuracy": 0.5}, clean[4])),
+    ):
         try:
-            assert_no_test_leakage(f"positive fixture {value}")
+            assert_no_test_leakage(*artifacts)
         except AssertionError as exc:
             assert label in str(exc)
         else:

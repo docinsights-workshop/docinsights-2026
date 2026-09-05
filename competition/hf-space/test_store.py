@@ -23,8 +23,6 @@ from test_policy import (
 )
 
 
-RELEASE_PATH = "private/test_release.json"
-GOLD_PATH = "private/test_labels.jsonl"
 ORGANIZER_PATH = "projections/test/organizer_leaderboard.json"
 MAX_COMMIT_ATTEMPTS = 5
 
@@ -65,9 +63,18 @@ class _ReleaseClosed(Exception):
 class HubTestStore:
     """Persist test attempts with one exact-parent Hugging Face commit."""
 
-    def __init__(self, api, repo_id: str):
+    def __init__(
+        self,
+        api,
+        repo_id: str,
+        *,
+        release_config_path: str | None = None,
+        gold_config_path: str | None = None,
+    ):
         self.api = api
         self.repo_id = str(repo_id or "").strip()
+        self.release_config_path = str(release_config_path or "").strip()
+        self.gold_config_path = str(gold_config_path or "").strip()
 
     def submit(self, identity, metadata, predictions, metrics, now) -> TestReceipt:
         try:
@@ -161,8 +168,9 @@ class HubTestStore:
         except Exception:
             raise TestStoreError("Test submission history is temporarily unavailable.") from None
         try:
+            self._require_config_paths()
             sha = self._head_sha()
-            policy = _release_policy(self._read_required(RELEASE_PATH, sha))
+            policy = _release_policy(self._read_required(self.release_config_path, sha))
             return [
                 dict(attempt)
                 for attempt in self._load_account_attempts(key, sha, policy)
@@ -171,9 +179,10 @@ class HubTestStore:
             raise TestStoreError("Test submission history is temporarily unavailable.") from None
 
     def _load_snapshot(self, key: str) -> _Snapshot:
+        self._require_config_paths()
         sha = self._head_sha()
-        release_raw = self._read_required(RELEASE_PATH, sha)
-        gold = self._read_required(GOLD_PATH, sha)
+        release_raw = self._read_required(self.release_config_path, sha)
+        gold = self._read_required(self.gold_config_path, sha)
         policy = _release_policy(release_raw)
         _validate_gold(gold)
         attempts = self._load_account_attempts(key, sha, policy)
@@ -184,6 +193,10 @@ class HubTestStore:
         )
         _validate_organizer_projection(organizer, policy)
         return _Snapshot(sha, policy, gold, tuple(attempts), organizer)
+
+    def _require_config_paths(self) -> None:
+        if not self.release_config_path or not self.gold_config_path:
+            raise _Unavailable()
 
     def _head_sha(self) -> str:
         info = self.api.repo_info(

@@ -28,8 +28,6 @@ from test_policy import (
 )
 
 
-RELEASE_PATH = "private/test_release.json"
-GOLD_PATH = "private/test_labels.jsonl"
 TEST_UNAVAILABLE = "Test submission is temporarily unavailable."
 OPAQUE_INSTANCE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
@@ -61,6 +59,9 @@ class HubTestConfigLoader:
         public_api,
         public_repo_id: str,
         task_manifest_path: str,
+        release_config_path: str | None,
+        gold_config_path: str | None,
+        expected_policy: TestReleasePolicy | None,
         enabled: bool = False,
     ):
         self.api = api
@@ -68,6 +69,9 @@ class HubTestConfigLoader:
         self.public_api = public_api
         self.public_repo_id = str(public_repo_id or "").strip()
         self.task_manifest_path = str(task_manifest_path or "").strip()
+        self.release_config_path = str(release_config_path or "").strip()
+        self.gold_config_path = str(gold_config_path or "").strip()
+        self.expected_policy = expected_policy
         self.enabled = enabled is True
 
     def __call__(self, now: dt.datetime) -> TrustedTestConfig:
@@ -78,6 +82,9 @@ class HubTestConfigLoader:
                 self.public_api,
                 self.public_repo_id,
                 self.task_manifest_path,
+                self.release_config_path,
+                self.gold_config_path,
+                self.expected_policy,
             )
         ):
             raise SubmissionError(TEST_UNAVAILABLE)
@@ -90,8 +97,8 @@ class HubTestConfigLoader:
             sha = getattr(info, "sha", None)
             if not isinstance(sha, str) or not sha:
                 raise ValueError()
-            release_raw = self._read(RELEASE_PATH, sha)
-            gold_raw = self._read(GOLD_PATH, sha)
+            release_raw = self._read(self.release_config_path, sha)
+            gold_raw = self._read(self.gold_config_path, sha)
             release = json.loads(release_raw.decode("utf-8"))
             if not isinstance(release, Mapping):
                 raise ValueError()
@@ -107,6 +114,8 @@ class HubTestConfigLoader:
                 enabled=release.get("enabled", True),
                 max_attempts=release.get("max_attempts", 3),
             )
+            if policy != self.expected_policy:
+                raise ValueError()
             policy.require_open(now)
             if hashlib.sha256(gold_raw).hexdigest() != policy.gold_sha256:
                 raise ValueError()

@@ -1,6 +1,13 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
+import app
 from app import load_test_deployment_config
+from submission_service import SubmissionService
 
 
 VALID_RELEASE = {
@@ -12,7 +19,50 @@ VALID_RELEASE = {
     "TEST_OPEN_AT": "2026-09-05T00:00:00Z",
     "TEST_CLOSE_AT": "2026-09-10T00:00:00Z",
     "TEST_MAX_ATTEMPTS": "3",
+    "TEST_RELEASE_CONFIG_PATH": "sealed/release.json",
+    "TEST_GOLD_CONFIG_PATH": "sealed/gold.jsonl",
 }
+
+
+def assert_anonymous_validation_fixture(test_case):
+    upload = tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False)
+    test_case.addCleanup(Path(upload.name).unlink, missing_ok=True)
+    upload.write(json.dumps({"instance_id": "val-1", "answer": "42", "evidence": ["b1"]}))
+    upload.close()
+    service = SubmissionService(
+        validation_submitter=app._legacy_validation_submitter,
+        test_store=None,
+        test_config_loader=lambda now: (_ for _ in ()).throw(AssertionError()),
+    )
+    with (
+        patch.object(
+            app,
+            "_load_gold_rows",
+            return_value=[{"instance_id": "val-1", "answer": "42", "evidence": ["b1"]}],
+        ),
+        patch.object(app, "_persist_submission", return_value="legacy persistence"),
+    ):
+        result = service.submit_for_split(
+            "validation",
+            SimpleNamespace(name=upload.name),
+            {
+                "team": "Fixture Team",
+                "contact": "lead@example.org",
+                "submission_name": "baseline",
+                "participant_names": "Alice Example",
+            },
+            None,
+        )
+    test_case.assertEqual(
+        result["value"],
+        {
+            "answer_accuracy": 1.0,
+            "evidence_exact_match": 1.0,
+            "evidence_f1": 1.0,
+            "examples": 1,
+            "message": "legacy persistence",
+        },
+    )
 
 
 class TestDeploymentConfigTests(unittest.TestCase):
@@ -40,6 +90,19 @@ class TestDeploymentConfigTests(unittest.TestCase):
                 self.assertFalse(config.submissions_enabled)
                 self.assertFalse(config.public_leaderboard_enabled)
                 self.assertEqual(config.max_attempts, 3)
+                assert_anonymous_validation_fixture(self)
+
+    def test_missing_server_config_paths_disable_test_and_preserve_validation(self):
+        for missing in ("TEST_RELEASE_CONFIG_PATH", "TEST_GOLD_CONFIG_PATH"):
+            with self.subTest(missing=missing):
+                environment = dict(VALID_RELEASE)
+                del environment[missing]
+
+                config = load_test_deployment_config(environment)
+
+                self.assertFalse(config.submissions_enabled)
+                self.assertFalse(config.public_leaderboard_enabled)
+                assert_anonymous_validation_fixture(self)
 
     def test_malformed_or_non_utc_windows_disable_requested_test_surfaces(self):
         for key, value in (
@@ -53,6 +116,7 @@ class TestDeploymentConfigTests(unittest.TestCase):
 
                 self.assertFalse(config.submissions_enabled)
                 self.assertFalse(config.public_leaderboard_enabled)
+                assert_anonymous_validation_fixture(self)
 
     def test_malformed_release_id_or_digest_disables_requested_test_surfaces(self):
         for key, value in (
@@ -65,6 +129,7 @@ class TestDeploymentConfigTests(unittest.TestCase):
 
                 self.assertFalse(config.submissions_enabled)
                 self.assertFalse(config.public_leaderboard_enabled)
+                assert_anonymous_validation_fixture(self)
 
     def test_closed_or_non_three_attempt_configuration_disables_test_surfaces(self):
         for environment in (
@@ -81,6 +146,7 @@ class TestDeploymentConfigTests(unittest.TestCase):
                 self.assertFalse(config.submissions_enabled)
                 self.assertFalse(config.public_leaderboard_enabled)
                 self.assertEqual(config.max_attempts, 3)
+                assert_anonymous_validation_fixture(self)
 
     def test_complete_explicit_release_configuration_enables_requested_surfaces(self):
         config = load_test_deployment_config(VALID_RELEASE)
