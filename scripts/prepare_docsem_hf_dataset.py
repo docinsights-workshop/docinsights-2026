@@ -54,15 +54,22 @@ _FILE_OPEN_FLAGS = (
 )
 
 
-@dataclass(frozen=True)
+class _BackupPreservedError(ValidationError):
+    """An install failed and the only recoverable prior copy remains in backup."""
+
+
+@dataclass(frozen=True, repr=False)
 class _SourcePDF:
-    source_path: Path
+    snapshot_path: Path
     name: str
     size: int
     sha256: str
 
+    def __repr__(self):
+        return f"_SourcePDF(size={self.size}, sealed=True)"
 
-@dataclass(frozen=True)
+
+@dataclass(frozen=True, repr=False)
 class _OrdinarySourceSnapshot:
     train_tasks: tuple[dict, ...]
     train_labels: tuple[dict, ...]
@@ -73,6 +80,17 @@ class _OrdinarySourceSnapshot:
     instructions: bytes
     license_text: bytes
     base_dataset_card: bytes
+
+    def __repr__(self):
+        return (
+            "_OrdinarySourceSnapshot("
+            f"train_tasks={len(self.train_tasks)}, "
+            f"train_labels={len(self.train_labels)}, "
+            f"val_tasks={len(self.val_tasks)}, "
+            f"val_labels={len(self.val_labels)}, "
+            f"train_pdfs={len(self.train_pdfs)}, "
+            f"val_pdfs={len(self.val_pdfs)})"
+        )
 
 
 def write_jsonl(path, rows):
@@ -193,7 +211,62 @@ def _capture_label_rows(source_root, split, description):
     return tuple(rows)
 
 
-def _capture_pdf_inventory(split, expected_ids):
+def _capture_source_file_to_snapshot(source_path, snapshot_path, max_bytes, description):
+    source_descriptor = destination_descriptor = None
+    try:
+        source_descriptor = os.open(source_path, _FILE_OPEN_FLAGS)
+        initial = os.fstat(source_descriptor)
+        if not stat.S_ISREG(initial.st_mode) or not 0 <= initial.st_size <= max_bytes:
+            raise ValidationError(f"{description} is not a bounded regular file.")
+        snapshot_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        snapshot_path.parent.chmod(0o700)
+        destination_descriptor = os.open(
+            snapshot_path,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | os.O_CLOEXEC
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        digest = hashlib.sha256()
+        remaining = initial.st_size
+        copied = 0
+        while remaining:
+            chunk = os.read(source_descriptor, min(remaining, 1024 * 1024))
+            if not chunk:
+                raise ValidationError(f"{description} changed while being captured.")
+            digest.update(chunk)
+            view = memoryview(chunk)
+            while view:
+                written = os.write(destination_descriptor, view)
+                if written <= 0:
+                    raise OSError("short snapshot write")
+                view = view[written:]
+            copied += len(chunk)
+            remaining -= len(chunk)
+        if os.read(source_descriptor, 1):
+            raise ValidationError(f"{description} changed while being captured.")
+        final = os.fstat(source_descriptor)
+        if _stable_identity(initial) != _stable_identity(final):
+            raise ValidationError(f"{description} changed while being captured.")
+        os.fsync(destination_descriptor)
+        snapshot_path.chmod(0o400)
+        return copied, digest.hexdigest()
+    except ValidationError:
+        snapshot_path.unlink(missing_ok=True)
+        raise
+    except OSError as exc:
+        snapshot_path.unlink(missing_ok=True)
+        raise ValidationError(f"{description} could not be captured safely.") from exc
+    finally:
+        if destination_descriptor is not None:
+            os.close(destination_descriptor)
+        if source_descriptor is not None:
+            os.close(source_descriptor)
+
+
+def _capture_pdf_inventory(split, expected_ids, snapshot_root):
     source_directory = PUBLIC_SOURCE_ROOT / split / "documents"
     try:
         directory_mode = source_directory.lstat().st_mode
@@ -217,21 +290,22 @@ def _capture_pdf_inventory(split, expected_ids):
         instance_id = Path(entry.name).stem
         if instance_id in seen_ids:
             raise ValidationError(f"Public {split} PDF inventory has duplicate IDs.")
-        payload = _read_source_file(
+        snapshot_path = Path(snapshot_root) / split / entry.name
+        size, digest = _capture_source_file_to_snapshot(
             Path(entry.path),
+            snapshot_path,
             MAX_PDF_BYTES,
             f"Public {split} PDF",
         )
         snapshots.append(
             _SourcePDF(
-                source_path=Path(entry.path),
+                snapshot_path=snapshot_path,
                 name=entry.name,
-                size=len(payload),
-                sha256=hashlib.sha256(payload).hexdigest(),
+                size=size,
+                sha256=digest,
             )
         )
         seen_ids.add(instance_id)
-        del payload
     if seen_ids != set(expected_ids):
         raise ValidationError(f"Public {split} task IDs and PDF IDs differ.")
     return tuple(snapshots)
@@ -260,7 +334,10 @@ def _normalize_base_dataset_card(card_bytes):
     return ("---\n" + front_matter + "---\n" + parts[2]).encode("utf-8")
 
 
-def _capture_ordinary_sources():
+def _capture_ordinary_sources(snapshot_root):
+    snapshot_root = Path(snapshot_root)
+    snapshot_root.mkdir(parents=True, mode=0o700)
+    snapshot_root.chmod(0o700)
     train_tasks = _capture_task_rows("train")
     val_tasks = _capture_task_rows("val")
     train_labels = _capture_label_rows(
@@ -279,8 +356,8 @@ def _capture_ordinary_sources():
         raise ValidationError("Train task IDs and label IDs differ.")
     if val_ids != {row["instance_id"] for row in val_labels}:
         raise ValidationError("Validation task IDs and label IDs differ.")
-    train_pdfs = _capture_pdf_inventory("train", train_ids)
-    val_pdfs = _capture_pdf_inventory("val", val_ids)
+    train_pdfs = _capture_pdf_inventory("train", train_ids, snapshot_root)
+    val_pdfs = _capture_pdf_inventory("val", val_ids, snapshot_root)
     instructions = _read_source_file(
         PUBLIC_SOURCE_ROOT / "PARTICIPANT_INSTRUCTIONS.md",
         MAX_SOURCE_TEXT_BYTES,
@@ -612,18 +689,275 @@ def _write_bytes(path, payload, mode=0o644):
 def _copy_captured_pdfs(target_root, split, snapshots):
     target_directory = Path(target_root) / split / "documents"
     if target_directory.exists():
-        shutil.rmtree(target_directory)
+        raise ValidationError(f"Generated {split} PDF directory already exists.")
     target_directory.mkdir(parents=True, exist_ok=True)
     for snapshot in snapshots:
-        payload = _read_source_file(
-            snapshot.source_path,
-            MAX_PDF_BYTES,
-            f"Public {split} PDF",
+        source_descriptor = destination_descriptor = None
+        destination = target_directory / snapshot.name
+        try:
+            source_descriptor = os.open(snapshot.snapshot_path, _FILE_OPEN_FLAGS)
+            initial = os.fstat(source_descriptor)
+            if not stat.S_ISREG(initial.st_mode) or initial.st_size != snapshot.size:
+                raise ValidationError(f"Captured {split} PDF snapshot is invalid.")
+            destination_descriptor = os.open(
+                destination,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | os.O_CLOEXEC
+                | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+            digest = hashlib.sha256()
+            remaining = snapshot.size
+            while remaining:
+                chunk = os.read(source_descriptor, min(remaining, 1024 * 1024))
+                if not chunk:
+                    raise ValidationError(f"Captured {split} PDF snapshot is incomplete.")
+                digest.update(chunk)
+                view = memoryview(chunk)
+                while view:
+                    written = os.write(destination_descriptor, view)
+                    if written <= 0:
+                        raise OSError("short generated PDF write")
+                    view = view[written:]
+                remaining -= len(chunk)
+            if os.read(source_descriptor, 1):
+                raise ValidationError(f"Captured {split} PDF snapshot is oversized.")
+            final = os.fstat(source_descriptor)
+            if (
+                _stable_identity(initial) != _stable_identity(final)
+                or digest.hexdigest() != snapshot.sha256
+            ):
+                raise ValidationError(f"Captured {split} PDF snapshot changed.")
+            os.fsync(destination_descriptor)
+            destination.chmod(0o644)
+        except ValidationError:
+            destination.unlink(missing_ok=True)
+            raise
+        except OSError as exc:
+            destination.unlink(missing_ok=True)
+            raise ValidationError(f"Captured {split} PDF could not be copied safely.") from exc
+        finally:
+            if destination_descriptor is not None:
+                os.close(destination_descriptor)
+            if source_descriptor is not None:
+                os.close(source_descriptor)
+
+
+def _materialize_public_generation(root, ordinary, dataset_card, captured_test):
+    root = Path(root)
+    root.mkdir(mode=0o755)
+    write_jsonl(root / "train" / "tasks.jsonl", ordinary.train_tasks)
+    write_jsonl(root / "train" / "labels.jsonl", ordinary.train_labels)
+    write_jsonl(root / "val" / "tasks.jsonl", ordinary.val_tasks)
+
+    _copy_captured_pdfs(root, "train", ordinary.train_pdfs)
+    _copy_captured_pdfs(root, "val", ordinary.val_pdfs)
+
+    sample_submission = [
+        {
+            "instance_id": row["instance_id"],
+            "answer": "0",
+            "evidence": ["b01"],
+        }
+        for row in ordinary.val_tasks[:5]
+    ]
+    write_jsonl(root / "examples" / "sample_val_submission.jsonl", sample_submission)
+    _write_bytes(root / "INSTRUCTIONS.md", ordinary.instructions)
+    _write_bytes(root / "LICENSE.txt", ordinary.license_text)
+    if captured_test is not None:
+        _write_public_test_snapshot(root, captured_test)
+    _write_bytes(root / "README.md", dataset_card)
+
+
+def _ensure_real_directory(path, mode, created_directories, changed_directory_modes):
+    path = Path(path)
+    try:
+        current_mode = path.lstat().st_mode
+    except FileNotFoundError:
+        path.mkdir(mode=mode)
+        created_directories.append(path)
+        return
+    except OSError as exc:
+        raise ValidationError("Generated output directory could not be inspected safely.") from exc
+    if not stat.S_ISDIR(current_mode) or stat.S_ISLNK(current_mode):
+        raise ValidationError("Generated output directory is not a real directory.")
+    prior_permissions = stat.S_IMODE(current_mode)
+    if prior_permissions != mode:
+        path.chmod(mode)
+        changed_directory_modes.append((path, prior_permissions))
+
+
+def _validate_install_path(path, *, directory):
+    path = Path(path)
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise ValidationError("Generated output path could not be inspected safely.") from exc
+    expected = stat.S_ISDIR(mode) if directory else stat.S_ISREG(mode)
+    if not expected or stat.S_ISLNK(mode):
+        raise ValidationError("Generated output path has an unsafe type.")
+    return True
+
+
+def _install_path_with_backup(staged_path, destination, backup_path, *, directory):
+    staged_path = Path(staged_path)
+    destination = Path(destination)
+    backup_path = Path(backup_path)
+    if not _validate_install_path(staged_path, directory=directory):
+        raise ValidationError("Generated staged output is missing.")
+    had_prior = _validate_install_path(destination, directory=directory)
+    if had_prior:
+        os.replace(destination, backup_path)
+    try:
+        os.replace(staged_path, destination)
+    except OSError:
+        if had_prior:
+            try:
+                os.replace(backup_path, destination)
+            except OSError as restore_exc:
+                raise _BackupPreservedError(
+                    f"Generated output install failed; prior output remains at {backup_path}."
+                ) from restore_exc
+        raise
+    return (staged_path, destination, backup_path, had_prior)
+
+
+def _rollback_installed_paths(records):
+    for staged_path, destination, backup_path, had_prior in reversed(records):
+        try:
+            os.replace(destination, staged_path)
+            if had_prior:
+                os.replace(backup_path, destination)
+        except OSError as exc:
+            raise _BackupPreservedError(
+                f"Generated output rollback failed; prior output remains at {backup_path}."
+            ) from exc
+
+
+def _install_generated_outputs(staged_public, staged_val_labels, staged_leaderboard):
+    target = Path(TARGET_ROOT)
+    private_root = Path(PRIVATE_ROOT)
+    created_directories = []
+    changed_directory_modes = []
+    created_files = []
+    public_backup = private_backup = None
+    records = []
+    rollback_complete = False
+    try:
+        _ensure_real_directory(
+            private_root,
+            0o700,
+            created_directories,
+            changed_directory_modes,
         )
-        if len(payload) != snapshot.size or hashlib.sha256(payload).hexdigest() != snapshot.sha256:
-            raise ValidationError(f"Public {split} PDF changed after preflight.")
-        _write_bytes(target_directory / snapshot.name, payload)
-        del payload
+        _ensure_real_directory(
+            private_root / "private",
+            0o700,
+            created_directories,
+            changed_directory_modes,
+        )
+        leaderboard_directory = private_root / "leaderboard"
+        if staged_leaderboard is not None or leaderboard_directory.exists():
+            _ensure_real_directory(
+                leaderboard_directory,
+                0o700,
+                created_directories,
+                changed_directory_modes,
+            )
+        submissions = private_root / "submissions"
+        _ensure_real_directory(
+            submissions,
+            0o700,
+            created_directories,
+            changed_directory_modes,
+        )
+        keep_file = submissions / ".gitkeep"
+        if not keep_file.exists():
+            with keep_file.open("xb"):
+                pass
+            keep_file.chmod(0o600)
+            created_files.append(keep_file)
+
+        public_backup = Path(
+            tempfile.mkdtemp(
+                prefix=".docsem-hf-public-backup-",
+                dir=target.parent,
+            )
+        )
+        private_backup = Path(
+            tempfile.mkdtemp(
+                prefix=".docsem-hf-private-backup-",
+                dir=private_root.parent,
+            )
+        )
+        public_backup.chmod(0o700)
+        private_backup.chmod(0o700)
+
+        records.append(
+            _install_path_with_backup(
+                staged_public,
+                target,
+                public_backup / "dataset",
+                directory=True,
+            )
+        )
+        records.append(
+            _install_path_with_backup(
+                staged_val_labels,
+                private_root / "private/val_labels.jsonl",
+                private_backup / "val_labels.jsonl",
+                directory=False,
+            )
+        )
+        if staged_leaderboard is not None:
+            records.append(
+                _install_path_with_backup(
+                    staged_leaderboard,
+                    private_root / "leaderboard/leaderboard.json",
+                    private_backup / "leaderboard.json",
+                    directory=False,
+                )
+            )
+
+    except (OSError, ValidationError) as exc:
+        preserve_backups = isinstance(exc, _BackupPreservedError)
+        mode_restore_error = None
+        for path in reversed(created_files):
+            path.unlink(missing_ok=True)
+        try:
+            _rollback_installed_paths(records)
+            rollback_complete = not preserve_backups
+        finally:
+            for path, prior_permissions in reversed(changed_directory_modes):
+                try:
+                    path.chmod(prior_permissions)
+                except OSError as restore_exc:
+                    if mode_restore_error is None:
+                        mode_restore_error = restore_exc
+            for path in reversed(created_directories):
+                try:
+                    path.rmdir()
+                except OSError:
+                    pass
+        if mode_restore_error is not None:
+            raise ValidationError(
+                "Generated output rollback could not restore prior directory permissions."
+            ) from mode_restore_error
+        if isinstance(exc, ValidationError):
+            raise
+        raise ValidationError("Generated outputs could not be installed atomically.") from exc
+    else:
+        rollback_complete = True
+    finally:
+        if rollback_complete:
+            if public_backup is not None:
+                shutil.rmtree(public_backup, ignore_errors=True)
+            if private_backup is not None:
+                shutil.rmtree(private_backup, ignore_errors=True)
 
 
 def parse_args(argv=None):
@@ -650,60 +984,80 @@ def generate_dataset(*, reset_leaderboard=False, test_public_staging=None):
     _require_real_dataset_root(TARGET_ROOT)
     captured_test = None
     captured_manifest = None
-    if test_public_staging is not None:
-        captured_test, captured_manifest = _capture_audited_public_test(
-            test_public_staging
-        )
+    snapshot_container = public_container = private_container = None
+    try:
+        if test_public_staging is not None:
+            captured_test, captured_manifest = _capture_audited_public_test(
+                test_public_staging
+            )
 
-    # Capture and validate every input before stale cleanup or any public/private
-    # output write. Missing ordinary data must never partially refresh a release.
-    ordinary = _capture_ordinary_sources()
-    dataset_card = ordinary.base_dataset_card
-    if captured_test is not None:
-        dataset_card = _render_test_ready_dataset_card(
-            ordinary.base_dataset_card,
+        snapshot_container = Path(
+            tempfile.mkdtemp(
+                prefix=".docsem-hf-ordinary-snapshot-",
+                dir=Path(TARGET_ROOT).parent,
+            )
+        )
+        snapshot_container.chmod(0o700)
+
+        # Capture every ordinary input, including exact PDF bytes, before any
+        # generated output is mutated. PDF bytes remain in a private on-disk
+        # snapshot and are never retained as one aggregate in memory.
+        ordinary = _capture_ordinary_sources(snapshot_container / "ordinary")
+        dataset_card = ordinary.base_dataset_card
+        if captured_test is not None:
+            dataset_card = _render_test_ready_dataset_card(
+                ordinary.base_dataset_card,
+                captured_test,
+                captured_manifest,
+            )
+
+        public_container = Path(
+            tempfile.mkdtemp(
+                prefix=".docsem-hf-public-generation-",
+                dir=Path(TARGET_ROOT).parent,
+            )
+        )
+        public_container.chmod(0o700)
+        staged_public = public_container / "dataset"
+        _materialize_public_generation(
+            staged_public,
+            ordinary,
+            dataset_card,
             captured_test,
-            captured_manifest,
         )
 
-    if captured_test is None:
-        _remove_generated_test_output(TARGET_ROOT)
-
-    write_jsonl(TARGET_ROOT / "train" / "tasks.jsonl", ordinary.train_tasks)
-    write_jsonl(TARGET_ROOT / "train" / "labels.jsonl", ordinary.train_labels)
-    write_jsonl(TARGET_ROOT / "val" / "tasks.jsonl", ordinary.val_tasks)
-
-    _copy_captured_pdfs(TARGET_ROOT, "train", ordinary.train_pdfs)
-    _copy_captured_pdfs(TARGET_ROOT, "val", ordinary.val_pdfs)
-
-    sample_submission = [
-        {
-            "instance_id": row["instance_id"],
-            "answer": "0",
-            "evidence": ["b01"],
-        }
-        for row in ordinary.val_tasks[:5]
-    ]
-    write_jsonl(TARGET_ROOT / "examples" / "sample_val_submission.jsonl", sample_submission)
-
-    _write_bytes(TARGET_ROOT / "INSTRUCTIONS.md", ordinary.instructions)
-    _write_bytes(TARGET_ROOT / "LICENSE.txt", ordinary.license_text)
-
-    write_jsonl(
-        PRIVATE_ROOT / "private" / "val_labels.jsonl",
-        ordinary.val_labels,
-    )
-    (PRIVATE_ROOT / "submissions").mkdir(parents=True, exist_ok=True)
-    (PRIVATE_ROOT / "submissions" / ".gitkeep").write_text("", encoding="utf-8")
-    if reset_leaderboard:
-        (PRIVATE_ROOT / "leaderboard").mkdir(parents=True, exist_ok=True)
-        (PRIVATE_ROOT / "leaderboard" / "leaderboard.json").write_text(
-            "[]\n", encoding="utf-8"
+        private_container = Path(
+            tempfile.mkdtemp(
+                prefix=".docsem-hf-private-generation-",
+                dir=Path(PRIVATE_ROOT).parent,
+            )
         )
+        private_container.chmod(0o700)
+        staged_val_labels = private_container / "val_labels.jsonl"
+        write_jsonl(staged_val_labels, ordinary.val_labels)
+        staged_val_labels.chmod(0o600)
+        staged_leaderboard = None
+        if reset_leaderboard:
+            staged_leaderboard = private_container / "leaderboard.json"
+            _write_bytes(staged_leaderboard, b"[]\n", mode=0o600)
 
-    if captured_test is not None:
-        _install_public_test_snapshot(TARGET_ROOT, captured_test)
-    _write_bytes(TARGET_ROOT / "README.md", dataset_card)
+        _install_generated_outputs(
+            staged_public,
+            staged_val_labels,
+            staged_leaderboard,
+        )
+    except ValidationError:
+        raise
+    except OSError as exc:
+        raise ValidationError("Dataset outputs could not be generated safely.") from exc
+    finally:
+        for temporary_root in (
+            private_container,
+            public_container,
+            snapshot_container,
+        ):
+            if temporary_root is not None:
+                shutil.rmtree(temporary_root, ignore_errors=True)
 
     summary = {
         "train_tasks": len(ordinary.train_tasks),

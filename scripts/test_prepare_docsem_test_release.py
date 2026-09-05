@@ -1448,6 +1448,319 @@ class PrepareDocsemHFDatasetTests(unittest.TestCase):
                 self.assertEqual(self.tree_snapshot(target), before_public)
                 self.assertEqual(self.tree_snapshot(private), before_private)
 
+    def test_ordinary_pdf_bytes_are_sealed_before_destination_mutation(self):
+        """Catches re-reading ordinary PDFs from a mutable source after preflight."""
+        environment = self.make_generation_environment()
+        source_pdf = environment["public_source"] / "train/documents/train-fixture.pdf"
+        original_pdf = source_pdf.read_bytes()
+        captured_details = {}
+        real_capture = hf_dataset_module._capture_ordinary_sources
+
+        def capture_then_mutate(*args, **kwargs):
+            snapshot = real_capture(*args, **kwargs)
+            captured_pdf = snapshot.train_pdfs[0]
+            captured_path = getattr(captured_pdf, "snapshot_path", None)
+            captured_details["path"] = captured_path
+            if captured_path is not None:
+                captured_details["mode"] = stat.S_IMODE(captured_path.stat().st_mode)
+                captured_details["bytes"] = captured_path.read_bytes()
+            source_pdf.write_bytes(b"mutated-after-preflight")
+            return snapshot
+
+        with (
+            self.generation_roots(environment),
+            patch.object(
+                hf_dataset_module,
+                "_capture_ordinary_sources",
+                side_effect=capture_then_mutate,
+            ),
+        ):
+            try:
+                hf_dataset_module.generate_dataset()
+            except ValidationError as exc:
+                self.fail(f"generation re-read the mutable PDF source: {exc}")
+
+        self.assertIsNotNone(captured_details["path"])
+        self.assertEqual(captured_details["mode"], 0o400)
+        self.assertEqual(captured_details["bytes"], original_pdf)
+        self.assertEqual(
+            (environment["target_root"] / "train/documents/train-fixture.pdf").read_bytes(),
+            original_pdf,
+        )
+        self.assertFalse(captured_details["path"].exists())
+
+    def test_public_materialization_failure_preserves_all_existing_outputs(self):
+        """Catches writing generated public/private paths before staging completes."""
+        environment = self.make_generation_environment()
+        with self.generation_roots(environment):
+            hf_dataset_module.generate_dataset()
+
+        submissions = environment["private_root"] / "submissions"
+        submissions.mkdir(parents=True, exist_ok=True)
+        (submissions / "participant.json").write_text(
+            '{"predictions":"private"}\n',
+            encoding="utf-8",
+        )
+        leaderboard = environment["private_root"] / "leaderboard"
+        leaderboard.mkdir(parents=True, exist_ok=True)
+        (leaderboard / "leaderboard.json").write_text(
+            '[{"team":"keep"}]\n',
+            encoding="utf-8",
+        )
+        before_public = self.tree_snapshot(environment["target_root"])
+        before_private = self.tree_snapshot(environment["private_root"])
+
+        (environment["public_source"] / "train/documents/train-fixture.pdf").write_bytes(
+            b"new-public-train-pdf"
+        )
+        write_jsonl(
+            environment["organizer_source"] / "val/labels.jsonl",
+            [
+                {
+                    "instance_id": "val-fixture",
+                    "answer": "new-private-answer",
+                    "evidence": ["new-private-evidence"],
+                }
+            ],
+        )
+        real_copy = hf_dataset_module._copy_captured_pdfs
+
+        def fail_after_train_copy(target_root, split, snapshots):
+            real_copy(target_root, split, snapshots)
+            if split == "train":
+                raise OSError("synthetic public materialization failure")
+
+        with (
+            self.generation_roots(environment),
+            patch.object(
+                hf_dataset_module,
+                "_copy_captured_pdfs",
+                side_effect=fail_after_train_copy,
+            ),
+            self.assertRaises((ValidationError, OSError)),
+        ):
+            hf_dataset_module.generate_dataset()
+
+        self.assertEqual(self.tree_snapshot(environment["target_root"]), before_public)
+        self.assertEqual(self.tree_snapshot(environment["private_root"]), before_private)
+
+    def test_generation_secures_existing_private_directories_without_rewriting_state(self):
+        """Catches accepting world-readable private output directories."""
+        environment = self.make_generation_environment()
+        with self.generation_roots(environment):
+            hf_dataset_module.generate_dataset()
+
+        private = environment["private_root"]
+        leaderboard = private / "leaderboard"
+        leaderboard.mkdir(mode=0o755)
+        leaderboard_file = leaderboard / "leaderboard.json"
+        leaderboard_file.write_text('[{"team":"keep"}]\n', encoding="utf-8")
+        submission_file = private / "submissions/participant.json"
+        submission_file.write_text('{"predictions":"keep"}\n', encoding="utf-8")
+        known_directories = (
+            private,
+            private / "private",
+            private / "submissions",
+            leaderboard,
+        )
+        for directory in known_directories:
+            directory.chmod(0o755)
+        before_files = self.tree_snapshot(private)
+
+        with self.generation_roots(environment):
+            hf_dataset_module.generate_dataset()
+
+        self.assertEqual(self.tree_snapshot(private), before_files)
+        self.assertTrue(
+            all(
+                stat.S_IMODE(directory.stat().st_mode) == 0o700
+                for directory in known_directories
+            )
+        )
+
+    def test_release_card_materialization_failure_keeps_prior_test_and_card(self):
+        """Catches installing a matching test tree before its release card is durable."""
+        environment = self.make_generation_environment()
+        staged_public = self.make_staged_public_release(environment["root"] / "release")
+        with self.generation_roots(environment):
+            hf_dataset_module.generate_dataset(test_public_staging=staged_public)
+
+        target = environment["target_root"]
+        (target / "test/prior-only.txt").write_text("prior test\n", encoding="utf-8")
+        (target / "README.md").write_text("prior card\n", encoding="utf-8")
+        before_public = self.tree_snapshot(target)
+        before_private = self.tree_snapshot(environment["private_root"])
+        real_write = hf_dataset_module._write_bytes
+
+        def fail_after_readme_write(path, payload, mode=0o644):
+            real_write(path, payload, mode)
+            if Path(path).name == "README.md":
+                raise OSError("synthetic release-card materialization failure")
+
+        with (
+            self.generation_roots(environment),
+            patch.object(
+                hf_dataset_module,
+                "_write_bytes",
+                side_effect=fail_after_readme_write,
+            ),
+            self.assertRaises((ValidationError, OSError)),
+        ):
+            hf_dataset_module.generate_dataset(test_public_staging=staged_public)
+
+        self.assertEqual(self.tree_snapshot(target), before_public)
+        self.assertEqual(self.tree_snapshot(environment["private_root"]), before_private)
+
+    def test_private_label_install_failure_rolls_back_public_card_and_test(self):
+        """Catches a multi-output install that cannot restore the prior release."""
+        environment = self.make_generation_environment()
+        staged_public = self.make_staged_public_release(environment["root"] / "release")
+        with self.generation_roots(environment):
+            hf_dataset_module.generate_dataset(test_public_staging=staged_public)
+
+        target = environment["target_root"]
+        private = environment["private_root"]
+        (target / "test/prior-only.txt").write_text("prior test\n", encoding="utf-8")
+        (target / "README.md").write_text("prior card\n", encoding="utf-8")
+        (private / "submissions/participant.json").write_text(
+            '{"predictions":"keep"}\n',
+            encoding="utf-8",
+        )
+        (private / "leaderboard").mkdir(parents=True, exist_ok=True)
+        (private / "leaderboard/leaderboard.json").write_text(
+            '[{"team":"keep"}]\n',
+            encoding="utf-8",
+        )
+        before_public = self.tree_snapshot(target)
+        before_private = self.tree_snapshot(private)
+
+        (environment["public_source"] / "train/documents/train-fixture.pdf").write_bytes(
+            b"new-public-train-pdf"
+        )
+        write_jsonl(
+            environment["organizer_source"] / "val/labels.jsonl",
+            [
+                {
+                    "instance_id": "val-fixture",
+                    "answer": "new-private-answer",
+                    "evidence": ["new-private-evidence"],
+                }
+            ],
+        )
+        private_label_path = private / "private/val_labels.jsonl"
+        real_replace = os.replace
+        injected = False
+
+        def fail_new_private_label_install(source, destination):
+            nonlocal injected
+            if not injected and Path(destination) == private_label_path:
+                injected = True
+                raise OSError("synthetic private-label install failure")
+            return real_replace(source, destination)
+
+        with (
+            self.generation_roots(environment),
+            patch.object(
+                hf_dataset_module.os,
+                "replace",
+                side_effect=fail_new_private_label_install,
+            ),
+            self.assertRaises(ValidationError),
+        ):
+            hf_dataset_module.generate_dataset(test_public_staging=staged_public)
+
+        self.assertTrue(injected)
+        self.assertEqual(self.tree_snapshot(target), before_public)
+        self.assertEqual(self.tree_snapshot(private), before_private)
+
+    def test_failed_private_restore_keeps_the_prior_label_backup_recoverable(self):
+        """Catches cleanup deleting the only prior copy after rollback itself fails."""
+        environment = self.make_generation_environment()
+        with self.generation_roots(environment):
+            hf_dataset_module.generate_dataset()
+
+        target = environment["target_root"]
+        private = environment["private_root"]
+        private_label_path = private / "private/val_labels.jsonl"
+        prior_label_bytes = private_label_path.read_bytes()
+        before_public = self.tree_snapshot(target)
+        write_jsonl(
+            environment["organizer_source"] / "val/labels.jsonl",
+            [
+                {
+                    "instance_id": "val-fixture",
+                    "answer": "new-private-answer",
+                    "evidence": ["new-private-evidence"],
+                }
+            ],
+        )
+        real_replace = os.replace
+
+        def fail_private_destination(source, destination):
+            if Path(destination) == private_label_path:
+                raise OSError("synthetic install and restore failure")
+            return real_replace(source, destination)
+
+        with (
+            self.generation_roots(environment),
+            patch.object(
+                hf_dataset_module.os,
+                "replace",
+                side_effect=fail_private_destination,
+            ),
+            self.assertRaises(ValidationError) as caught,
+        ):
+            hf_dataset_module.generate_dataset()
+
+        backups = list(private.parent.glob(".docsem-hf-private-backup-*"))
+        self.assertIn("prior output remains", str(caught.exception))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual((backups[0] / "val_labels.jsonl").read_bytes(), prior_label_bytes)
+        self.assertEqual(self.tree_snapshot(target), before_public)
+
+    def test_ordinary_source_repr_is_aggregate_only(self):
+        """Catches private validation rows, paths, or digests leaking through repr."""
+        environment = self.make_generation_environment()
+        private_answer = "organizer-only-answer-sentinel"
+        private_evidence = "organizer-only-evidence-sentinel"
+        write_jsonl(
+            environment["organizer_source"] / "val/labels.jsonl",
+            [
+                {
+                    "instance_id": "val-fixture",
+                    "answer": private_answer,
+                    "evidence": [private_evidence],
+                }
+            ],
+        )
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        snapshot_root = Path(temporary.name) / "ordinary-snapshot"
+
+        with self.generation_roots(environment):
+            try:
+                snapshot = hf_dataset_module._capture_ordinary_sources(snapshot_root)
+            except TypeError as exc:
+                self.fail(f"ordinary-source capture did not accept a snapshot root: {exc}")
+
+        snapshot_repr = repr(snapshot)
+        pdf_repr = repr(snapshot.train_pdfs[0])
+        self.assertIn("train_tasks=1", snapshot_repr)
+        self.assertIn("val_labels=1", snapshot_repr)
+        self.assertIn("train_pdfs=1", snapshot_repr)
+        self.assertIn("size=16", pdf_repr)
+        for forbidden in (
+            private_answer,
+            private_evidence,
+            str(environment["public_source"]),
+            str(environment["organizer_source"]),
+            str(snapshot_root),
+            "train-fixture.pdf",
+            snapshot.train_pdfs[0].sha256,
+        ):
+            self.assertNotIn(forbidden, snapshot_repr)
+            self.assertNotIn(forbidden, pdf_repr)
+
     def test_explicit_import_rejects_malicious_staging_before_mutating_outputs(self):
         """Catches a generator that trusts a source path and copies private or linked files."""
         environment = self.make_generation_environment()
