@@ -4,6 +4,9 @@ from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import hashlib
 import io
 import json
+import os
+import select
+import signal
 import time
 import tempfile
 import unittest
@@ -210,6 +213,69 @@ class _SlowPixmapRenderer:
         )
 
 
+class _SlowOpenRenderer:
+    """Renderer whose PDF open cannot stall the supervising parent."""
+
+    def __init__(self, renderer, delay_seconds, completion_marker):
+        self._renderer = renderer
+        self._delay_seconds = delay_seconds
+        self._completion_marker = completion_marker
+        self.VersionBind = renderer.VersionBind
+        self.csGRAY = renderer.csGRAY
+
+    def __getattr__(self, name):
+        return getattr(self._renderer, name)
+
+    def open(self, *args, **kwargs):
+        time.sleep(self._delay_seconds)
+        self._completion_marker.write_text("PDF open completed", encoding="utf-8")
+        return self._renderer.open(*args, **kwargs)
+
+
+class _SlowPageCountDocument:
+    """Document whose metadata probe cannot stall the supervising parent."""
+
+    def __init__(self, document, delay_seconds, completion_marker):
+        self._document = document
+        self._delay_seconds = delay_seconds
+        self._completion_marker = completion_marker
+
+    def __enter__(self):
+        self._document.__enter__()
+        return self
+
+    def __exit__(self, *args):
+        return self._document.__exit__(*args)
+
+    def __getattr__(self, name):
+        return getattr(self._document, name)
+
+    @property
+    def page_count(self):
+        time.sleep(self._delay_seconds)
+        self._completion_marker.write_text("page count completed", encoding="utf-8")
+        return self._document.page_count
+
+
+class _SlowPageCountRenderer:
+    def __init__(self, renderer, delay_seconds, completion_marker):
+        self._renderer = renderer
+        self._delay_seconds = delay_seconds
+        self._completion_marker = completion_marker
+        self.VersionBind = renderer.VersionBind
+        self.csGRAY = renderer.csGRAY
+
+    def __getattr__(self, name):
+        return getattr(self._renderer, name)
+
+    def open(self, *args, **kwargs):
+        return _SlowPageCountDocument(
+            self._renderer.open(*args, **kwargs),
+            self._delay_seconds,
+            self._completion_marker,
+        )
+
+
 class SourceFixture:
     """Creates complete synthetic test sources without touching project data."""
 
@@ -317,6 +383,7 @@ class PrepareDocsemTestReleaseTests(unittest.TestCase):
                 "method": "pymupdf-raster-tesseract-cli",
                 "pymupdf_version": "1.26.3",
                 "tesseract_version": "5.5.1",
+                "tesseract_binary_sha256": "6517c9cf1b17280201af3e48880517bbfafd24b5876aacb75d5643bafff1c414",
                 "traineddata_sha256": "7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2",
                 "render_dpi": 300,
                 "colorspace": "grayscale",
@@ -334,6 +401,7 @@ class PrepareDocsemTestReleaseTests(unittest.TestCase):
                 "page_workflow_timeout_seconds": 45,
                 "page_worker_cpu_seconds": 40,
                 "page_worker_open_files": 64,
+                "max_tesseract_binary_bytes": 16777216,
                 "max_traineddata_bytes": 8388608,
                 "max_evidence_ids_per_task": 1024,
             },
@@ -584,8 +652,42 @@ class PrepareDocsemTestReleaseTests(unittest.TestCase):
         self.addCleanup(tempdir.cleanup)
         wrong_version = Path(tempdir.name) / "tesseract-wrong-version"
         write_fake_tesseract(wrong_version, version="5.4.0")
-        with temporary_module_values(TESSERACT_BINARY=str(wrong_version)):
+        with temporary_module_values(
+            TESSERACT_BINARY=str(wrong_version),
+            TESSERACT_BINARY_SHA256=hashlib.sha256(wrong_version.read_bytes()).hexdigest(),
+        ):
             self.assert_rejected(source)
+
+    def test_ignores_a_path_poisoned_tesseract_that_forges_version_and_headers(self):
+        """Catches selecting an attacker-controlled executable from caller PATH."""
+        source = self.make_source()
+        source.labels[0]["evidence"] = ["b99"]
+        source.write_labels()
+        fake_root = source.root / "fake-path"
+        fake_root.mkdir()
+        marker = fake_root / "fake-was-executed"
+        fake_binary = fake_root / "tesseract"
+        write_fake_tesseract(
+            fake_binary,
+            ocr_body=(
+                f"printf '%s' 'executed' > '{marker}'; "
+                "printf '%s\\n' 'b99: forged header' > \"$2.txt\""
+            ),
+        )
+
+        original_path = os.environ.get("PATH")
+        os.environ["PATH"] = (
+            str(fake_root) if original_path is None else f"{fake_root}{os.pathsep}{original_path}"
+        )
+        try:
+            self.assert_rejected(source)
+        finally:
+            if original_path is None:
+                os.environ.pop("PATH", None)
+            else:
+                os.environ["PATH"] = original_path
+
+        self.assertFalse(marker.exists())
 
     def test_rejects_missing_or_wrong_traineddata_before_pdf_rendering(self):
         """Catches rendering before the pinned English OCR model is verified."""
@@ -600,6 +702,7 @@ class PrepareDocsemTestReleaseTests(unittest.TestCase):
         source = self.make_source()
         with temporary_module_values(
             TESSERACT_BINARY=str(fake_binary),
+            TESSERACT_BINARY_SHA256=hashlib.sha256(fake_binary.read_bytes()).hexdigest(),
             TESSDATA_ROOT=str(missing_root),
             fitz=_RendererMustNotRun(missing_render_marker),
         ):
@@ -613,11 +716,51 @@ class PrepareDocsemTestReleaseTests(unittest.TestCase):
         source = self.make_source()
         with temporary_module_values(
             TESSERACT_BINARY=str(fake_binary),
+            TESSERACT_BINARY_SHA256=hashlib.sha256(fake_binary.read_bytes()).hexdigest(),
             TESSDATA_ROOT=str(wrong_root),
             fitz=_RendererMustNotRun(wrong_render_marker),
         ):
             self.assert_rejected(source)
         self.assertFalse(wrong_render_marker.exists())
+
+    def test_rejects_a_traineddata_fifo_without_blocking(self):
+        """Catches a blocking model-file open before its regular-file check."""
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        fifo_path = Path(tempdir.name) / "eng.traineddata"
+        os.mkfifo(fifo_path, mode=0o600)
+        result_read_fd, result_write_fd = os.pipe()
+        started = time.monotonic()
+        pid = os.fork()
+        if pid == 0:
+            os.close(result_read_fd)
+            try:
+                release_module._read_pinned_traineddata(fifo_path)
+            except ValidationError:
+                os.write(result_write_fd, b"rejected")
+                os._exit(0)
+            except BaseException:
+                os.write(result_write_fd, b"error")
+                os._exit(2)
+            os.write(result_write_fd, b"accepted")
+            os._exit(3)
+
+        os.close(result_write_fd)
+        try:
+            readable, _, _ = select.select([result_read_fd], [], [], 0.25)
+            if not readable:
+                os.kill(pid, signal.SIGKILL)
+                os.waitpid(pid, 0)
+                self.fail("traineddata FIFO blocked validation")
+            result = os.read(result_read_fd, 32)
+            _, status = os.waitpid(pid, 0)
+        finally:
+            os.close(result_read_fd)
+
+        self.assertEqual(result, b"rejected")
+        self.assertTrue(os.WIFEXITED(status))
+        self.assertEqual(os.WEXITSTATUS(status), 0)
+        self.assertLess(time.monotonic() - started, 0.3)
 
     def test_accepts_a_custom_root_only_with_the_exact_traineddata_digest(self):
         """Catches trusting a model by pathname instead of its pinned bytes."""
@@ -644,6 +787,7 @@ class PrepareDocsemTestReleaseTests(unittest.TestCase):
 
         with temporary_module_values(
             TESSERACT_BINARY=str(fake_binary),
+            TESSERACT_BINARY_SHA256=hashlib.sha256(fake_binary.read_bytes()).hexdigest(),
             TESSDATA_ROOT=str(tessdata_root),
             TESSERACT_TRAINEDDATA_SHA256=expected_digest,
         ):
@@ -667,13 +811,64 @@ class PrepareDocsemTestReleaseTests(unittest.TestCase):
             completion_marker,
         )
 
-        started = time.monotonic()
-        with temporary_module_values(
-            fitz=slow_renderer,
-            PAGE_WORKFLOW_TIMEOUT_SECONDS=0.05,
-        ):
-            self.assert_rejected(source)
-        elapsed = time.monotonic() - started
+        with release_module._resolve_ocr_runtime() as runtime:
+            started = time.monotonic()
+            with temporary_module_values(
+                fitz=slow_renderer,
+                PAGE_WORKFLOW_TIMEOUT_SECONDS=0.05,
+            ), self.assertRaises(ValidationError):
+                release_module._render_visible_pdf_evidence_blocks(
+                    source.root / "documents" / "synthetic-1.pdf",
+                    runtime,
+                    {"b01"},
+                )
+            elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 0.3)
+        time.sleep(0.45)
+        self.assertFalse(completion_marker.exists())
+
+    def test_kills_a_slow_pdf_open_within_the_worker_wall_limit(self):
+        """Catches a PyMuPDF open call running outside a killable boundary."""
+        source = self.make_source()
+        completion_marker = source.root / "slow-open-completed"
+        slow_renderer = _SlowOpenRenderer(release_module.fitz, 0.4, completion_marker)
+
+        with release_module._resolve_ocr_runtime() as runtime:
+            started = time.monotonic()
+            with temporary_module_values(
+                fitz=slow_renderer,
+                PAGE_WORKFLOW_TIMEOUT_SECONDS=0.05,
+            ), self.assertRaises(ValidationError):
+                release_module._render_visible_pdf_evidence_blocks(
+                    source.root / "documents" / "synthetic-1.pdf",
+                    runtime,
+                    {"b01"},
+                )
+            elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 0.3)
+        time.sleep(0.45)
+        self.assertFalse(completion_marker.exists())
+
+    def test_kills_a_slow_page_count_probe_within_the_worker_wall_limit(self):
+        """Catches a PyMuPDF page-count read running in the parent process."""
+        source = self.make_source()
+        completion_marker = source.root / "slow-page-count-completed"
+        slow_renderer = _SlowPageCountRenderer(release_module.fitz, 0.4, completion_marker)
+
+        with release_module._resolve_ocr_runtime() as runtime:
+            started = time.monotonic()
+            with temporary_module_values(
+                fitz=slow_renderer,
+                PAGE_WORKFLOW_TIMEOUT_SECONDS=0.05,
+            ), self.assertRaises(ValidationError):
+                release_module._render_visible_pdf_evidence_blocks(
+                    source.root / "documents" / "synthetic-1.pdf",
+                    runtime,
+                    {"b01"},
+                )
+            elapsed = time.monotonic() - started
 
         self.assertLess(elapsed, 0.3)
         time.sleep(0.45)
@@ -738,7 +933,11 @@ class PrepareDocsemTestReleaseTests(unittest.TestCase):
                 source = self.make_source()
                 fake_binary = fake_root / f"tesseract-{name}"
                 write_fake_tesseract(fake_binary, ocr_body=body)
-                with temporary_module_values(TESSERACT_BINARY=str(fake_binary), **settings):
+                with temporary_module_values(
+                    TESSERACT_BINARY=str(fake_binary),
+                    TESSERACT_BINARY_SHA256=hashlib.sha256(fake_binary.read_bytes()).hexdigest(),
+                    **settings,
+                ):
                     self.assert_rejected(source)
 
     def test_validation_never_emits_ocr_or_private_label_text(self):

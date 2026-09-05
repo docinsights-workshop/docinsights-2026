@@ -16,7 +16,6 @@ from pathlib import Path
 import re
 import resource
 import select
-import shutil
 import signal
 import stat
 import struct
@@ -39,7 +38,10 @@ OCR_HEADER = re.compile(r"^[ \t]*(b[0-9]+):")
 
 PYMUPDF_VERSION = "1.26.3"
 TESSERACT_VERSION = "5.5.1"
-TESSERACT_BINARY = "tesseract"
+TESSERACT_BINARY = "/opt/homebrew/Cellar/tesseract/5.5.1/bin/tesseract"
+TESSERACT_BINARY_SHA256 = (
+    "6517c9cf1b17280201af3e48880517bbfafd24b5876aacb75d5643bafff1c414"
+)
 TESSDATA_ROOT: str | None = None
 TESSDATA_ROOT_ENV = "DOCSEM_TESSDATA_ROOT"
 TESSERACT_TRAINEDDATA_SHA256 = (
@@ -50,6 +52,7 @@ RENDER_DPI = 300
 OCR_LANGUAGE = "eng"
 OCR_PAGE_SEGMENTATION_MODE = 6
 
+MAX_TESSERACT_BINARY_BYTES = 16 * 1024 * 1024
 MAX_TRAINEDDATA_BYTES = 8 * 1024 * 1024
 MAX_PDF_BYTES = 16 * 1024 * 1024
 MAX_PAGES = 16
@@ -69,6 +72,7 @@ PAGE_WORKER_OPEN_FILES = 64
 MAX_EVIDENCE_IDS_PER_TASK = 1024
 
 _PAGE_RESULT_HEADER = struct.Struct(">Q")
+_DOCUMENT_PROBE_RESULT = struct.Struct(">I")
 
 
 class ValidationError(ValueError):
@@ -183,6 +187,7 @@ def _visibility_audit_contract() -> dict:
         "method": OCR_METHOD,
         "pymupdf_version": PYMUPDF_VERSION,
         "tesseract_version": TESSERACT_VERSION,
+        "tesseract_binary_sha256": TESSERACT_BINARY_SHA256,
         "traineddata_sha256": TESSERACT_TRAINEDDATA_SHA256,
         "render_dpi": RENDER_DPI,
         "colorspace": "grayscale",
@@ -200,6 +205,7 @@ def _visibility_audit_contract() -> dict:
         "page_workflow_timeout_seconds": PAGE_WORKFLOW_TIMEOUT_SECONDS,
         "page_worker_cpu_seconds": PAGE_WORKER_CPU_SECONDS,
         "page_worker_open_files": PAGE_WORKER_OPEN_FILES,
+        "max_tesseract_binary_bytes": MAX_TESSERACT_BINARY_BYTES,
         "max_traineddata_bytes": MAX_TRAINEDDATA_BYTES,
         "max_evidence_ids_per_task": MAX_EVIDENCE_IDS_PER_TASK,
     }
@@ -321,7 +327,7 @@ def _read_pinned_traineddata(path: Path) -> bytes:
     try:
         descriptor = os.open(
             path,
-            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
         )
         file_stat = os.fstat(descriptor)
         if (
@@ -353,6 +359,47 @@ def _read_pinned_traineddata(path: Path) -> bytes:
     return payload
 
 
+def _read_pinned_tesseract_binary(path: Path) -> bytes:
+    """Read the exact executable without following links or trusting PATH."""
+    if not path.is_absolute():
+        _fail("Pinned OCR executable path is not absolute.")
+    descriptor = None
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+        )
+        file_stat = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(file_stat.st_mode)
+            or file_stat.st_size <= 0
+            or file_stat.st_size > MAX_TESSERACT_BINARY_BYTES
+            or not file_stat.st_mode & 0o111
+        ):
+            _fail("Pinned OCR executable is malformed or exceeds its size limit.")
+        remaining = file_stat.st_size
+        chunks = []
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 1024 * 1024))
+            if not chunk:
+                _fail("Pinned OCR executable changed while being verified.")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            _fail("Pinned OCR executable changed while being verified.")
+    except ValidationError:
+        raise
+    except OSError as exc:
+        raise ValidationError("Pinned OCR executable is unavailable or unsafe.") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    payload = b"".join(chunks)
+    if hashlib.sha256(payload).hexdigest() != TESSERACT_BINARY_SHA256:
+        _fail("Pinned OCR executable digest does not match the tested contract.")
+    return payload
+
+
 @contextmanager
 def _resolve_ocr_runtime():
     if fitz is None:
@@ -361,15 +408,28 @@ def _resolve_ocr_runtime():
         _fail("PDF renderer version does not match the tested contract.")
     if not hasattr(os, "fork") or not hasattr(os, "setsid"):
         _fail("Bounded PDF page workers are unavailable.")
-    binary = shutil.which(TESSERACT_BINARY)
-    if binary is None:
-        _fail("OCR backend is unavailable.")
-    with tempfile.TemporaryDirectory(prefix="docsem-ocr-version-") as temporary_root:
+    source_binary = Path(TESSERACT_BINARY)
+    binary_payload = _read_pinned_tesseract_binary(source_binary)
+    traineddata = _read_pinned_traineddata(_traineddata_source_path(str(source_binary)))
+    with tempfile.TemporaryDirectory(prefix="docsem-pinned-ocr-") as temporary_root:
         root = Path(temporary_root)
-        stdout_path = root / "stdout"
-        stderr_path = root / "stderr"
+        root.chmod(0o700)
+        controlled_binary = root / "tesseract"
+        with controlled_binary.open("xb") as output:
+            output.write(binary_payload)
+        controlled_binary.chmod(0o500)
+        controlled_tessdata = root / "tessdata"
+        controlled_tessdata.mkdir(mode=0o700)
+        controlled_model = controlled_tessdata / f"{OCR_LANGUAGE}.traineddata"
+        with controlled_model.open("xb") as output:
+            output.write(traineddata)
+        controlled_model.chmod(0o600)
+        version_root = root / "version"
+        version_root.mkdir(mode=0o700)
+        stdout_path = version_root / "stdout"
+        stderr_path = version_root / "stderr"
         return_code = _run_bounded_process(
-            [binary, "--version"],
+            [str(controlled_binary), "--version"],
             stdout_path=stdout_path,
             stderr_path=stderr_path,
             timeout_seconds=OCR_VERSION_TIMEOUT_SECONDS,
@@ -387,24 +447,15 @@ def _resolve_ocr_runtime():
             MAX_SUBPROCESS_LOG_BYTES,
             "OCR backend version diagnostics",
         )
-    try:
-        version_lines = stdout.decode("utf-8", errors="strict").splitlines()
-    except UnicodeDecodeError as exc:
-        raise ValidationError("OCR backend version output is malformed.") from exc
-    if not version_lines or version_lines[0] != f"tesseract {TESSERACT_VERSION}":
-        _fail("OCR backend version does not match the tested contract.")
-
-    traineddata = _read_pinned_traineddata(_traineddata_source_path(binary))
-    with tempfile.TemporaryDirectory(prefix="docsem-pinned-tessdata-") as temporary_root:
-        root = Path(temporary_root)
-        root.chmod(0o700)
-        controlled_model = root / f"{OCR_LANGUAGE}.traineddata"
-        with controlled_model.open("xb") as output:
-            output.write(traineddata)
-        controlled_model.chmod(0o600)
+        try:
+            version_lines = stdout.decode("utf-8", errors="strict").splitlines()
+        except UnicodeDecodeError as exc:
+            raise ValidationError("OCR backend version output is malformed.") from exc
+        if not version_lines or version_lines[0] != f"tesseract {TESSERACT_VERSION}":
+            _fail("OCR backend version does not match the tested contract.")
         yield OCRRuntime(
-            binary=binary,
-            tessdata_root=root,
+            binary=str(controlled_binary),
+            tessdata_root=controlled_tessdata,
             traineddata_sha256=TESSERACT_TRAINEDDATA_SHA256,
         )
 
@@ -493,13 +544,8 @@ def _silence_page_worker(result_fd: int) -> None:
     finally:
         os.close(devnull)
     max_fd = min(int(os.sysconf("SC_OPEN_MAX")), 4096)
-    for descriptor in range(3, max_fd):
-        if descriptor == result_fd:
-            continue
-        try:
-            os.close(descriptor)
-        except OSError:
-            pass
+    os.closerange(3, result_fd)
+    os.closerange(result_fd + 1, max_fd)
 
 
 def _write_all(descriptor: int, payload: bytes) -> None:
@@ -509,6 +555,17 @@ def _write_all(descriptor: int, payload: bytes) -> None:
         if written <= 0:
             raise OSError("page worker result pipe closed")
         offset += written
+
+
+def _probe_pdf_document(path: Path) -> int:
+    """Open a PDF and return its bounded page count inside a worker."""
+    with fitz.open(str(path)) as document:
+        if document.needs_pass:
+            _fail("PDF is encrypted and cannot be inspected.")
+        page_count = document.page_count
+        if type(page_count) is not int or not 0 < page_count <= MAX_PAGES:
+            _fail("PDF page count exceeds its limit.")
+        return page_count
 
 
 def _render_and_ocr_page(
@@ -692,6 +749,61 @@ def _run_bounded_page_workflow(
         return pixel_count, payload[_PAGE_RESULT_HEADER.size :]
 
 
+def _run_bounded_document_probe(path: Path) -> int:
+    """Supervise PDF open and page-count inspection with a wall deadline."""
+    expected_result_bytes = _DOCUMENT_PROBE_RESULT.size
+    result_read_fd, result_write_fd = os.pipe()
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        os.close(result_read_fd)
+        os.close(result_write_fd)
+        raise ValidationError("PDF document probe could not start safely.") from exc
+    if pid == 0:
+        os.close(result_read_fd)
+        try:
+            os.setsid()
+            _silence_page_worker(result_write_fd)
+            _apply_page_worker_limits()
+            result = _DOCUMENT_PROBE_RESULT.pack(_probe_pdf_document(path))
+            _write_all(result_write_fd, result)
+            os.close(result_write_fd)
+            os._exit(0)
+        except BaseException:
+            try:
+                os.close(result_write_fd)
+            except OSError:
+                pass
+            os._exit(70)
+
+    os.close(result_write_fd)
+    try:
+        try:
+            payload, status = _wait_for_page_worker(
+                pid,
+                result_read_fd,
+                expected_result_bytes,
+            )
+        except ValidationError:
+            raise
+        except BaseException as exc:
+            _terminate_page_worker(pid)
+            raise ValidationError("PDF document probe could not be supervised safely.") from exc
+    finally:
+        os.close(result_read_fd)
+    if (
+        not os.WIFEXITED(status)
+        or os.WEXITSTATUS(status) != 0
+        or len(payload) != expected_result_bytes
+    ):
+        _terminate_page_worker(pid, child_already_reaped=True)
+        _fail("PDF document probe failed safely.")
+    page_count = _DOCUMENT_PROBE_RESULT.unpack(payload)[0]
+    if not 0 < page_count <= MAX_PAGES:
+        _fail("PDF document probe returned an invalid result.")
+    return page_count
+
+
 def _render_visible_pdf_evidence_blocks(
     path: Path,
     runtime: OCRRuntime,
@@ -706,12 +818,7 @@ def _render_visible_pdf_evidence_blocks(
                 _fail("PDF is unreadable.")
         ordered_blocks = tuple(sorted(required_blocks))
         matched = bytearray(len(ordered_blocks))
-        with fitz.open(str(path)) as document:
-            if document.needs_pass:
-                _fail("PDF is encrypted and cannot be inspected.")
-            if type(document.page_count) is not int or not 0 < document.page_count <= MAX_PAGES:
-                _fail("PDF page count exceeds its limit.")
-            page_count = document.page_count
+        page_count = _run_bounded_document_probe(path)
         total_pixels = 0
         for page_number in range(page_count):
             expected_pixels, flags = _run_bounded_page_workflow(
