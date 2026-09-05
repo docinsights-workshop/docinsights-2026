@@ -6,6 +6,7 @@ not discover, select, stage, publish, or activate any local test material.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
 import json
@@ -14,11 +15,14 @@ import os
 from pathlib import Path
 import re
 import resource
+import select
 import shutil
 import signal
 import stat
+import struct
 import subprocess
 import tempfile
+import time
 from typing import Iterable
 
 try:
@@ -36,11 +40,17 @@ OCR_HEADER = re.compile(r"^[ \t]*(b[0-9]+):")
 PYMUPDF_VERSION = "1.26.3"
 TESSERACT_VERSION = "5.5.1"
 TESSERACT_BINARY = "tesseract"
+TESSDATA_ROOT: str | None = None
+TESSDATA_ROOT_ENV = "DOCSEM_TESSDATA_ROOT"
+TESSERACT_TRAINEDDATA_SHA256 = (
+    "7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2"
+)
 OCR_METHOD = "pymupdf-raster-tesseract-cli"
 RENDER_DPI = 300
 OCR_LANGUAGE = "eng"
 OCR_PAGE_SEGMENTATION_MODE = 6
 
+MAX_TRAINEDDATA_BYTES = 8 * 1024 * 1024
 MAX_PDF_BYTES = 16 * 1024 * 1024
 MAX_PAGES = 16
 MAX_PAGE_WIDTH_POINTS = 1000
@@ -53,6 +63,12 @@ MAX_OCR_LINE_CHARS = 4096
 MAX_SUBPROCESS_LOG_BYTES = 64 * 1024
 OCR_TIMEOUT_SECONDS = 30
 OCR_VERSION_TIMEOUT_SECONDS = 5
+PAGE_WORKFLOW_TIMEOUT_SECONDS = 45
+PAGE_WORKER_CPU_SECONDS = 40
+PAGE_WORKER_OPEN_FILES = 64
+MAX_EVIDENCE_IDS_PER_TASK = 1024
+
+_PAGE_RESULT_HEADER = struct.Struct(">Q")
 
 
 class ValidationError(ValueError):
@@ -68,6 +84,15 @@ class ValidatedTestSource:
     task_rows: tuple[dict, ...]
     label_rows: tuple[dict, ...]
     pdf_paths: tuple[Path, ...]
+
+
+@dataclass(frozen=True)
+class OCRRuntime:
+    """Pinned OCR executable and validation-owned English model root."""
+
+    binary: str
+    tessdata_root: Path
+    traineddata_sha256: str
 
 
 def _fail(message: str) -> None:
@@ -141,6 +166,7 @@ def _validate_labels(rows: list[dict]) -> dict[str, dict]:
         if (
             not isinstance(evidence, list)
             or not evidence
+            or len(evidence) > MAX_EVIDENCE_IDS_PER_TASK
             or any(not isinstance(block, str) or not BLOCK_ID.fullmatch(block) for block in evidence)
             or len(set(evidence)) != len(evidence)
         ):
@@ -157,6 +183,7 @@ def _visibility_audit_contract() -> dict:
         "method": OCR_METHOD,
         "pymupdf_version": PYMUPDF_VERSION,
         "tesseract_version": TESSERACT_VERSION,
+        "traineddata_sha256": TESSERACT_TRAINEDDATA_SHA256,
         "render_dpi": RENDER_DPI,
         "colorspace": "grayscale",
         "ocr_language": OCR_LANGUAGE,
@@ -170,19 +197,23 @@ def _visibility_audit_contract() -> dict:
         "max_raster_bytes": MAX_RASTER_BYTES,
         "max_ocr_output_bytes": MAX_OCR_OUTPUT_BYTES,
         "ocr_timeout_seconds_per_page": OCR_TIMEOUT_SECONDS,
+        "page_workflow_timeout_seconds": PAGE_WORKFLOW_TIMEOUT_SECONDS,
+        "page_worker_cpu_seconds": PAGE_WORKER_CPU_SECONDS,
+        "page_worker_open_files": PAGE_WORKER_OPEN_FILES,
+        "max_traineddata_bytes": MAX_TRAINEDDATA_BYTES,
+        "max_evidence_ids_per_task": MAX_EVIDENCE_IDS_PER_TASK,
     }
 
 
-def _subprocess_environment() -> dict[str, str]:
+def _subprocess_environment(tessdata_root: Path | None = None) -> dict[str, str]:
     """Expose no caller secrets to the OCR subprocess."""
     environment = {
         "LANG": "C",
         "LC_ALL": "C",
         "OMP_THREAD_LIMIT": "1",
     }
-    tessdata_prefix = os.environ.get("TESSDATA_PREFIX")
-    if tessdata_prefix:
-        environment["TESSDATA_PREFIX"] = tessdata_prefix
+    if tessdata_root is not None:
+        environment["TESSDATA_PREFIX"] = str(tessdata_root)
     return environment
 
 
@@ -197,6 +228,8 @@ def _run_bounded_process(
     stderr_path: Path,
     timeout_seconds: float,
     max_file_bytes: int,
+    tessdata_root: Path | None = None,
+    isolated_process_group: bool = True,
 ) -> int:
     """Run one OCR command with bounded files, time, and inherited state."""
     process = None
@@ -208,15 +241,18 @@ def _run_bounded_process(
                 stdout=stdout,
                 stderr=stderr,
                 cwd=str(stdout_path.parent),
-                env=_subprocess_environment(),
+                env=_subprocess_environment(tessdata_root),
                 close_fds=True,
-                start_new_session=True,
+                start_new_session=isolated_process_group,
                 preexec_fn=lambda: _limit_child_file_size(max_file_bytes),
             )
             try:
                 return process.wait(timeout=timeout_seconds)
             except subprocess.TimeoutExpired as exc:
-                os.killpg(process.pid, signal.SIGKILL)
+                if isolated_process_group:
+                    os.killpg(process.pid, signal.SIGKILL)
+                else:
+                    os.kill(process.pid, signal.SIGKILL)
                 process.wait()
                 raise ValidationError("OCR process exceeded its time limit.") from exc
     except ValidationError:
@@ -224,7 +260,10 @@ def _run_bounded_process(
     except (OSError, subprocess.SubprocessError) as exc:
         if process is not None and process.poll() is None:
             try:
-                os.killpg(process.pid, signal.SIGKILL)
+                if isolated_process_group:
+                    os.killpg(process.pid, signal.SIGKILL)
+                else:
+                    os.kill(process.pid, signal.SIGKILL)
             except OSError:
                 pass
             process.wait()
@@ -244,11 +283,84 @@ def _read_bounded_regular_file(path: Path, max_bytes: int, description: str) -> 
         raise ValidationError(f"{description} is absent or unreadable.") from exc
 
 
-def _resolve_ocr_runtime() -> str:
+def _traineddata_source_path(binary: str) -> Path:
+    """Select one explicit or conventional English traineddata path."""
+    if TESSDATA_ROOT is not None:
+        return Path(TESSDATA_ROOT) / f"{OCR_LANGUAGE}.traineddata"
+    configured_root = os.environ.get(TESSDATA_ROOT_ENV)
+    if configured_root:
+        return Path(configured_root) / f"{OCR_LANGUAGE}.traineddata"
+
+    resolved_binary = Path(binary).resolve()
+    candidates = [
+        Path("/opt/homebrew/share/tessdata"),
+        resolved_binary.parent.parent / "share" / "tessdata",
+        Path("/usr/local/share/tessdata"),
+        Path("/usr/share/tesseract-ocr/5/tessdata"),
+        Path("/usr/share/tesseract-ocr/4.00/tessdata"),
+        Path("/usr/share/tessdata"),
+    ]
+    seen = set()
+    for root in candidates:
+        candidate = root / f"{OCR_LANGUAGE}.traineddata"
+        normalized = str(candidate)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        try:
+            candidate.lstat()
+        except OSError:
+            continue
+        return candidate
+    _fail("Pinned OCR language data is unavailable.")
+
+
+def _read_pinned_traineddata(path: Path) -> bytes:
+    """Read one bounded regular model without following its final symlink."""
+    descriptor = None
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+        )
+        file_stat = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(file_stat.st_mode)
+            or file_stat.st_size <= 0
+            or file_stat.st_size > MAX_TRAINEDDATA_BYTES
+        ):
+            _fail("Pinned OCR language data is malformed or exceeds its size limit.")
+        remaining = file_stat.st_size
+        chunks = []
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 1024 * 1024))
+            if not chunk:
+                _fail("Pinned OCR language data changed while being verified.")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            _fail("Pinned OCR language data changed while being verified.")
+    except ValidationError:
+        raise
+    except OSError as exc:
+        raise ValidationError("Pinned OCR language data is unavailable or unsafe.") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    payload = b"".join(chunks)
+    if hashlib.sha256(payload).hexdigest() != TESSERACT_TRAINEDDATA_SHA256:
+        _fail("Pinned OCR language data digest does not match the tested contract.")
+    return payload
+
+
+@contextmanager
+def _resolve_ocr_runtime():
     if fitz is None:
         _fail("PDF renderer is unavailable.")
     if getattr(fitz, "VersionBind", None) != PYMUPDF_VERSION:
         _fail("PDF renderer version does not match the tested contract.")
+    if not hasattr(os, "fork") or not hasattr(os, "setsid"):
+        _fail("Bounded PDF page workers are unavailable.")
     binary = shutil.which(TESSERACT_BINARY)
     if binary is None:
         _fail("OCR backend is unavailable.")
@@ -281,46 +393,66 @@ def _resolve_ocr_runtime() -> str:
         raise ValidationError("OCR backend version output is malformed.") from exc
     if not version_lines or version_lines[0] != f"tesseract {TESSERACT_VERSION}":
         _fail("OCR backend version does not match the tested contract.")
-    return binary
+
+    traineddata = _read_pinned_traineddata(_traineddata_source_path(binary))
+    with tempfile.TemporaryDirectory(prefix="docsem-pinned-tessdata-") as temporary_root:
+        root = Path(temporary_root)
+        root.chmod(0o700)
+        controlled_model = root / f"{OCR_LANGUAGE}.traineddata"
+        with controlled_model.open("xb") as output:
+            output.write(traineddata)
+        controlled_model.chmod(0o600)
+        yield OCRRuntime(
+            binary=binary,
+            tessdata_root=root,
+            traineddata_sha256=TESSERACT_TRAINEDDATA_SHA256,
+        )
 
 
-def _ocr_headers_from_raster(raster: bytes, binary: str) -> set[str]:
+def _ocr_headers_from_raster(
+    raster: bytes,
+    runtime: OCRRuntime,
+    temporary_root: Path,
+) -> set[str]:
     if len(raster) > MAX_RASTER_BYTES:
         _fail("Rendered page image exceeds its size limit.")
-    with tempfile.TemporaryDirectory(prefix="docsem-ocr-page-") as temporary_root:
-        root = Path(temporary_root)
-        raster_path = root / "page.png"
-        output_base = root / "ocr"
-        stdout_path = root / "stdout"
-        stderr_path = root / "stderr"
-        raster_path.write_bytes(raster)
-        raster_path.chmod(0o600)
-        return_code = _run_bounded_process(
-            [
-                binary,
-                str(raster_path),
-                str(output_base),
-                "--dpi",
-                str(RENDER_DPI),
-                "--psm",
-                str(OCR_PAGE_SEGMENTATION_MODE),
-                "-l",
-                OCR_LANGUAGE,
-            ],
-            stdout_path=stdout_path,
-            stderr_path=stderr_path,
-            timeout_seconds=OCR_TIMEOUT_SECONDS,
-            max_file_bytes=max(MAX_OCR_OUTPUT_BYTES, MAX_SUBPROCESS_LOG_BYTES),
-        )
-        if return_code != 0:
-            _fail("OCR backend rejected a rendered page.")
-        payload = _read_bounded_regular_file(
-            output_base.with_suffix(".txt"),
-            MAX_OCR_OUTPUT_BYTES,
-            "OCR output",
-        )
-        _read_bounded_regular_file(stdout_path, MAX_SUBPROCESS_LOG_BYTES, "OCR standard output")
-        _read_bounded_regular_file(stderr_path, MAX_SUBPROCESS_LOG_BYTES, "OCR diagnostics")
+    raster_path = temporary_root / "page.png"
+    output_base = temporary_root / "ocr"
+    stdout_path = temporary_root / "stdout"
+    stderr_path = temporary_root / "stderr"
+    with raster_path.open("xb") as output:
+        output.write(raster)
+    raster_path.chmod(0o600)
+    return_code = _run_bounded_process(
+        [
+            runtime.binary,
+            str(raster_path),
+            str(output_base),
+            "--tessdata-dir",
+            str(runtime.tessdata_root),
+            "--dpi",
+            str(RENDER_DPI),
+            "--psm",
+            str(OCR_PAGE_SEGMENTATION_MODE),
+            "-l",
+            OCR_LANGUAGE,
+        ],
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        timeout_seconds=OCR_TIMEOUT_SECONDS,
+        max_file_bytes=max(MAX_OCR_OUTPUT_BYTES, MAX_SUBPROCESS_LOG_BYTES),
+        tessdata_root=runtime.tessdata_root,
+        isolated_process_group=False,
+    )
+    if return_code != 0:
+        _fail("OCR backend rejected a rendered page.")
+    payload = _read_bounded_regular_file(
+        output_base.with_suffix(".txt"),
+        MAX_OCR_OUTPUT_BYTES,
+        "OCR output",
+    )
+    _read_bounded_regular_file(stdout_path, MAX_SUBPROCESS_LOG_BYTES, "OCR standard output")
+    _read_bounded_regular_file(stderr_path, MAX_SUBPROCESS_LOG_BYTES, "OCR diagnostics")
     try:
         text = payload.decode("utf-8", errors="strict")
     except UnicodeDecodeError as exc:
@@ -338,7 +470,233 @@ def _ocr_headers_from_raster(raster: bytes, binary: str) -> set[str]:
     }
 
 
-def _render_visible_pdf_evidence_blocks(path: Path, binary: str) -> set[str]:
+def _set_page_worker_limit(limit: int, value: int) -> None:
+    _, hard = resource.getrlimit(limit)
+    bounded = value if hard == resource.RLIM_INFINITY else min(value, hard)
+    resource.setrlimit(limit, (bounded, bounded))
+
+
+def _apply_page_worker_limits() -> None:
+    """Constrain renderer and nested OCR work before touching the PDF."""
+    _set_page_worker_limit(resource.RLIMIT_CPU, PAGE_WORKER_CPU_SECONDS)
+    _set_page_worker_limit(resource.RLIMIT_FSIZE, MAX_RASTER_BYTES)
+    _set_page_worker_limit(resource.RLIMIT_NOFILE, PAGE_WORKER_OPEN_FILES)
+    _set_page_worker_limit(resource.RLIMIT_CORE, 0)
+
+
+def _silence_page_worker(result_fd: int) -> None:
+    """Keep renderer/OCR diagnostics private and close unrelated descriptors."""
+    devnull = os.open(os.devnull, os.O_WRONLY | os.O_CLOEXEC)
+    try:
+        os.dup2(devnull, 1)
+        os.dup2(devnull, 2)
+    finally:
+        os.close(devnull)
+    max_fd = min(int(os.sysconf("SC_OPEN_MAX")), 4096)
+    for descriptor in range(3, max_fd):
+        if descriptor == result_fd:
+            continue
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+
+
+def _write_all(descriptor: int, payload: bytes) -> None:
+    offset = 0
+    while offset < len(payload):
+        written = os.write(descriptor, payload[offset:])
+        if written <= 0:
+            raise OSError("page worker result pipe closed")
+        offset += written
+
+
+def _render_and_ocr_page(
+    path: Path,
+    page_number: int,
+    runtime: OCRRuntime,
+    required_blocks: tuple[str, ...],
+    temporary_root: Path,
+) -> tuple[int, bytes]:
+    """Run the complete bounded page workflow inside its worker."""
+    with fitz.open(str(path)) as document:
+        if document.needs_pass:
+            _fail("PDF is encrypted and cannot be inspected.")
+        if type(document.page_count) is not int or not 0 < document.page_count <= MAX_PAGES:
+            _fail("PDF page count exceeds its limit.")
+        if page_number < 0 or page_number >= document.page_count:
+            _fail("PDF page selection is invalid.")
+        page = document.load_page(page_number)
+        width_points = float(page.rect.width)
+        height_points = float(page.rect.height)
+        if (
+            not math.isfinite(width_points)
+            or not math.isfinite(height_points)
+            or width_points <= 0
+            or height_points <= 0
+            or width_points > MAX_PAGE_WIDTH_POINTS
+            or height_points > MAX_PAGE_HEIGHT_POINTS
+        ):
+            _fail("PDF page dimensions exceed their limits.")
+        expected_width = math.ceil(width_points * RENDER_DPI / 72)
+        expected_height = math.ceil(height_points * RENDER_DPI / 72)
+        expected_pixels = expected_width * expected_height
+        if expected_pixels > MAX_RENDER_PIXELS_PER_PAGE:
+            _fail("PDF raster allocation exceeds its limit.")
+        pixmap = page.get_pixmap(
+            dpi=RENDER_DPI,
+            colorspace=fitz.csGRAY,
+            alpha=False,
+        )
+        if (
+            type(pixmap.width) is not int
+            or type(pixmap.height) is not int
+            or pixmap.width <= 0
+            or pixmap.height <= 0
+            or pixmap.width * pixmap.height > MAX_RENDER_PIXELS_PER_PAGE
+        ):
+            _fail("PDF renderer produced an invalid page image.")
+        raster = pixmap.tobytes("png")
+    headers = _ocr_headers_from_raster(raster, runtime, temporary_root)
+    return expected_pixels, bytes(block in headers for block in required_blocks)
+
+
+def _terminate_page_worker(pid: int, *, child_already_reaped: bool = False) -> None:
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except OSError:
+        if not child_already_reaped:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+    if not child_already_reaped:
+        try:
+            os.waitpid(pid, 0)
+        except ChildProcessError:
+            pass
+
+
+def _wait_for_page_worker(
+    pid: int,
+    result_fd: int,
+    max_result_bytes: int,
+) -> tuple[bytes, int]:
+    """Collect one fixed-size result without permitting an unbounded wait."""
+    os.set_blocking(result_fd, False)
+    deadline = time.monotonic() + PAGE_WORKFLOW_TIMEOUT_SECONDS
+    payload = bytearray()
+    status = None
+    eof = False
+    while status is None or not eof:
+        while not eof and len(payload) <= max_result_bytes:
+            try:
+                chunk = os.read(result_fd, max_result_bytes + 1 - len(payload))
+            except BlockingIOError:
+                break
+            if not chunk:
+                eof = True
+                break
+            payload.extend(chunk)
+        if len(payload) > max_result_bytes:
+            _terminate_page_worker(pid)
+            _fail("PDF page worker returned an oversized result.")
+        if status is None:
+            try:
+                waited_pid, child_status = os.waitpid(pid, os.WNOHANG)
+            except ChildProcessError:
+                _fail("PDF page worker state is invalid.")
+            if waited_pid == pid:
+                status = child_status
+        if status is not None and eof:
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            _terminate_page_worker(pid)
+            _fail("PDF page workflow exceeded its time limit.")
+        select.select(
+            [] if eof else [result_fd],
+            [],
+            [],
+            min(remaining, 0.01),
+        )
+    return bytes(payload), status
+
+
+def _run_bounded_page_workflow(
+    path: Path,
+    page_number: int,
+    runtime: OCRRuntime,
+    required_blocks: tuple[str, ...],
+) -> tuple[int, bytes]:
+    expected_result_bytes = _PAGE_RESULT_HEADER.size + len(required_blocks)
+    with tempfile.TemporaryDirectory(prefix="docsem-ocr-page-") as temporary_root:
+        root = Path(temporary_root)
+        root.chmod(0o700)
+        result_read_fd, result_write_fd = os.pipe()
+        try:
+            pid = os.fork()
+        except OSError as exc:
+            os.close(result_read_fd)
+            os.close(result_write_fd)
+            raise ValidationError("PDF page worker could not start safely.") from exc
+        if pid == 0:
+            os.close(result_read_fd)
+            try:
+                os.setsid()
+                _silence_page_worker(result_write_fd)
+                _apply_page_worker_limits()
+                pixel_count, flags = _render_and_ocr_page(
+                    path,
+                    page_number,
+                    runtime,
+                    required_blocks,
+                    root,
+                )
+                result = _PAGE_RESULT_HEADER.pack(pixel_count) + flags
+                if len(result) != expected_result_bytes:
+                    os._exit(71)
+                _write_all(result_write_fd, result)
+                os.close(result_write_fd)
+                os._exit(0)
+            except BaseException:
+                try:
+                    os.close(result_write_fd)
+                except OSError:
+                    pass
+                os._exit(70)
+
+        os.close(result_write_fd)
+        try:
+            try:
+                payload, status = _wait_for_page_worker(
+                    pid,
+                    result_read_fd,
+                    expected_result_bytes,
+                )
+            except ValidationError:
+                raise
+            except BaseException as exc:
+                _terminate_page_worker(pid)
+                raise ValidationError("PDF page worker could not be supervised safely.") from exc
+        finally:
+            os.close(result_read_fd)
+        if (
+            not os.WIFEXITED(status)
+            or os.WEXITSTATUS(status) != 0
+            or len(payload) != expected_result_bytes
+        ):
+            _terminate_page_worker(pid, child_already_reaped=True)
+            _fail("PDF page workflow failed safely.")
+        pixel_count = _PAGE_RESULT_HEADER.unpack(payload[: _PAGE_RESULT_HEADER.size])[0]
+        return pixel_count, payload[_PAGE_RESULT_HEADER.size :]
+
+
+def _render_visible_pdf_evidence_blocks(
+    path: Path,
+    runtime: OCRRuntime,
+    required_blocks: set[str],
+) -> set[str]:
     try:
         path_stat = path.lstat()
         if not stat.S_ISREG(path_stat.st_mode) or path_stat.st_size > MAX_PDF_BYTES:
@@ -346,49 +704,36 @@ def _render_visible_pdf_evidence_blocks(path: Path, binary: str) -> set[str]:
         with path.open("rb") as source:
             if source.read(5) != b"%PDF-":
                 _fail("PDF is unreadable.")
-        matched_blocks = set()
+        ordered_blocks = tuple(sorted(required_blocks))
+        matched = bytearray(len(ordered_blocks))
         with fitz.open(str(path)) as document:
             if document.needs_pass:
                 _fail("PDF is encrypted and cannot be inspected.")
             if type(document.page_count) is not int or not 0 < document.page_count <= MAX_PAGES:
                 _fail("PDF page count exceeds its limit.")
-            total_pixels = 0
-            for page in document:
-                width_points = float(page.rect.width)
-                height_points = float(page.rect.height)
-                if (
-                    not math.isfinite(width_points)
-                    or not math.isfinite(height_points)
-                    or width_points <= 0
-                    or height_points <= 0
-                    or width_points > MAX_PAGE_WIDTH_POINTS
-                    or height_points > MAX_PAGE_HEIGHT_POINTS
-                ):
-                    _fail("PDF page dimensions exceed their limits.")
-                expected_width = math.ceil(width_points * RENDER_DPI / 72)
-                expected_height = math.ceil(height_points * RENDER_DPI / 72)
-                expected_pixels = expected_width * expected_height
-                total_pixels += expected_pixels
-                if (
-                    expected_pixels > MAX_RENDER_PIXELS_PER_PAGE
-                    or total_pixels > MAX_RENDER_PIXELS_TOTAL
-                ):
-                    _fail("PDF raster allocation exceeds its limit.")
-                pixmap = page.get_pixmap(
-                    dpi=RENDER_DPI,
-                    colorspace=fitz.csGRAY,
-                    alpha=False,
-                )
-                if (
-                    type(pixmap.width) is not int
-                    or type(pixmap.height) is not int
-                    or pixmap.width <= 0
-                    or pixmap.height <= 0
-                    or pixmap.width * pixmap.height > MAX_RENDER_PIXELS_PER_PAGE
-                ):
-                    _fail("PDF renderer produced an invalid page image.")
-                matched_blocks.update(_ocr_headers_from_raster(pixmap.tobytes("png"), binary))
-        return matched_blocks
+            page_count = document.page_count
+        total_pixels = 0
+        for page_number in range(page_count):
+            expected_pixels, flags = _run_bounded_page_workflow(
+                path,
+                page_number,
+                runtime,
+                ordered_blocks,
+            )
+            if expected_pixels > MAX_RENDER_PIXELS_PER_PAGE or len(flags) != len(ordered_blocks):
+                _fail("PDF page worker returned an invalid result.")
+            total_pixels += expected_pixels
+            if total_pixels > MAX_RENDER_PIXELS_TOTAL:
+                _fail("PDF raster allocation exceeds its limit.")
+            for index, present in enumerate(flags):
+                if present not in (0, 1):
+                    _fail("PDF page worker returned an invalid result.")
+                matched[index] = matched[index] or present
+        return {
+            block
+            for index, block in enumerate(ordered_blocks)
+            if matched[index]
+        }
     except ValidationError:
         raise
     except Exception as exc:
@@ -396,7 +741,6 @@ def _render_visible_pdf_evidence_blocks(path: Path, binary: str) -> set[str]:
 
 
 def _validate_pdfs(source_root: Path, tasks: dict[str, dict], labels: dict[str, dict]) -> tuple[Path, ...]:
-    ocr_binary = _resolve_ocr_runtime()
     documents_root = source_root / "documents"
     if not documents_root.is_dir():
         _fail("Documents directory is absent.")
@@ -407,12 +751,17 @@ def _validate_pdfs(source_root: Path, tasks: dict[str, dict], labels: dict[str, 
     if set(tasks) != pdf_ids:
         _fail("Task IDs and PDF stems are not a bijection.")
     paths_by_id = {path.stem: path for path in pdf_paths}
-    for instance_id in sorted(tasks):
-        required_blocks = set(labels[instance_id]["evidence"])
-        if not required_blocks.issubset(
-            _render_visible_pdf_evidence_blocks(paths_by_id[instance_id], ocr_binary)
-        ):
-            _fail("PDF does not visibly contain every evidence block ID.")
+    with _resolve_ocr_runtime() as runtime:
+        for instance_id in sorted(tasks):
+            required_blocks = set(labels[instance_id]["evidence"])
+            if not required_blocks.issubset(
+                _render_visible_pdf_evidence_blocks(
+                    paths_by_id[instance_id],
+                    runtime,
+                    required_blocks,
+                )
+            ):
+                _fail("PDF does not visibly contain every evidence block ID.")
     return pdf_paths
 
 
