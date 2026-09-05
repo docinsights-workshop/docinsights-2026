@@ -6,6 +6,7 @@ import datetime as dt
 import hashlib
 import json
 import re
+import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
@@ -30,6 +31,13 @@ from test_policy import (
 
 TEST_UNAVAILABLE = "Test submission is temporarily unavailable."
 OPAQUE_INSTANCE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+MAX_TEST_UPLOAD_BYTES = 10 * 1024 * 1024
+MAX_TEST_ROWS = 10_000
+MAX_TEST_ANSWER_CHARACTERS = 4_096
+MAX_TEST_EVIDENCE_IDS = 128
+MAX_TEST_EVIDENCE_ID_CHARACTERS = 256
+TEST_SCORING_ACQUISITION_TIMEOUT_SECONDS = 1.0
+TEST_SCORING_SEMAPHORE = threading.BoundedSemaphore(value=2)
 
 
 class SubmissionSplit(str, Enum):
@@ -170,11 +178,15 @@ class SubmissionService:
         test_store,
         test_config_loader: Callable,
         now_provider: Callable[[], dt.datetime] | None = None,
+        scoring_semaphore=None,
     ):
         self.validation_submitter = validation_submitter
         self.test_store = test_store
         self.test_config_loader = test_config_loader
         self.now_provider = now_provider or (lambda: dt.datetime.now(dt.timezone.utc))
+        self.scoring_semaphore = (
+            TEST_SCORING_SEMAPHORE if scoring_semaphore is None else scoring_semaphore
+        )
 
     def submit_for_split(self, split, file_obj, metadata, oauth_profile) -> dict:
         selected = _split(split)
@@ -185,11 +197,11 @@ class SubmissionService:
     def _submit_test(self, file_obj, metadata, oauth_profile) -> dict:
         identity = _oauth_identity(oauth_profile)
         try:
-            now = self.now_provider()
-            config = self.test_config_loader(now)
+            request_now = self.now_provider()
+            config = self.test_config_loader(request_now)
             if not isinstance(config, TrustedTestConfig):
                 raise ValueError()
-            config.policy.require_open(now)
+            config.policy.require_open(self.now_provider())
             server_metadata = _test_metadata(metadata, config)
         except Exception:
             raise SubmissionError(TEST_UNAVAILABLE) from None
@@ -197,11 +209,37 @@ class SubmissionService:
         if file_obj is None:
             raise SubmissionError("Upload a JSONL submission file.")
         try:
-            text = Path(file_obj.name).read_text(encoding="utf-8")
+            upload_path = Path(file_obj.name)
+            if upload_path.stat().st_size > MAX_TEST_UPLOAD_BYTES:
+                raise ValueError()
+            text = upload_path.read_text(encoding="utf-8")
             predictions = parse_submission_text(text)
+            _validate_test_prediction_bounds(predictions)
+        except Exception:
+            raise SubmissionError("Test submission could not be accepted.") from None
+
+        try:
+            existing = self.test_store.find_exact_attempt(
+                identity,
+                server_metadata,
+                predictions,
+            )
+        except Exception:
+            raise SubmissionError(TEST_UNAVAILABLE) from None
+        if existing is not None:
+            return _attempt_response(existing)
+
+        acquired = self.scoring_semaphore.acquire(
+            timeout=TEST_SCORING_ACQUISITION_TIMEOUT_SECONDS
+        )
+        if not acquired:
+            raise SubmissionError("Test submission could not be accepted.")
+        try:
             metrics = score_predictions(predictions, config.labels)
         except Exception:
             raise SubmissionError("Test submission could not be accepted.") from None
+        finally:
+            self.scoring_semaphore.release()
 
         try:
             receipt = self.test_store.submit(
@@ -209,14 +247,19 @@ class SubmissionService:
                 server_metadata,
                 predictions,
                 metrics,
-                now,
             )
             if not receipt.accepted:
                 return {
                     "accepted": False,
                     "score": "withheld",
                     "message": "Test attempt limit reached.",
+                    "attempts": [
+                        _history_response(attempt)
+                        for attempt in receipt.existing_attempts
+                    ],
                 }
+            if receipt.matched_attempt is not None:
+                return _attempt_response(receipt.matched_attempt)
             response = participant_test_response(
                 receipt.attempt,
                 metrics,
@@ -273,14 +316,39 @@ def _test_metadata(metadata, config: TrustedTestConfig) -> dict:
 
 
 def _history_response(attempt) -> dict:
+    response = _attempt_response(attempt)
+    response["submission_name"] = str(attempt.get("submission_name") or "")
+    return response
+
+
+def _attempt_response(attempt) -> dict:
     if not isinstance(attempt, Mapping):
         raise ValueError()
     attempt_number = attempt.get("attempt_number")
     receipt = attempt.get("submission_id")
     response = participant_test_response(attempt_number, attempt.get("metrics"), receipt)
-    response["submission_name"] = str(attempt.get("submission_name") or "")
     response["accepted_at"] = str(attempt.get("submitted_at") or "")
     return response
+
+
+def _validate_test_prediction_bounds(rows) -> None:
+    if not isinstance(rows, list) or len(rows) > MAX_TEST_ROWS:
+        raise ValueError()
+    for row in rows:
+        if not isinstance(row, Mapping):
+            raise ValueError()
+        answer = row.get("answer")
+        if not isinstance(answer, str) or len(answer) > MAX_TEST_ANSWER_CHARACTERS:
+            raise ValueError()
+        evidence = row.get("evidence")
+        if not isinstance(evidence, list) or len(evidence) > MAX_TEST_EVIDENCE_IDS:
+            raise ValueError()
+        if any(
+            not isinstance(identifier, str)
+            or len(identifier) > MAX_TEST_EVIDENCE_ID_CHARACTERS
+            for identifier in evidence
+        ):
+            raise ValueError()
 
 
 def _parse_utc(value) -> dt.datetime:

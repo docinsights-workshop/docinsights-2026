@@ -6,8 +6,8 @@ import datetime as dt
 import hashlib
 import json
 import uuid
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from huggingface_hub import CommitOperationAdd
@@ -37,6 +37,8 @@ class TestReceipt:
     attempt: int | None
     submission_id: str
     accepted_at: str | None
+    existing_attempts: tuple[dict, ...] = ()
+    matched_attempt: dict | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -70,13 +72,15 @@ class HubTestStore:
         *,
         release_config_path: str | None = None,
         gold_config_path: str | None = None,
+        now_provider: Callable[[], dt.datetime] | None = None,
     ):
         self.api = api
         self.repo_id = str(repo_id or "").strip()
         self.release_config_path = str(release_config_path or "").strip()
         self.gold_config_path = str(gold_config_path or "").strip()
+        self.now_provider = now_provider or (lambda: dt.datetime.now(dt.timezone.utc))
 
-    def submit(self, identity, metadata, predictions, metrics, now) -> TestReceipt:
+    def submit(self, identity, metadata, predictions, metrics) -> TestReceipt:
         try:
             key = _complete_identity_key(identity)
             normalized_metadata = _submission_metadata(metadata)
@@ -89,7 +93,8 @@ class HubTestStore:
         for _ in range(MAX_COMMIT_ATTEMPTS):
             try:
                 snapshot = self._load_snapshot(key)
-                _require_open(snapshot.policy, now)
+                plan_now = self.now_provider()
+                _require_open(snapshot.policy, plan_now)
                 _verify_release(snapshot, normalized_metadata)
                 submission_hash = canonical_submission_hash(
                     normalized_predictions,
@@ -101,10 +106,22 @@ class HubTestStore:
                 if existing is not None:
                     return _accepted_receipt(existing)
                 if len(snapshot.attempts) >= snapshot.policy.max_attempts:
-                    return TestReceipt(False, None, "", None)
+                    return TestReceipt(
+                        False,
+                        None,
+                        "",
+                        None,
+                        tuple(_json_copy(snapshot.attempts)),
+                    )
 
                 attempt_number = len(snapshot.attempts) + 1
-                accepted_at = _accepted_at(now)
+
+                # Take a new authoritative instant for every CAS attempt. A request
+                # that was open while planning but crosses the deadline must never
+                # materialize an attempt record or reach create_commit().
+                commit_now = self.now_provider()
+                _require_open(snapshot.policy, commit_now)
+                accepted_at = _accepted_at(commit_now)
                 record = _attempt_record(
                     identity=identity,
                     key=key,
@@ -128,9 +145,6 @@ class HubTestStore:
                     best,
                 )
 
-                # The server clock is authoritative and the window is checked again
-                # immediately before the exact-parent write.
-                _require_open(snapshot.policy, now)
                 operations = _commit_operations(
                     key,
                     candidate_id,
@@ -177,6 +191,29 @@ class HubTestStore:
             ]
         except Exception:
             raise TestStoreError("Test submission history is temporarily unavailable.") from None
+
+    def find_exact_attempt(self, identity, metadata, predictions) -> dict | None:
+        """Return an immutable matching attempt before any repeat scoring occurs."""
+
+        try:
+            key = _complete_identity_key(identity)
+            normalized_metadata = _submission_metadata(metadata)
+            normalized_predictions = _json_copy(predictions)
+        except Exception:
+            raise TestStoreError("Test submission could not be accepted.") from None
+        try:
+            snapshot = self._load_snapshot(key)
+            _verify_release(snapshot, normalized_metadata)
+            submission_hash = canonical_submission_hash(
+                normalized_predictions,
+                "test",
+                snapshot.policy.release_id,
+                identity,
+            )
+            existing = _find_submission(snapshot.attempts, submission_hash)
+            return _json_copy(existing) if existing is not None else None
+        except Exception:
+            raise TestStoreError("Test submission is temporarily unavailable.") from None
 
     def _load_snapshot(self, key: str) -> _Snapshot:
         self._require_config_paths()
@@ -550,6 +587,7 @@ def _accepted_receipt(record) -> TestReceipt:
         int(record["attempt_number"]),
         str(record["submission_id"]),
         str(record["submitted_at"]),
+        matched_attempt=_json_copy(record),
     )
 
 

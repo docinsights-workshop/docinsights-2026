@@ -1,5 +1,7 @@
+import datetime as dt
 import json
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import gradio as gr
@@ -108,6 +110,58 @@ class PortalBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(validation_updates[2]["value"], "Validate and score")
         self.assertTrue(validation_updates[2]["interactive"])
         self.assertFalse(validation_updates[3]["visible"])
+
+    async def test_test_ui_requires_write_token_and_current_open_server_window(self):
+        policy = app.TestReleasePolicy(
+            release_id="configured-release",
+            task_manifest_sha256="a" * 64,
+            gold_sha256="b" * 64,
+            open_at=dt.datetime(2026, 9, 5, tzinfo=dt.timezone.utc),
+            close_at=dt.datetime(2026, 9, 10, tzinfo=dt.timezone.utc),
+            enabled=True,
+        )
+        cases = (
+            (
+                "missing write token",
+                None,
+                dt.datetime(2026, 9, 6, tzinfo=dt.timezone.utc),
+                False,
+            ),
+            (
+                "closed server window",
+                "server-write-token",
+                policy.close_at,
+                False,
+            ),
+            (
+                "open server window",
+                "server-write-token",
+                dt.datetime(2026, 9, 6, tzinfo=dt.timezone.utc),
+                True,
+            ),
+        )
+        for name, write_token, now, expected_open in cases:
+            with self.subTest(name=name):
+                with (
+                    patch.object(app, "TEST_SUBMISSIONS_ENABLED", True),
+                    patch.object(app, "WRITE_TOKEN", write_token),
+                    patch.object(
+                        app,
+                        "TEST_DEPLOYMENT",
+                        SimpleNamespace(expected_policy=policy),
+                    ),
+                    patch.object(app, "_server_now", return_value=now, create=True),
+                ):
+                    response = await self.invoke("select_split", [app.TEST_SPLIT_LABEL])
+
+                updates = response["data"]
+                self.assertEqual(updates[2]["interactive"], expected_open)
+                self.assertIn(
+                    "Test submissions are open."
+                    if expected_open
+                    else "Test submissions are not open yet.",
+                    updates[0]["value"],
+                )
 
     async def test_validation_endpoint_remains_anonymous_and_uses_legacy_metadata(self):
         captured = {}

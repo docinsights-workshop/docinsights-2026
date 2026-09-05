@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import json
+import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -270,6 +272,87 @@ def test_test_leakage_scanner_rejects_every_forbidden_class():
             raise AssertionError("scanner accepted an exact configured secret path")
 
 
+def test_nondefault_secret_paths_stay_out_of_real_module_and_api_rendering():
+    release_path = "vault-release/control/release-override.json"
+    gold_path = "vault-gold/control/labels-override.jsonl"
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "TEST_SUBMISSIONS_ENABLED": "true",
+            "TEST_PUBLIC_LEADERBOARD_ENABLED": "false",
+            "TEST_RELEASE_ID": "configured-audit-release",
+            "TEST_TASK_MANIFEST_SHA256": "a" * 64,
+            "TEST_GOLD_SHA256": "b" * 64,
+            "TEST_OPEN_AT": "2026-01-01T00:00:00Z",
+            "TEST_CLOSE_AT": "2027-01-01T00:00:00Z",
+            "TEST_RELEASE_CONFIG_PATH": release_path,
+            "TEST_GOLD_CONFIG_PATH": gold_path,
+            "TEST_MAX_ATTEMPTS": "3",
+            "HF_WRITE_TOKEN": "audit-only-write-token",
+            "SUBMISSIONS_REPO_ID": "",
+        }
+    )
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import json
+from fastapi.testclient import TestClient
+import app
+
+app._load_leaderboard_rows = lambda: []
+client = TestClient(app.demo.app, raise_server_exceptions=False)
+root = client.get('/')
+config = client.get('/config')
+app.demo.app.api_info = None
+info = client.get('/info')
+print(json.dumps({
+    'enabled': app.TEST_DEPLOYMENT.submissions_enabled,
+    'paths': [
+        app.TEST_DEPLOYMENT.release_config_path,
+        app.TEST_DEPLOYMENT.gold_config_path,
+    ],
+    'statuses': [root.status_code, config.status_code, info.status_code],
+    'root': root.text,
+    'config': config.text,
+    'api': info.text,
+}, sort_keys=True))
+""",
+        ],
+        cwd=ROOT / "competition" / "hf-space",
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if probe.returncode != 0:
+        raise AssertionError(f"configured rendering probe failed: {probe.stderr[-500:]}")
+    rendered = json.loads(probe.stdout)
+    assert rendered["enabled"] is True
+    assert rendered["paths"] == [release_path, gold_path]
+    assert rendered["statuses"] == [200, 200, 200]
+
+    source = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted((ROOT / "competition" / "hf-space").glob("*.py"))
+        if not path.name.startswith("test_")
+    )
+    assert_no_test_leakage(
+        source,
+        rendered["config"],
+        rendered["api"],
+        {"attempt": 2, "score": "withheld"},
+        "Test submission is temporarily unavailable.",
+        configured_secret_paths=tuple(rendered["paths"]),
+    )
+    for secret in (*rendered["paths"], "audit-only-write-token"):
+        assert secret not in rendered["root"]
+        assert secret not in rendered["config"]
+        assert secret not in rendered["api"]
+
+
 def main():
     test_numeric_equivalence()
     test_perfect_train_submission_sample()
@@ -278,6 +361,7 @@ def main():
     test_missing_ids_are_rejected()
     test_disabled_test_deployment_has_no_release_specific_leakage()
     test_test_leakage_scanner_rejects_every_forbidden_class()
+    test_nondefault_secret_paths_stay_out_of_real_module_and_api_rendering()
     print("competition scoring tests passed")
 
 

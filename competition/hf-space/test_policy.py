@@ -36,13 +36,7 @@ class OAuthIdentity:
         username = str(data.get("preferred_username") or "").strip()
         email = str(data.get("email") or "").strip().casefold()
         verified = data.get("email_verified")
-        if verified is not None and str(verified).strip().casefold() in {
-            "false",
-            "0",
-            "no",
-        }:
-            email = ""
-        if not sub or not username or not email:
+        if not sub or not username or not email or verified is not True:
             raise TestPolicyError("Test submission requires a verified email and HF identity.")
         return cls(sub=sub, username=username, email=email)
 

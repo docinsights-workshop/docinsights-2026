@@ -79,6 +79,24 @@ class TestPolicyTests(unittest.TestCase):
                 }
             )
 
+    def test_profile_requires_email_verified_to_be_explicitly_true(self):
+        for profile in (
+            {
+                "sub": "s",
+                "preferred_username": "u",
+                "email": "a@example.org",
+            },
+            {
+                "sub": "s",
+                "preferred_username": "u",
+                "email": "a@example.org",
+                "email_verified": "true",
+            },
+        ):
+            with self.subTest(profile=profile):
+                with self.assertRaisesRegex(TestPolicyError, "verified email"):
+                    OAuthIdentity.from_profile(profile)
+
     def test_active_policy_requires_complete_utc_window(self):
         policy = TestReleasePolicy(
             release_id="release-1",

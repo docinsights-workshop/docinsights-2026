@@ -940,11 +940,29 @@ def my_test_submissions(oauth_profile: gr.OAuthProfile | None):
     )
 
 
+def _server_now():
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def _test_ui_open() -> bool:
+    if not TEST_SUBMISSIONS_ENABLED or not str(WRITE_TOKEN or "").strip():
+        return False
+    policy = TEST_DEPLOYMENT.expected_policy
+    if policy is None:
+        return False
+    try:
+        policy.require_open(_server_now())
+    except Exception:
+        return False
+    return True
+
+
 def split_ui(split_label):
     if split_label == TEST_SPLIT_LABEL:
+        test_open = _test_ui_open()
         availability = (
             "Test submissions are open."
-            if TEST_SUBMISSIONS_ENABLED
+            if test_open
             else "Test submissions are not open yet."
         )
         return (
@@ -960,7 +978,7 @@ def split_ui(split_label):
             gr.update(visible=False),
             gr.update(
                 value="Submit test predictions",
-                interactive=TEST_SUBMISSIONS_ENABLED,
+                interactive=test_open,
             ),
             gr.update(visible=True),
         )
