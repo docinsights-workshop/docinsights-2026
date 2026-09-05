@@ -13,7 +13,10 @@ from pathlib import Path
 import re
 from typing import Iterable
 
-from pypdf import PdfReader
+try:
+    import fitz
+except ImportError:
+    fitz = None
 
 
 SCHEMA_VERSION = 1
@@ -118,15 +121,28 @@ def _validate_labels(rows: list[dict]) -> dict[str, dict]:
     return labels
 
 
-def _read_pdf_text(path: Path) -> str:
+def _render_visible_pdf_text(path: Path) -> str:
+    if fitz is None:
+        _fail("PDF renderer is unavailable.")
     try:
         with path.open("rb") as source:
             if source.read(5) != b"%PDF-":
                 _fail("PDF is unreadable.")
-        reader = PdfReader(str(path))
-        if reader.is_encrypted:
-            _fail("PDF is encrypted and cannot be inspected.")
-        return "\n".join(page.extract_text() or "" for page in reader.pages)
+        visible_runs = []
+        with fitz.open(str(path)) as document:
+            if document.needs_pass:
+                _fail("PDF is encrypted and cannot be inspected.")
+            for page in document:
+                pixmap = page.get_pixmap(alpha=False)
+                if pixmap.width <= 0 or pixmap.height <= 0:
+                    _fail("PDF renderer produced an invalid page image.")
+                for trace in page.get_texttrace():
+                    if trace.get("type") not in {0, 1, 2} or float(trace.get("opacity", 0)) <= 0:
+                        continue
+                    visible_runs.append("".join(chr(character[0]) for character in trace["chars"]))
+        if not visible_runs:
+            _fail("PDF contains no renderer-visible text.")
+        return "\n".join(visible_runs)
     except ValidationError:
         raise
     except Exception as exc:
@@ -154,7 +170,7 @@ def _validate_pdfs(source_root: Path, tasks: dict[str, dict], labels: dict[str, 
         _fail("Task IDs and PDF stems are not a bijection.")
     paths_by_id = {path.stem: path for path in pdf_paths}
     for instance_id in sorted(tasks):
-        text = _read_pdf_text(paths_by_id[instance_id])
+        text = _render_visible_pdf_text(paths_by_id[instance_id])
         if any(not _has_visible_block(text, block_id) for block_id in labels[instance_id]["evidence"]):
             _fail("PDF does not visibly contain every evidence block ID.")
     return pdf_paths

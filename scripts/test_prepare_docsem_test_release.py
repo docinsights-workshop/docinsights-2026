@@ -7,6 +7,7 @@ import unittest
 import zipfile
 from pathlib import Path
 
+import prepare_docsem_test_release as release_module
 from prepare_docsem_test_release import (
     ValidationError,
     build_release_manifest,
@@ -21,9 +22,9 @@ def write_jsonl(path, rows):
     )
 
 
-def write_pdf_with_visible_text(path, text):
+def write_pdf_with_visible_text(path, text, *, rendering_mode=0):
     """Write a tiny self-contained PDF whose text extractor sees ``text``."""
-    content = f"BT /F1 12 Tf 72 720 Td ({text}) Tj ET".encode("ascii")
+    content = f"BT /F1 12 Tf {rendering_mode} Tr 72 720 Td ({text}) Tj ET".encode("ascii")
     objects = (
         b"<< /Type /Catalog /Pages 2 0 R >>",
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
@@ -233,6 +234,30 @@ class PrepareDocsemTestReleaseTests(unittest.TestCase):
         source.labels[0]["evidence"] = ["b99"]
         source.write_labels()
         self.assert_rejected(source)
+
+    def test_rejects_evidence_text_hidden_by_a_nonrendering_pdf_mode(self):
+        """Catches extraction-only checks that mistake invisible text for rendered evidence."""
+        source = self.make_source()
+        write_pdf_with_visible_text(
+            source.root / "documents" / "synthetic-1.pdf",
+            "Synthetic fixture hidden block b01",
+            rendering_mode=3,
+        )
+        self.assert_rejected(source)
+
+    def test_fails_closed_when_the_pdf_renderer_is_unavailable(self):
+        """Catches falling back to extraction-only validation without a renderer."""
+        source = self.make_source()
+        had_renderer = hasattr(release_module, "fitz")
+        original_renderer = getattr(release_module, "fitz", None)
+        release_module.fitz = None
+        try:
+            self.assert_rejected(source)
+        finally:
+            if had_renderer:
+                release_module.fitz = original_renderer
+            else:
+                delattr(release_module, "fitz")
 
     def test_rejects_a_zip_instead_of_an_explicit_source_directory(self):
         """Catches treating an archive as an implicitly selected release source."""
