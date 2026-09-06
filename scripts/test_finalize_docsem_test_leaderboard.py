@@ -23,7 +23,7 @@ from finalize_docsem_test_leaderboard import (
     load_finalization_snapshot,
 )
 from scoring import score_predictions as fixture_score_predictions
-from test_policy import OAuthIdentity, canonical_submission_hash
+from test_policy import TestIdentity, account_key, canonical_submission_hash
 import app as participant_app
 
 
@@ -105,16 +105,35 @@ def attempt(
     submitted_at,
     rows,
     *,
+    identity_kind="huggingface",
     username=None,
+    contact_email=None,
     team="Team",
     submission_name=None,
     overrides=None,
 ):
-    identity = OAuthIdentity(subject, username or subject, f"{subject}@example.org")
-    submission_hash = canonical_submission_hash(
-        rows, "test", "docsem-test-2026", identity
+    hf_username = (
+        username
+        if username is not None
+        else ("Not signed in" if identity_kind == "email" else subject)
     )
-    account = hashlib.sha256(subject.encode()).hexdigest()
+    email = contact_email or (
+        subject if identity_kind == "email" else f"{subject}@example.org"
+    )
+    identity = TestIdentity(
+        identity_kind, subject, hf_username, email, identity_kind == "huggingface"
+    )
+    participant_names = f"Participant {subject}"
+    persisted_submission_name = submission_name or f"submission-{number}"
+    metadata = {
+        "team": team,
+        "participant_names": participant_names,
+        "submission_name": persisted_submission_name,
+    }
+    submission_hash = canonical_submission_hash(
+        rows, "test", "docsem-test-2026", identity, metadata
+    )
+    account = account_key(identity)
     value = {
         "schema_version": 3,
         "split": "test",
@@ -123,17 +142,19 @@ def attempt(
         "gold_sha256": GOLD_SHA,
         "submission_id": submission_id,
         "account_key": account,
-        "hf_subject": subject,
-        "hf_username": username or subject,
-        "verified_email": f"{subject}@example.org",
+        "identity_kind": identity.identity_kind,
+        "identity_subject": identity.identity_subject,
+        "hf_username": identity.hf_username,
+        "contact_email": identity.contact_email,
+        "email_verified": identity.email_verified,
         "scoring_gold_sha256": GOLD_SHA,
         "scoring_private_revision": PRIVATE_REVISION,
         "scoring_public_revision": PUBLIC_REVISION,
         "scoring_public_repo_id": "public/docsem",
         "scoring_task_manifest_path": "test/tasks.jsonl",
         "team": team,
-        "participant_names": f"Participant {subject}",
-        "submission_name": submission_name or f"submission-{number}",
+        "participant_names": participant_names,
+        "submission_name": persisted_submission_name,
         "submitted_at": submitted_at,
         "submission_hash": submission_hash,
         "attempt_number": number,
@@ -712,8 +733,10 @@ class FinalizationPlanTests(unittest.TestCase):
         )
         self.assertEqual(clean["rows"][0]["joint_accuracy"], 1.0)
         injections = (
-            ("verified_email", "private@example.org"),
-            ("hf_subject", "oauth-private-sub"),
+            ("identity_kind", "email"),
+            ("identity_subject", "oauth-private-sub"),
+            ("contact_email", "private@example.org"),
+            ("email_verified", True),
             ("participant_names", "Private Person"),
             ("predictions", [{"answer": "private"}]),
             ("per_example", [{"instance_id": "private"}]),
@@ -742,6 +765,61 @@ class FinalizationPlanTests(unittest.TestCase):
                     audit_public_projection(mutated)
                 with self.assertRaises(participant_app.FinalLeaderboardError):
                     participant_app.final_test_leaderboard_html(mutated)
+
+    def test_anonymous_final_row_uses_only_public_not_signed_in_identity(self):
+        record = attempt(
+            "anonymous@example.org",
+            1,
+            "11111111-1111-4111-8111-111111111111",
+            "2026-09-02T12:00:00Z",
+            predictions(),
+            identity_kind="email",
+            team="Anonymous Team",
+        )
+
+        projection = build_finalization(snapshot((record,)), NOW).public_projection
+
+        self.assertEqual(projection["rows"][0]["hf_username"], "Not signed in")
+        rendered = json.dumps(projection, sort_keys=True)
+        self.assertNotIn("anonymous@example.org", rendered)
+        self.assertNotIn("identity_subject", rendered)
+        self.assertNotIn("contact_email", rendered)
+
+    def test_identity_contract_excludes_legacy_contradictory_or_rebound_records(self):
+        base = attempt(
+            "account-a",
+            1,
+            "11111111-1111-4111-8111-111111111111",
+            "2026-09-02T12:00:00Z",
+            predictions(),
+        )
+        invalid_values = []
+
+        legacy = copy.deepcopy(base.value)
+        legacy["hf_subject"] = legacy.pop("identity_subject")
+        legacy["verified_email"] = legacy.pop("contact_email")
+        invalid_values.append(legacy)
+
+        contradictory = copy.deepcopy(base.value)
+        contradictory["email_verified"] = False
+        invalid_values.append(contradictory)
+
+        wrong_account = copy.deepcopy(base.value)
+        wrong_account["account_key"] = hashlib.sha256(b"account-a").hexdigest()
+        invalid_values.append(wrong_account)
+
+        rebound_metadata = copy.deepcopy(base.value)
+        rebound_metadata["team"] = "Different Team"
+        invalid_values.append(rebound_metadata)
+
+        for value in invalid_values:
+            record = SnapshotRecord.from_value(base.path, value, committed=True)
+            plan = build_finalization(snapshot((record,)), NOW)
+            self.assertEqual(plan.eligible_attempt_count, 0)
+            self.assertEqual(
+                plan.audit_manifest["excluded_attempts"][0]["reason_code"],
+                "malformed",
+            )
 
     def test_v3_joint_metrics_are_exact_and_audited(self):
         record = attempt(
@@ -914,9 +992,11 @@ def hub_files(record):
                 "account_key": account,
                 "attempt_count": 1,
                 "best_submission_id": record.value["submission_id"],
-                "hf_subject": record.value["hf_subject"],
+                "identity_kind": record.value["identity_kind"],
+                "identity_subject": record.value["identity_subject"],
                 "hf_username": record.value["hf_username"],
-                "verified_email": record.value["verified_email"],
+                "contact_email": record.value["contact_email"],
+                "email_verified": record.value["email_verified"],
                 "team": record.value["team"],
                 "participant_names": record.value["participant_names"],
                 "submission_name": record.value["submission_name"],
@@ -1091,9 +1171,11 @@ class LoadAndCommitTests(unittest.TestCase):
             {
                 "attempt_count": 2,
                 "best_submission_id": second.value["submission_id"],
-                "hf_subject": second.value["hf_subject"],
+                "identity_kind": second.value["identity_kind"],
+                "identity_subject": second.value["identity_subject"],
                 "hf_username": second.value["hf_username"],
-                "verified_email": second.value["verified_email"],
+                "contact_email": second.value["contact_email"],
+                "email_verified": second.value["email_verified"],
                 "team": second.value["team"],
                 "participant_names": second.value["participant_names"],
                 "submission_name": second.value["submission_name"],

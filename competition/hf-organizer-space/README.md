@@ -36,3 +36,9 @@ CSV exports are produced server-side from the pinned verified snapshot in a
 mode-0700 temporary directory with mode-0600 files. They include revision and
 digest audit metadata plus allowlisted attempt fields, but never OAuth tokens,
 gold/correct answers, or raw predictions.
+
+The owner-only table, attempt detail, and CSV expose the persisted identity
+kind, private identity subject, displayed Hugging Face username, private contact
+email, and verified-email marker for audit. Email-keyed attempts display
+`Not signed in` as the Hugging Face username. These private identity fields are
+never part of the public provisional or final leaderboard projections.

@@ -37,7 +37,7 @@ from test_organizer_data import (
     TASK_DIGEST,
     fixture_files,
 )
-from test_policy import OAuthIdentity, canonical_submission_hash
+from test_policy import TestIdentity, canonical_submission_hash
 
 
 PRIVATE_REPO = "private/docsem-organizer-ledger"
@@ -353,6 +353,25 @@ assert client.get("/config").status_code == 200
         self.assertEqual(detail["attempt_number"], 2)
         self.assertEqual(detail["joint_accuracy"], 1.0)
         self.assertEqual(
+            {
+                name: detail[name]
+                for name in (
+                    "identity_kind",
+                    "identity_subject",
+                    "hf_username",
+                    "contact_email",
+                    "email_verified",
+                )
+            },
+            {
+                "identity_kind": "huggingface",
+                "identity_subject": "subject-a",
+                "hf_username": "user-a",
+                "contact_email": "user-a@example.org",
+                "email_verified": True,
+            },
+        )
+        self.assertEqual(
             [item["instance_id"] for item in detail["per_example"]],
             ["task-1", "task-2"],
         )
@@ -412,6 +431,7 @@ assert client.get("/config").status_code == 200
         self.assertIn("evaluator_revisions,", text)
         self.assertIn("submission_id,attempt_number,selected_best,excluded", text)
         self.assertIn("joint_accuracy", text)
+        self.assertIn("user-b@example.org", text)
         self.assertIn(ID_B1, text)
         self.assertNotIn(ID_A1, text)
         self.assertNotIn(ID_A2, text)
@@ -431,6 +451,20 @@ assert client.get("/config").status_code == 200
 
         self.assertIn("joint_accuracy", TABLE_FIELDS)
         self.assertIn("Joint Accuracy", TABLE_HEADERS)
+        self.assertIn("Identity subject", TABLE_HEADERS)
+        self.assertIn("Contact email", TABLE_HEADERS)
+        self.assertIn("Email verified", TABLE_HEADERS)
+        self.assertTrue(
+            {
+                "identity_kind",
+                "identity_subject",
+                "hf_username",
+                "contact_email",
+                "email_verified",
+            }.issubset(TABLE_FIELDS)
+        )
+        self.assertNotIn("hf_subject", TABLE_FIELDS)
+        self.assertNotIn("verified_email", TABLE_FIELDS)
         state, _ = self.refresh()
         self.assertTrue(all("joint_accuracy" in row for row in state.rows))
 
@@ -448,7 +482,7 @@ assert client.get("/config").status_code == 200
         state, _ = self.refresh()
         injected = dict(state.rows[0])
         injected["correct_answer"] = "must-not-export"
-        injected["verified_email"] = "substituted@example.org"
+        injected["contact_email"] = "substituted@example.org"
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(
                 OrganizerAppError,
@@ -466,6 +500,19 @@ assert client.get("/config").status_code == 200
         for path in attempt_paths:
             record = json.loads(files[path])
             record["team"] = "=1+1"
+            record["submission_hash"] = canonical_submission_hash(
+                record["predictions"],
+                "test",
+                record["release_id"],
+                TestIdentity(
+                    record["identity_kind"],
+                    record["identity_subject"],
+                    record["hf_username"],
+                    record["contact_email"],
+                    record["email_verified"],
+                ),
+                record,
+            )
             files[path] = (
                 json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
             ).encode()
@@ -531,11 +578,14 @@ assert client.get("/config").status_code == 200
                     value["predictions"],
                     "test",
                     malicious_release,
-                    OAuthIdentity(
-                        value["hf_subject"],
+                    TestIdentity(
+                        value["identity_kind"],
+                        value["identity_subject"],
                         value["hf_username"],
-                        value["verified_email"],
+                        value["contact_email"],
+                        value["email_verified"],
                     ),
+                    value,
                 )
             files[path] = (
                 json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"

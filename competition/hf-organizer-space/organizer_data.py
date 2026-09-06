@@ -27,9 +27,10 @@ from organizer_contract import (
     MAX_INSTANCE_ID_CHARACTERS,
     MAX_LEDGER_FILE_BYTES,
     MAX_TEST_ROWS,
-    OAuthIdentity,
+    TestIdentity,
     TestContractError,
     TestPolicyError,
+    account_key,
     canonical_submission_hash,
     is_bounded_private_text,
     ordered_decision_state,
@@ -56,6 +57,16 @@ MAX_ATTEMPTS = 3
 MAX_ROWS_PER_ATTEMPT = MAX_TEST_ROWS
 RELEASE_SCHEMA_VERSION = 1
 LEDGER_SCHEMA_VERSION = 3
+IDENTITY_FIELDS = frozenset(
+    {
+        "identity_kind",
+        "identity_subject",
+        "hf_username",
+        "contact_email",
+        "email_verified",
+    }
+)
+LEGACY_IDENTITY_FIELDS = frozenset({"hf_subject", "verified_email"})
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _REVISION = re.compile(r"[0-9a-f]{40}")
@@ -516,9 +527,11 @@ def organizer_rows(snapshot) -> list[dict]:
                     "excluded": account_is_excluded or attempt_is_excluded,
                     "exclusion_count": exclusion_counts[account],
                     "adjudication_count": adjudication_counts[account],
-                    "hf_subject": attempt["hf_subject"],
+                    "identity_kind": attempt["identity_kind"],
+                    "identity_subject": attempt["identity_subject"],
                     "hf_username": attempt["hf_username"],
-                    "verified_email": attempt["verified_email"],
+                    "contact_email": attempt["contact_email"],
+                    "email_verified": attempt["email_verified"],
                     "team": attempt["team"],
                     "participant_names": attempt["participant_names"],
                     "submission_name": attempt["submission_name"],
@@ -705,7 +718,7 @@ def _matches_state(value, state) -> bool:
 def _valid_attempt(
     record, state, release, ancestor_revisions, account, submission_id
 ) -> bool:
-    if not _matches_state(record, state):
+    if not _matches_state(record, state) or not _has_exact_identity_fields(record):
         return False
     number = record.get("attempt_number")
     metrics = record.get("metrics")
@@ -741,34 +754,28 @@ def _valid_attempt(
         or not open_at <= submitted_at < close_at
     ):
         return False
-    for name in (
-        "hf_subject",
-        "hf_username",
-        "verified_email",
-        "team",
-        "participant_names",
-        "submission_name",
-    ):
+    for name in ("team", "participant_names", "submission_name"):
         if not is_bounded_private_text(record.get(name), name):
             return False
-    expected_key = hashlib.sha256(str(record["hf_subject"]).encode("utf-8")).hexdigest()
-    if expected_key != account:
-        return False
     try:
-        identity = OAuthIdentity(
-            sub=record["hf_subject"],
-            username=record["hf_username"],
-            email=record["verified_email"],
+        identity = TestIdentity(
+            identity_kind=record["identity_kind"],
+            identity_subject=record["identity_subject"],
+            hf_username=record["hf_username"],
+            contact_email=record["contact_email"],
+            email_verified=record["email_verified"],
         )
+        expected_key = account_key(identity)
         expected_hash = canonical_submission_hash(
             predictions,
             record["split"],
             record["release_id"],
             identity,
+            record,
         )
-    except (TestPolicyError, TypeError, ValueError):
+    except (KeyError, TestPolicyError, TypeError, ValueError):
         return False
-    return record.get("submission_hash") == expected_hash
+    return expected_key == account and record.get("submission_hash") == expected_hash
 
 
 def _valid_metrics(metrics) -> bool:
@@ -948,7 +955,11 @@ def _organizer_projection_matches(grouped, projection, state) -> bool:
         return False
     by_account = {}
     for row in accounts:
-        if not isinstance(row, Mapping) or not _matches_state(row, state):
+        if (
+            not isinstance(row, Mapping)
+            or not _matches_state(row, state)
+            or not _has_exact_identity_fields(row)
+        ):
             return False
         account = row.get("account_key")
         if not isinstance(account, str) or _ACCOUNT.fullmatch(account) is None:
@@ -972,9 +983,11 @@ def _organizer_projection_matches(grouped, projection, state) -> bool:
         expected = {
             "attempt_count": len(entries),
             "best_submission_id": best.get("submission_id"),
-            "hf_subject": best.get("hf_subject"),
+            "identity_kind": best.get("identity_kind"),
+            "identity_subject": best.get("identity_subject"),
             "hf_username": best.get("hf_username"),
-            "verified_email": best.get("verified_email"),
+            "contact_email": best.get("contact_email"),
+            "email_verified": best.get("email_verified"),
             "team": best.get("team"),
             "participant_names": best.get("participant_names"),
             "submission_name": best.get("submission_name"),
@@ -985,6 +998,13 @@ def _organizer_projection_matches(grouped, projection, state) -> bool:
         if any(row.get(key) != value for key, value in expected.items()):
             return False
     return True
+
+
+def _has_exact_identity_fields(value) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    present = set(value) & (IDENTITY_FIELDS | LEGACY_IDENTITY_FIELDS)
+    return present == IDENTITY_FIELDS
 
 
 def _valid_audit_record(record, state, record_id, grouped) -> bool:

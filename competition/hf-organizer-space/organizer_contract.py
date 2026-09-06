@@ -38,9 +38,9 @@ MAX_LEDGER_FILE_BYTES = 16 * 1024 * 1024
 
 PRIVATE_TEXT_LIMITS = {
     "release_id": MAX_PRIVATE_TEXT_CHARACTERS,
-    "hf_subject": MAX_PRIVATE_TEXT_CHARACTERS,
+    "identity_subject": MAX_PRIVATE_TEXT_CHARACTERS,
     "hf_username": MAX_PRIVATE_TEXT_CHARACTERS,
-    "verified_email": MAX_PRIVATE_TEXT_CHARACTERS,
+    "contact_email": MAX_PRIVATE_TEXT_CHARACTERS,
     "team": MAX_PRIVATE_TEXT_CHARACTERS,
     "participant_names": MAX_PARTICIPANT_NAMES_CHARACTERS,
     "submission_name": MAX_PRIVATE_TEXT_CHARACTERS,
@@ -66,6 +66,8 @@ _REVISION = re.compile(r"[0-9a-f]{40}\Z")
 _REPOSITORY_PART = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _AUDIT_RECORD_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _CONTROL_CHARACTER = re.compile(r"[\x00-\x1f\x7f]")
+_EMAIL_LOCAL = re.compile(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+\Z")
+_EMAIL_DOMAIN_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z")
 _FORBIDDEN_PUBLIC_PATH = re.compile(
     r"(?:^|/)(?:private|attempts/test|projections/test/accounts|"
     r"exclusions/test|adjudications/test)(?:/|$)",
@@ -116,6 +118,38 @@ def is_valid_public_text(value) -> bool:
         and _CONTROL_CHARACTER.search(value) is None
         and _FORBIDDEN_PUBLIC_PATH.search(value.replace("\\", "/")) is None
     )
+
+
+def normalize_contact_email(value) -> str:
+    """Normalize and validate the anonymous/verified contact identity."""
+
+    if not isinstance(value, str):
+        raise TestPolicyError("Enter a valid contact email for test submissions.")
+    normalized = value.strip().casefold()
+    if (
+        not normalized
+        or len(normalized) > 320
+        or normalized.count("@") != 1
+        or _CONTROL_CHARACTER.search(normalized) is not None
+    ):
+        raise TestPolicyError("Enter a valid contact email for test submissions.")
+    local, domain = normalized.split("@")
+    labels = domain.split(".")
+    if (
+        not 1 <= len(local) <= 64
+        or _EMAIL_LOCAL.fullmatch(local) is None
+        or local.startswith(".")
+        or local.endswith(".")
+        or ".." in local
+        or not 1 <= len(domain) <= 253
+        or len(labels) < 2
+        or any(
+            not 1 <= len(label) <= 63 or _EMAIL_DOMAIN_LABEL.fullmatch(label) is None
+            for label in labels
+        )
+    ):
+        raise TestPolicyError("Enter a valid contact email for test submissions.")
+    return normalized
 
 
 def validate_adjudication_target(action, submission_id):
@@ -269,12 +303,76 @@ def validate_test_predictions(rows) -> None:
 
 
 @dataclass(frozen=True)
-class OAuthIdentity:
-    """Stored Hugging Face identity envelope used for submission hashing."""
+class TestIdentity:
+    """Exact persisted identity envelope used for quota and retry hashing."""
 
-    sub: str
-    username: str
-    email: str
+    identity_kind: str
+    identity_subject: str
+    hf_username: str
+    contact_email: str
+    email_verified: bool
+
+    def __post_init__(self):
+        try:
+            subject = bounded_private_text(self.identity_subject, "identity_subject")
+            username = bounded_private_text(self.hf_username, "hf_username")
+            email = bounded_private_text(self.contact_email, "contact_email")
+            normalized_email = normalize_contact_email(email)
+            if (
+                subject != self.identity_subject
+                or username != self.hf_username
+                or email != self.contact_email
+                or normalized_email != self.contact_email
+                or type(self.email_verified) is not bool
+            ):
+                raise ValueError()
+            if self.identity_kind == "huggingface":
+                if self.email_verified is not True:
+                    raise ValueError()
+            elif self.identity_kind == "email":
+                if (
+                    self.email_verified is not False
+                    or subject != email
+                    or username != "Not signed in"
+                ):
+                    raise ValueError()
+            else:
+                raise ValueError()
+        except (TestContractError, TestPolicyError, ValueError):
+            raise TestPolicyError("Test submission identity is invalid.") from None
+
+    @classmethod
+    def from_profile(cls, profile):
+        data = dict(profile or {})
+        if data.get("email_verified") is not True:
+            raise TestPolicyError(
+                "Test submission requires a verified email and HF identity."
+            )
+        try:
+            subject = bounded_private_text(data.get("sub"), "identity_subject")
+            username = bounded_private_text(
+                data.get("preferred_username"), "hf_username"
+            )
+            email = normalize_contact_email(data.get("email"))
+        except (TestContractError, TestPolicyError):
+            raise TestPolicyError(
+                "Test submission requires a verified email and HF identity."
+            ) from None
+        return cls("huggingface", subject, username, email, True)
+
+    @classmethod
+    def from_email(cls, value):
+        email = normalize_contact_email(value)
+        return cls("email", email, "Not signed in", email, False)
+
+
+def account_key(identity: TestIdentity) -> str:
+    """Derive the private quota key from identity kind and immutable subject."""
+
+    if not isinstance(identity, TestIdentity):
+        raise TestPolicyError("A valid identity is required for test submissions.")
+    raw = f"{identity.identity_kind}\0{identity.identity_subject}".encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
 
 
 def _canonical_value(value):
@@ -315,20 +413,30 @@ def canonical_submission_hash(
     predictions,
     split: str,
     release_id: str,
-    identity: OAuthIdentity,
+    identity: TestIdentity,
+    metadata: Mapping,
 ) -> str:
-    """Hash normalized predictions with split, release, and OAuth subject."""
+    """Hash retry identity, predictions, and immutable submission metadata."""
 
     if not isinstance(split, str) or not split.strip():
         raise TestPolicyError("Submission split is required.")
     if not isinstance(release_id, str) or not release_id.strip():
         raise TestPolicyError("Test release ID is required.")
-    if not isinstance(identity, OAuthIdentity) or not identity.sub:
-        raise TestPolicyError(
-            "A valid HF OAuth identity is required for test submissions."
-        )
+    if not isinstance(identity, TestIdentity):
+        raise TestPolicyError("A valid identity is required for test submissions.")
+    if not isinstance(metadata, Mapping):
+        raise TestPolicyError("Immutable submission metadata is required.")
+    try:
+        immutable_metadata = {
+            name: bounded_private_text(metadata.get(name), name)
+            for name in ("team", "participant_names", "submission_name")
+        }
+    except TestContractError:
+        raise TestPolicyError("Immutable submission metadata is required.") from None
     envelope = {
-        "oauth_sub": identity.sub,
+        "identity_kind": identity.identity_kind,
+        "identity_subject": identity.identity_subject,
+        "metadata": _canonical_value(immutable_metadata),
         "payload": _canonical_predictions(predictions),
         "release_id": release_id.strip(),
         "split": split.strip().casefold(),

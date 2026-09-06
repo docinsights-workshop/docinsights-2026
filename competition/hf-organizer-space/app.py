@@ -50,9 +50,11 @@ TABLE_FIELDS = (
     "exclusion_count",
     "adjudication_count",
     "account_key",
-    "hf_subject",
+    "identity_kind",
+    "identity_subject",
     "hf_username",
-    "verified_email",
+    "contact_email",
+    "email_verified",
     "team",
     "participant_names",
     "submission_name",
@@ -79,9 +81,11 @@ TABLE_HEADERS = (
     "Exclusions",
     "Adjudications",
     "Account key",
-    "HF subject",
+    "Identity kind",
+    "Identity subject",
     "HF username",
-    "Verified email",
+    "Contact email",
+    "Email verified",
     "Team",
     "Participant names",
     "Submission name",
@@ -226,9 +230,9 @@ def filter_rows(
             str(row.get(name, "")).casefold()
             for name in (
                 "account_key",
-                "hf_subject",
+                "identity_subject",
                 "hf_username",
-                "verified_email",
+                "contact_email",
                 "participant_names",
             )
         )
@@ -254,7 +258,7 @@ def filter_rows(
 
 
 def attempt_detail(state: OrganizerViewState, submission_id: object) -> dict:
-    """Return allowlisted per-example metrics only after a server-side selection."""
+    """Return allowlisted owner-only identity and metrics after selection."""
 
     rows = _verified_rows(state)
     if not isinstance(submission_id, str) or not submission_id:
@@ -312,6 +316,11 @@ def attempt_detail(state: OrganizerViewState, submission_id: object) -> dict:
         "attempt_number": match["attempt_number"],
         "selected_best": match["selected_best"],
         "excluded": match["excluded"],
+        "identity_kind": match["identity_kind"],
+        "identity_subject": match["identity_subject"],
+        "hf_username": match["hf_username"],
+        "contact_email": match["contact_email"],
+        "email_verified": match["email_verified"],
         "joint_accuracy": match["joint_accuracy"],
         "per_example": details,
         "exclusions": exclusions,
@@ -474,7 +483,7 @@ def build_app(
 
         with gr.Row():
             account_filter = gr.Textbox(
-                label="Account / username / verified email",
+                label="Account / identity / username / contact email",
                 placeholder="Search private account identity",
             )
             team_filter = gr.Textbox(label="Team", placeholder="Filter by team")

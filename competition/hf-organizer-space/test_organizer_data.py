@@ -28,19 +28,19 @@ if str(_PARTICIPANT_SPACE) not in sys.path:
 
 from scoring import score_predictions  # noqa: E402
 import test_contract  # noqa: E402
-from test_policy import OAuthIdentity, account_key  # noqa: E402
+from test_policy import TestIdentity, account_key  # noqa: E402
 from test_store import HubTestStore, TestStoreError  # noqa: E402
 
 
 REVISION = "f" * 40
 TASK_DIGEST = "1" * 64
 GOLD_DIGEST = "2" * 64
-ACCOUNT_A = hashlib.sha256(b"subject-a").hexdigest()
-ACCOUNT_B = hashlib.sha256(b"subject-b").hexdigest()
+ACCOUNT_A = hashlib.sha256(b"huggingface\0subject-a").hexdigest()
+ACCOUNT_B = hashlib.sha256(b"email\0user-b@example.org").hexdigest()
 PRIVATE_TOKEN = "organizer-read-token-sentinel"
-HASH_A1 = "b6f5a9d8a5677110b6258d277266f894c07a1f77b101b025b07cd5d1f479df7d"
-HASH_A2 = "a206eb6e77e5293c16ec434605c724e05507cca91a1a11647bff797877f39931"
-HASH_B1 = "1eb7b1f4aff10fe6baed1bef45188b49ae6d8688021ea41a484efdfa36ba3cd5"
+HASH_A1 = "5e379bcbcffb670b3d302ca215bc99667907a240860233457fa262e7e725ee98"
+HASH_A2 = "e4ffc1acc767b467a043be82d0d0e80627d33781907a3af793d087af1fefdf12"
+HASH_B1 = "3f5bd2aeb031ea4d56dfc5e14d8cef8d82a65e99bf4d06fb6702a47265b7fc8a"
 ID_A1 = "11111111-1111-4111-8111-111111111111"
 ID_A2 = "22222222-2222-4222-8222-222222222222"
 ID_B1 = "33333333-3333-4333-8333-333333333333"
@@ -86,11 +86,15 @@ def attempt(
         **RELEASE_STATE,
         "submission_id": submission_id,
         "account_key": account,
-        "hf_subject": "subject-a" if account == ACCOUNT_A else "subject-b",
-        "hf_username": "user-a" if account == ACCOUNT_A else "user-b",
-        "verified_email": "user-a@example.org"
+        "identity_kind": "huggingface" if account == ACCOUNT_A else "email",
+        "identity_subject": "subject-a"
         if account == ACCOUNT_A
         else "user-b@example.org",
+        "hf_username": "user-a" if account == ACCOUNT_A else "Not signed in",
+        "contact_email": "user-a@example.org"
+        if account == ACCOUNT_A
+        else "user-b@example.org",
+        "email_verified": account == ACCOUNT_A,
         "scoring_gold_sha256": GOLD_DIGEST,
         "scoring_private_revision": "3" * 40,
         "scoring_public_revision": "4" * 40,
@@ -188,9 +192,11 @@ def organizer_projection(grouped):
                 "account_key": account,
                 "attempt_count": len(attempts),
                 "best_submission_id": best["submission_id"],
-                "hf_subject": best["hf_subject"],
+                "identity_kind": best["identity_kind"],
+                "identity_subject": best["identity_subject"],
                 "hf_username": best["hf_username"],
-                "verified_email": best["verified_email"],
+                "contact_email": best["contact_email"],
+                "email_verified": best["email_verified"],
                 "team": best["team"],
                 "participant_names": best["participant_names"],
                 "submission_name": best["submission_name"],
@@ -420,10 +426,12 @@ class OrganizerSnapshotTests(unittest.TestCase):
                 ),
             },
         )
-        identity = OAuthIdentity(
-            sub="s" * 4_096,
-            username="u" * 4_096,
-            email="e" * 4_084 + "@example.org",
+        identity = TestIdentity(
+            identity_kind="huggingface",
+            identity_subject="s" * 4_096,
+            hf_username="u" * 4_096,
+            contact_email="e" * 52 + "@example.org",
+            email_verified=True,
         )
         metadata = {
             "release_id": release_id,
@@ -479,7 +487,9 @@ class OrganizerSnapshotTests(unittest.TestCase):
                 ),
             },
         )
-        identity = OAuthIdentity("subject-a", "user-a", "user-a@example.org")
+        identity = TestIdentity(
+            "huggingface", "subject-a", "user-a", "user-a@example.org", True
+        )
         metadata = {
             "release_id": release["release_id"],
             "task_manifest_sha256": TASK_DIGEST,
@@ -570,7 +580,9 @@ class OrganizerSnapshotTests(unittest.TestCase):
                 "private/test_labels.jsonl": gold,
             },
         )
-        identity = OAuthIdentity("subject-a", "user-a", "user-a@example.org")
+        identity = TestIdentity(
+            "huggingface", "subject-a", "user-a", "user-a@example.org", True
+        )
         metadata = {
             "release_id": release["release_id"],
             "task_manifest_sha256": TASK_DIGEST,
@@ -724,9 +736,10 @@ class OrganizerSnapshotTests(unittest.TestCase):
         self.assertEqual(len(rows), 3)
         self.assertEqual(
             [(row["account_key"], row["attempt_number"]) for row in rows],
-            [(ACCOUNT_A, 1), (ACCOUNT_A, 2), (ACCOUNT_B, 1)],
+            [(ACCOUNT_B, 1), (ACCOUNT_A, 1), (ACCOUNT_A, 2)],
         )
         a_rows = [row for row in rows if row["account_key"] == ACCOUNT_A]
+        b_row = [row for row in rows if row["account_key"] == ACCOUNT_B][0]
         self.assertEqual([row["selected_best"] for row in a_rows], [False, False])
         self.assertTrue(all(row["excluded"] for row in a_rows))
         self.assertTrue(all(row["exclusion_count"] == 1 for row in a_rows))
@@ -735,9 +748,69 @@ class OrganizerSnapshotTests(unittest.TestCase):
             {row["account_key"] for row in rows if row["team"] == "Shared Team"},
             {ACCOUNT_A, ACCOUNT_B},
         )
-        self.assertFalse(rows[-1]["excluded"])
+        self.assertFalse(b_row["excluded"])
         self.assertNotIn("predictions", rows[0])
-        self.assertEqual(rows[-1]["joint_accuracy"], 1.0)
+        self.assertEqual(b_row["joint_accuracy"], 1.0)
+        self.assertEqual(a_rows[0]["identity_kind"], "huggingface")
+        self.assertTrue(a_rows[0]["email_verified"])
+        self.assertEqual(b_row["identity_kind"], "email")
+        self.assertEqual(b_row["hf_username"], "Not signed in")
+        self.assertFalse(b_row["email_verified"])
+
+    def test_requires_exact_optional_identity_envelope_and_account_key(self):
+        """Catches legacy, contradictory, or non-normalized private identities."""
+
+        cases = []
+        a_path = f"attempts/test/{ACCOUNT_A}/{ID_A1}.json"
+        b_path = f"attempts/test/{ACCOUNT_B}/{ID_B1}.json"
+
+        legacy = fixture_files()
+        record = json.loads(legacy[a_path])
+        record["hf_subject"] = record.pop("identity_subject")
+        record["verified_email"] = record.pop("contact_email")
+        legacy[a_path] = json_bytes(record)
+        cases.append(legacy)
+
+        anonymous_verified = fixture_files()
+        record = json.loads(anonymous_verified[b_path])
+        record["email_verified"] = True
+        anonymous_verified[b_path] = json_bytes(record)
+        cases.append(anonymous_verified)
+
+        anonymous_username = fixture_files()
+        record = json.loads(anonymous_username[b_path])
+        record["hf_username"] = "pretend-user"
+        anonymous_username[b_path] = json_bytes(record)
+        cases.append(anonymous_username)
+
+        non_normalized_email = fixture_files()
+        record = json.loads(non_normalized_email[b_path])
+        record["identity_subject"] = "User-B@Example.Org"
+        record["contact_email"] = "User-B@Example.Org"
+        non_normalized_email[b_path] = json_bytes(record)
+        cases.append(non_normalized_email)
+
+        wrong_account_subject = fixture_files()
+        record = json.loads(wrong_account_subject[a_path])
+        record["identity_subject"] = "different-subject"
+        wrong_account_subject[a_path] = json_bytes(record)
+        cases.append(wrong_account_subject)
+
+        for files in cases:
+            report = verify_snapshot(self.load(FakeHub(files)))
+            self.assertFalse(report.valid)
+            self.assertIn("attempt_invalid", report.issue_codes)
+
+        legacy_projection = fixture_files()
+        path = "projections/test/organizer_leaderboard.json"
+        projection = json.loads(legacy_projection[path])
+        row = projection["accounts"][0]
+        row["hf_subject"] = row.pop("identity_subject")
+        row["verified_email"] = row.pop("contact_email")
+        legacy_projection[path] = json_bytes(projection)
+        report = verify_snapshot(self.load(FakeHub(legacy_projection)))
+        self.assertFalse(report.valid)
+        self.assertIn("organizer_projection_mismatch", report.issue_codes)
 
     def test_requires_v3_and_exact_joint_metric_derivation(self):
         """Catches accepting legacy ledgers or independently inconsistent joint scores."""
@@ -1129,15 +1202,26 @@ class OrganizerSnapshotTests(unittest.TestCase):
                 organizer_rows(snapshot)
 
     def test_submission_hash_is_recomputed_from_committed_predictions(self):
-        """Catches an immutable record whose canonical payload hash was altered."""
-        files = fixture_files()
+        """Catches altered hashes or metadata detached from retry identity."""
         path = f"attempts/test/{ACCOUNT_A}/{ID_A1}.json"
-        value = json.loads(files[path])
+        mutations = []
+
+        changed_hash = fixture_files()
+        value = json.loads(changed_hash[path])
         value["submission_hash"] = "8" * 64
-        files[path] = json_bytes(value)
-        report = verify_snapshot(self.load(FakeHub(files)))
-        self.assertFalse(report.valid)
-        self.assertIn("attempt_invalid", report.issue_codes)
+        changed_hash[path] = json_bytes(value)
+        mutations.append(changed_hash)
+
+        changed_metadata = fixture_files()
+        value = json.loads(changed_metadata[path])
+        value["submission_name"] = "different-name"
+        changed_metadata[path] = json_bytes(value)
+        mutations.append(changed_metadata)
+
+        for files in mutations:
+            report = verify_snapshot(self.load(FakeHub(files)))
+            self.assertFalse(report.valid)
+            self.assertIn("attempt_invalid", report.issue_codes)
 
     def test_scoring_revisions_and_manifest_path_are_pinned(self):
         """Catches mutable evaluator refs and traversal-bearing scoring paths."""

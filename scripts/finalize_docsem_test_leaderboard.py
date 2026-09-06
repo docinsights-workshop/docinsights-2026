@@ -50,7 +50,8 @@ from test_contract import (  # noqa: E402
     validate_test_predictions,
 )
 from test_policy import (  # noqa: E402
-    OAuthIdentity,
+    TestIdentity,
+    account_key,
     canonical_submission_hash,
     select_best_attempt,
 )
@@ -84,6 +85,16 @@ PUBLIC_ROW_FIELDS = frozenset(
 PUBLIC_PROJECTION_FIELDS = frozenset(
     {"schema_version", "split", "release_id", "task_manifest_sha256", "rows"}
 )
+PRIVATE_IDENTITY_FIELDS = frozenset(
+    {
+        "identity_kind",
+        "identity_subject",
+        "hf_username",
+        "contact_email",
+        "email_verified",
+    }
+)
+LEGACY_IDENTITY_FIELDS = frozenset({"hf_subject", "verified_email"})
 
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _REVISION = re.compile(r"[0-9a-f]{40}\Z")
@@ -912,11 +923,11 @@ def _attempt_reasons(item, snapshot, release, close_at, ids, hashes, account_num
     ):
         reasons.add("malformed")
     submission_id = record.get("submission_id")
-    account_key = record.get("account_key")
+    record_account_key = record.get("account_key")
     number = record.get("attempt_number")
     if (
         submission_id != match.group("submission")
-        or account_key != match.group("account")
+        or record_account_key != match.group("account")
         or not _uuid4(submission_id)
         or type(number) is not int
         or not 1 <= number <= 3
@@ -933,7 +944,7 @@ def _attempt_reasons(item, snapshot, release, close_at, ids, hashes, account_num
     elif hashes.get(submission_hash, 0) > 1:
         reasons.add("duplicate_submission_hash")
     try:
-        if account_numbers.get((account_key, number), 0) > 1:
+        if account_numbers.get((record_account_key, number), 0) > 1:
             reasons.add("duplicate_attempt_number")
     except TypeError:
         reasons.add("malformed")
@@ -953,23 +964,29 @@ def _attempt_reasons(item, snapshot, release, close_at, ids, hashes, account_num
     ):
         reasons.add("wrong_provenance")
     try:
-        for name in (
-            "hf_subject",
-            "hf_username",
-            "verified_email",
-            "team",
-            "participant_names",
-            "submission_name",
-        ):
+        identity_fields = set(record) & (
+            PRIVATE_IDENTITY_FIELDS | LEGACY_IDENTITY_FIELDS
+        )
+        if identity_fields != PRIVATE_IDENTITY_FIELDS:
+            raise ValueError()
+        for name in ("team", "participant_names", "submission_name"):
             bounded_private_text(record.get(name), name)
-        if hashlib.sha256(record["hf_subject"].encode()).hexdigest() != account_key:
+        identity = TestIdentity(
+            identity_kind=record["identity_kind"],
+            identity_subject=record["identity_subject"],
+            hf_username=record["hf_username"],
+            contact_email=record["contact_email"],
+            email_verified=record["email_verified"],
+        )
+        if account_key(identity) != record_account_key:
             raise ValueError()
         validate_test_predictions(record.get("predictions"))
-        identity = OAuthIdentity(
-            record["hf_subject"], record["hf_username"], record["verified_email"]
-        )
         expected_hash = canonical_submission_hash(
-            record["predictions"], "test", release["release_id"], identity
+            record["predictions"],
+            "test",
+            release["release_id"],
+            identity,
+            record,
         )
         if record.get("submission_hash") != expected_hash:
             raise ValueError()
@@ -1331,9 +1348,11 @@ def _projection_references(raw_files, release):
         "account_key",
         "attempt_count",
         "best_submission_id",
-        "hf_subject",
+        "identity_kind",
+        "identity_subject",
         "hf_username",
-        "verified_email",
+        "contact_email",
+        "email_verified",
         "team",
         "participant_names",
         "submission_name",
@@ -1468,9 +1487,11 @@ def _projection_references(raw_files, release):
             expected = {
                 "attempt_count": len(account_records[account]),
                 "best_submission_id": best.get("submission_id"),
-                "hf_subject": best.get("hf_subject"),
+                "identity_kind": best.get("identity_kind"),
+                "identity_subject": best.get("identity_subject"),
                 "hf_username": best.get("hf_username"),
-                "verified_email": best.get("verified_email"),
+                "contact_email": best.get("contact_email"),
+                "email_verified": best.get("email_verified"),
                 "team": best.get("team"),
                 "participant_names": best.get("participant_names"),
                 "submission_name": best.get("submission_name"),

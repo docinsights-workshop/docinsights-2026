@@ -250,23 +250,117 @@ class OrganizerContractParityTests(unittest.TestCase):
                 "instance_id": "task-a",
             },
         ]
-        organizer_identity = organizer.OAuthIdentity(
-            "subject-1", "user", "u@example.org"
+        organizer_identity = organizer.TestIdentity(
+            "huggingface", "subject-1", "user", "u@example.org", True
         )
-        participant_identity = participant_policy.OAuthIdentity(
-            "subject-1", "user", "u@example.org"
+        participant_identity = participant_policy.TestIdentity(
+            "huggingface", "subject-1", "user", "u@example.org", True
         )
+        metadata = {
+            "team": " Team Alpha ",
+            "participant_names": "Alice  Example",
+            "submission_name": " primary run ",
+        }
         organizer_hash = organizer.canonical_submission_hash(
-            predictions, " Test ", " release-α ", organizer_identity
+            predictions, " Test ", " release-α ", organizer_identity, metadata
         )
         participant_hash = participant_policy.canonical_submission_hash(
-            predictions, " Test ", " release-α ", participant_identity
+            predictions, " Test ", " release-α ", participant_identity, metadata
         )
         self.assertEqual(
             organizer_hash,
-            "9cbe8b01a046be6ffd52883e979686ab4e0e7598df79ec801a65ecd4af947bf8",
+            "354923d41bde0a84ef3141419764d8547edd19109050387587cef049a4bc3d72",
         )
         self.assertEqual(organizer_hash, participant_hash)
+        self.assertEqual(
+            organizer.account_key(organizer_identity),
+            "5142ab7303eddb7ec71e428d8b5c6a09029fb2defbd60e0e71ca696398c87b1b",
+        )
+        self.assertEqual(
+            organizer.account_key(organizer_identity),
+            participant_policy.account_key(participant_identity),
+        )
+
+        anonymous = organizer.TestIdentity(
+            "email",
+            "person@example.org",
+            "Not signed in",
+            "person@example.org",
+            False,
+        )
+        self.assertEqual(
+            organizer.account_key(anonymous),
+            "a27e3d8f4d6724b79abba77c2352d9416c12526ce092497b6b4282a802a2e346",
+        )
+        same_subject_hf = organizer.TestIdentity(
+            "huggingface",
+            "person@example.org",
+            "person",
+            "person@example.org",
+            True,
+        )
+        self.assertNotEqual(
+            organizer.account_key(anonymous), organizer.account_key(same_subject_hf)
+        )
+        self.assertNotEqual(
+            organizer_hash,
+            organizer.canonical_submission_hash(
+                predictions,
+                " Test ",
+                " release-α ",
+                organizer_identity,
+                {**metadata, "submission_name": "different run"},
+            ),
+        )
+
+    def test_optional_identity_construction_and_email_rules_match_participant(self):
+        """Catches quota identities accepted by only one deployed contract copy."""
+
+        organizer = self.organizer_contract()
+        email_cases = (
+            " Person+Task@Example.Org ",
+            "a.b@example.org",
+            ".bad@example.org",
+            "bad..dots@example.org",
+            "bad@singlelabel",
+            "bad@éxample.org",
+            "a" * 65 + "@example.org",
+        )
+        for value in email_cases:
+            with self.subTest(email=value[:24]):
+                self.assertEqual(
+                    _outcome(organizer.normalize_contact_email, value),
+                    _outcome(participant_policy.normalize_contact_email, value),
+                )
+
+        profile = {
+            "sub": "hf-subject",
+            "preferred_username": "hf-user",
+            "email": " Person@Example.Org ",
+            "email_verified": True,
+        }
+        organizer_identity = organizer.TestIdentity.from_profile(profile)
+        participant_identity = participant_policy.TestIdentity.from_profile(profile)
+        fields = (
+            "identity_kind",
+            "identity_subject",
+            "hf_username",
+            "contact_email",
+            "email_verified",
+        )
+        self.assertEqual(
+            tuple(getattr(organizer_identity, name) for name in fields),
+            tuple(getattr(participant_identity, name) for name in fields),
+        )
+        self.assertEqual(organizer_identity.contact_email, "person@example.org")
+        organizer_email = organizer.TestIdentity.from_email(" Person@Example.Org ")
+        participant_email = participant_policy.TestIdentity.from_email(
+            " Person@Example.Org "
+        )
+        self.assertEqual(
+            tuple(getattr(organizer_email, name) for name in fields),
+            tuple(getattr(participant_email, name) for name in fields),
+        )
 
     def test_best_attempt_metric_and_timestamp_boundaries_match_participant_policy(
         self,
