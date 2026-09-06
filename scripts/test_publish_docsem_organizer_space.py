@@ -19,7 +19,7 @@ DENIED_TOKEN = "hf_denied_probe_sentinel"
 SOURCE_REVISION = "a" * 40
 SPACE_PARENT = "b" * 40
 PRIVATE_REVISION = "c" * 40
-PARTICIPANT_REVISION = "f23bdacf07e3e40c617baec9819d14c8788435dd"
+PARTICIPANT_REVISION = "490cba0a2aac17514c7f5496f996abb59401cb12"
 
 
 def whoami(role: str, name: str = "amitbcp") -> dict:
