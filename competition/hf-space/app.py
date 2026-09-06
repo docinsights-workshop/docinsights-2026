@@ -26,7 +26,7 @@ from scoring import (
     safe_slug,
     score_predictions,
 )
-from submission_service import HubTestConfigLoader, SubmissionService
+from submission_service import HubTestConfigLoader, SubmissionService, TrustedTestConfig
 from test_contract import is_valid_public_text
 from test_policy import TestReleasePolicy
 from test_store import HubTestStore
@@ -46,6 +46,17 @@ PARTICIPANT_GUIDE_URL = os.getenv(
     "PARTICIPANT_GUIDE_URL",
     "https://github.com/oracle-samples/gsm-sem/blob/main/docsem/PARTICIPANT_INSTRUCTIONS.md",
 )
+PUBLIC_DATASET_URL = f"https://huggingface.co/datasets/{PUBLIC_DATASET_REPO}"
+DATASET_CITATION_URL = "https://arxiv.org/abs/2605.07053"
+DATASET_BIBTEX = """@article{singh2026gsmsem,
+  title={GSM-SEM: Benchmark and Framework for Generating Semantically Variant Augmentations},
+  author={Jyotika Singh and Fang Tu and Aziza Mirsaidova and Amit Agarwal and Hitesh Laxmichand Patel and Sandip Ghoshal and Miguel Ballesteros and Karan Dua and Yassine Benajiba and Weiyi Sun and Tao Sheng and Graham Horwood and Sujith Ravi and Dan Roth},
+  year={2026},
+  eprint={2605.07053},
+  archivePrefix={arXiv},
+  primaryClass={cs.CL},
+  url={https://arxiv.org/abs/2605.07053}
+}"""
 GOLD_REPO_ID = os.getenv(
     "GOLD_REPO_ID", "amitbcp/docinsights-2026-shared-task-submissions"
 )
@@ -89,6 +100,68 @@ FINAL_TEST_PUBLIC_ROW_FIELDS = frozenset(
 FINAL_TEST_PROJECTION_FIELDS = frozenset(
     {"schema_version", "split", "release_id", "task_manifest_sha256", "rows"}
 )
+
+PORTAL_HEAD = """
+<script>
+(() => {
+    const initialized = new WeakSet();
+    const closedCopy = "Test submissions are closed.";
+
+    function countdownCopy(totalSeconds) {
+        const days = Math.floor(totalSeconds / 86400);
+        const hours = Math.floor((totalSeconds % 86400) / 3600);
+        const minutes = Math.floor((totalSeconds % 3600) / 60);
+        const seconds = totalSeconds % 60;
+        const dayLabel = days === 1 ? "day" : "days";
+        return `${days} ${dayLabel}, ${hours} hours, ${minutes} minutes, ${seconds} seconds remaining`;
+    }
+
+    function bindCountdown(node) {
+        if (initialized.has(node)) return;
+        initialized.add(node);
+        const closeAt = Date.parse(node.dataset.docsemCloseAt || "");
+        if (!Number.isFinite(closeAt)) {
+            const unavailableCopy = "Official test deadline unavailable.";
+            node.textContent = unavailableCopy;
+            node.setAttribute("aria-label", unavailableCopy);
+            return;
+        }
+        function setTimerCopy(copy) {
+            node.textContent = copy;
+            node.setAttribute(
+                "aria-label",
+                `Time remaining until test submissions close: ${copy}`
+            );
+        }
+        function update() {
+            if (!node.isConnected) return;
+            const totalSeconds = Math.max(0, Math.ceil((closeAt - Date.now()) / 1000));
+            if (totalSeconds === 0) {
+                setTimerCopy(closedCopy);
+                node.dataset.state = "closed";
+                const notice = node.closest(".test-release-notice");
+                const status = notice?.querySelector("[data-docsem-submission-status]");
+                if (status) status.textContent = closedCopy;
+                return;
+            }
+            setTimerCopy(countdownCopy(totalSeconds));
+            window.setTimeout(update, 1000);
+        }
+        update();
+    }
+
+    function bindAllCountdowns() {
+        document.querySelectorAll("[data-docsem-close-at]").forEach(bindCountdown);
+    }
+
+    document.addEventListener("DOMContentLoaded", bindAllCountdowns);
+    new MutationObserver(bindAllCountdowns).observe(document.documentElement, {
+        childList: true,
+        subtree: true,
+    });
+})();
+</script>
+"""
 
 
 class FinalLeaderboardError(RuntimeError):
@@ -240,18 +313,29 @@ body {
 
 .gradio-container {
     width: 100% !important;
-    max-width: 1540px !important;
+    max-width: none !important;
     height: 100vh !important;
     height: 100dvh !important;
     max-height: 100% !important;
-    margin: 0 auto !important;
-    padding: 24px 30px 36px !important;
+    margin: 0 !important;
+    padding: 0 !important;
     overflow-y: auto !important;
+    overflow-x: hidden !important;
     overscroll-behavior-y: contain;
     -webkit-overflow-scrolling: touch;
     background: var(--docsem-page);
     color: var(--docsem-ink);
     font-size: 16px;
+}
+
+.gradio-container > .main {
+    box-sizing: border-box;
+    width: 100%;
+    max-width: 1540px;
+    min-width: 0;
+    margin: 0 auto;
+    padding: 24px 30px 36px;
+    overflow: visible !important;
 }
 
 #portal-header {
@@ -365,13 +449,42 @@ body {
     margin: 0;
 }
 
-#evaluation-notice p + p {
+#evaluation-notice > p + p {
     border-left: 1px solid #bdddd8;
     padding-left: 24px;
 }
 
 #evaluation-notice a {
     color: var(--docsem-teal);
+    font-weight: 700;
+}
+
+#evaluation-notice .test-release-notice {
+    grid-column: 1 / -1;
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px solid #bdddd8;
+}
+
+.test-release-notice p {
+    color: #34475a;
+    font-size: 15px;
+    line-height: 1.5;
+    margin: 0;
+}
+
+.test-release-notice p + p {
+    margin-top: 8px;
+}
+
+.test-release-notice a {
+    color: var(--docsem-teal);
+    font-weight: 700;
+}
+
+.test-countdown {
+    color: var(--docsem-navy);
+    font-variant-numeric: tabular-nums;
     font-weight: 700;
 }
 
@@ -445,15 +558,19 @@ body {
 
 #submission-file {
     min-height: 112px !important;
-    height: 112px !important;
+    height: auto !important;
+    font-size: 15px;
 }
 
 #submission-file > div {
     min-height: 110px !important;
+    height: auto !important;
 }
 
-#submission-file {
-    font-size: 15px;
+#submission-file .file-preview-holder,
+#submission-file .file-preview {
+    max-height: none !important;
+    overflow: visible !important;
 }
 
 #submission-side {
@@ -479,6 +596,15 @@ body {
     max-height: 178px;
     margin-top: 14px;
     overflow: auto;
+}
+
+#dataset-citation {
+    margin-top: 18px;
+    border-color: var(--docsem-line);
+}
+
+#dataset-citation-code {
+    max-height: 260px;
 }
 
 #leaderboard-section {
@@ -592,8 +718,26 @@ body {
 }
 
 @media (max-width: 760px) {
-    .gradio-container {
-        padding: 16px 14px 26px !important;
+    .gradio-container > .main {
+        width: 100%;
+        max-width: 100%;
+        min-width: 0;
+        padding: 16px 14px 26px;
+        overflow-x: hidden !important;
+    }
+
+    #split-controls,
+    #submission-fields,
+    #submission-actions,
+    #leaderboard-heading {
+        min-width: 0;
+        max-width: 100%;
+    }
+
+    #submission-actions > *,
+    #submission-fields > * {
+        min-width: 0 !important;
+        max-width: 100%;
     }
 
     #portal-header {
@@ -612,6 +756,7 @@ body {
 
     #portal-header .portal-links {
         width: 100%;
+        flex-wrap: wrap;
     }
 
     #portal-header a {
@@ -626,7 +771,7 @@ body {
         padding: 15px 14px;
     }
 
-    #evaluation-notice p + p {
+    #evaluation-notice > p + p {
         border-top: 1px solid #bdddd8;
         border-left: 0;
         padding-top: 12px;
@@ -1242,14 +1387,11 @@ def _final_test_leaderboard_heading():
 
 def _final_test_notice():
     return (
-        '<section role="status" class="leaderboard-empty">'
-        "The public test tasks and PDFs are available in the "
-        f'<a href="https://huggingface.co/datasets/{PUBLIC_DATASET_REPO}" '
-        'target="_blank" rel="noopener">public dataset</a>. '
-        "The final test leaderboard is not available yet. Test submissions are "
-        "not open yet; organizers will announce activation after the private "
-        "scoring key is installed and verified."
-        "</section>"
+        '<div class="leaderboard-empty">'
+        f"{_test_release_notice_html()}"
+        "<p>The final test leaderboard is not available yet; it will publish after "
+        "organizer finalization.</p>"
+        "</div>"
     )
 
 
@@ -1475,40 +1617,206 @@ def _server_now():
     return dt.datetime.now(dt.timezone.utc)
 
 
-def _test_ui_open() -> bool:
-    if not TEST_SUBMISSIONS_ENABLED or not str(WRITE_TOKEN or "").strip():
-        return False
-    policy = TEST_DEPLOYMENT.expected_policy
-    if policy is None:
-        return False
+def _test_release_state(
+    now=None,
+    *,
+    deployment=None,
+    submissions_enabled=None,
+    write_token=None,
+    authoritative_loader=None,
+):
+    """Return the participant-facing state from the validated server policy."""
+
+    deployment = TEST_DEPLOYMENT if deployment is None else deployment
+    submissions_enabled = (
+        TEST_SUBMISSIONS_ENABLED
+        if submissions_enabled is None
+        else bool(submissions_enabled)
+    )
+    write_token = WRITE_TOKEN if write_token is None else write_token
+    current = _normalized_utc(_server_now() if now is None else now)
+    if current is None:
+        return "unavailable", None
     try:
-        policy.require_open(_server_now())
+        opened, close_at = _validate_final_deployment(deployment)
+        policy = TestReleasePolicy(
+            release_id=deployment.release_id,
+            task_manifest_sha256=deployment.task_manifest_sha256,
+            gold_sha256=deployment.gold_sha256,
+            open_at=opened,
+            close_at=close_at,
+            enabled=True,
+            max_attempts=deployment.max_attempts,
+        )
     except Exception:
-        return False
-    return True
+        return "unavailable", None
+    if current >= close_at:
+        return "closed", close_at
+    if not submissions_enabled or not str(write_token or "").strip():
+        return "unavailable", close_at
+    try:
+        policy.require_open(current)
+    except Exception:
+        return "scheduled", close_at
+    if authoritative_loader is None:
+        authoritative_loader = getattr(
+            globals().get("_SUBMISSION_SERVICE"), "test_config_loader", None
+        )
+    try:
+        trusted = authoritative_loader(current)
+    except Exception:
+        return "unavailable", close_at
+    if not isinstance(trusted, TrustedTestConfig) or trusted.policy != policy:
+        return "unavailable", close_at
+    return "open", close_at
+
+
+def _test_ui_open() -> bool:
+    state, _ = _test_release_state()
+    return state == "open"
+
+
+def _deadline_labels(close_at):
+    """Render one exclusive UTC close as its inclusive AoE and UTC labels."""
+
+    normalized = _normalized_utc(close_at)
+    if normalized is None:
+        raise ValueError("A timezone-aware test close instant is required.")
+    anywhere_on_earth = dt.timezone(-dt.timedelta(hours=12), name="AoE")
+    last_included = (normalized - dt.timedelta(seconds=1)).astimezone(anywhere_on_earth)
+
+    def label(value, zone, *, twenty_four_hour=False):
+        clock = (
+            value.strftime("%H:%M:%S")
+            if twenty_four_hour
+            else value.strftime("%I:%M:%S %p").lstrip("0")
+        )
+        return f"{value.strftime('%B')} {value.day}, {value.year} at {clock} {zone}"
+
+    return label(last_included, "Anywhere on Earth"), label(
+        normalized, "UTC", twenty_four_hour=True
+    )
+
+
+def _countdown_text(close_at, now):
+    """Return a deterministic, non-negative countdown for the exclusive close."""
+
+    closed = _normalized_utc(close_at)
+    current = _normalized_utc(now)
+    if closed is None or current is None:
+        raise ValueError("Timezone-aware countdown instants are required.")
+    total_seconds = max(0, math.ceil((closed - current).total_seconds()))
+    if total_seconds == 0:
+        return "Test submissions are closed."
+    days, remainder = divmod(total_seconds, 86_400)
+    hours, remainder = divmod(remainder, 3_600)
+    minutes, seconds = divmod(remainder, 60)
+
+    def unit(value, singular):
+        return f"{value} {singular if value == 1 else singular + 's'}"
+
+    return (
+        ", ".join(
+            (
+                unit(days, "day"),
+                unit(hours, "hour"),
+                unit(minutes, "minute"),
+                unit(seconds, "second"),
+            )
+        )
+        + " remaining"
+    )
+
+
+def _test_release_notice_html(
+    now=None,
+    *,
+    deployment=None,
+    submissions_enabled=None,
+    write_token=None,
+    authoritative_loader=None,
+):
+    """Render release availability and policy without claiming an unproven opening."""
+
+    current = _server_now() if now is None else now
+    state, close_at = _test_release_state(
+        current,
+        deployment=deployment,
+        submissions_enabled=submissions_enabled,
+        write_token=write_token,
+        authoritative_loader=authoritative_loader,
+    )
+    if state == "open":
+        availability = "Test submissions are open."
+    elif state == "closed":
+        availability = "Test submissions are closed."
+    else:
+        availability = (
+            "Test submissions are not open yet. Organizers will announce activation "
+            "after the private scoring key is installed and verified."
+        )
+
+    countdown = ""
+    if close_at is not None:
+        aoe_label, utc_label = _deadline_labels(close_at)
+        close_iso = close_at.isoformat(timespec="seconds").replace("+00:00", "Z")
+        anywhere_on_earth = dt.timezone(-dt.timedelta(hours=12), name="AoE")
+        last_included_iso = (
+            (close_at - dt.timedelta(seconds=1))
+            .astimezone(anywhere_on_earth)
+            .isoformat(timespec="seconds")
+        )
+        countdown_copy = _countdown_text(close_at, current)
+        countdown_label = (
+            f"Time remaining until test submissions close: {countdown_copy}"
+        )
+        countdown = (
+            '<p class="test-deadline">'
+            "The final accepted second is "
+            f'<time datetime="{html.escape(last_included_iso, quote=True)}">'
+            f"{html.escape(aoe_label)}</time>; the exclusive closing instant is "
+            f'<time datetime="{html.escape(close_iso, quote=True)}">'
+            f"{html.escape(utc_label)}</time>. "
+            '<span class="test-countdown" role="timer" aria-live="off" '
+            f'aria-label="{html.escape(countdown_label, quote=True)}" '
+            f'data-docsem-close-at="{html.escape(close_iso, quote=True)}">'
+            f"{html.escape(countdown_copy)}</span>"
+            "</p>"
+        )
+
+    return (
+        '<div class="test-release-notice">'
+        "<p><strong>Test data released.</strong> The public test tasks and PDFs are "
+        f'available in the <a href="{html.escape(PUBLIC_DATASET_URL, quote=True)}" '
+        'target="_blank" rel="noopener">public dataset</a>. '
+        '<span data-docsem-submission-status role="status" aria-live="polite" '
+        f'aria-atomic="true">{html.escape(availability)}</span> '
+        "Review the "
+        f'<a href="{html.escape(WORKSHOP_URL, quote=True)}" target="_blank" '
+        'rel="noopener">workshop rules</a> and '
+        f'<a href="{html.escape(PARTICIPANT_GUIDE_URL, quote=True)}" '
+        'target="_blank" rel="noopener">participant guide</a> before uploading.</p>'
+        f"{countdown}"
+        '<p class="test-policy"><strong>Test policy:</strong> Up to '
+        "3 accepted test submissions per Hugging Face account. Attempt 1 metrics—"
+        "Joint Accuracy, Answer Accuracy, and Evidence F1—are private to that signed-in "
+        "account. Attempts 2–3 are accepted with their metrics withheld. During the "
+        "open window, provisional public ranks use only attempt 1 and display no metrics. "
+        "After the window closes, the final ranking uses the best of all 3 eligible "
+        "attempts.</p></div>"
+    )
 
 
 def split_ui(split_label):
     if split_label == TEST_SPLIT_LABEL:
         test_open = _test_ui_open()
-        availability = (
-            "Test submissions are open."
-            if test_open
-            else (
-                "The public test tasks and PDFs are available in the "
-                f"[public dataset](https://huggingface.co/datasets/{PUBLIC_DATASET_REPO}). "
-                "Test submissions are not open yet. Organizers will announce "
-                "activation after the private scoring key is installed and verified."
-            )
-        )
         return (
             gr.update(
                 value=(
                     "### Submit final test predictions\n"
                     "Sign in with Hugging Face. Your verified account email replaces the "
-                    "validation contact field. The first accepted attempt shows aggregate "
-                    "metrics; later attempts are withheld until finalization. "
-                    f"{availability}"
+                    "validation contact field.\n\n"
+                    f"{_test_release_notice_html()}"
                 )
             ),
             gr.update(visible=False),
@@ -1544,6 +1852,7 @@ class PortalBlocks(gr.Blocks):
 blocks_options = {
     "title": "DocInsights 2026 Shared Task: DocSem",
     "fill_width": True,
+    "head": PORTAL_HEAD,
 }
 if GRADIO_MAJOR_VERSION < 6:
     blocks_options["css"] = PORTAL_CSS
@@ -1563,7 +1872,7 @@ with PortalBlocks(**blocks_options) as demo:
                 <a class="primary-link" href="{WORKSHOP_URL}" target="_blank" rel="noopener" aria-label="DocInsights shared task workshop page">
                     Workshop
                 </a>
-                <a href="https://huggingface.co/datasets/{PUBLIC_DATASET_REPO}" target="_blank" rel="noopener" aria-label="Public DocSem dataset">
+                <a href="{PUBLIC_DATASET_URL}" target="_blank" rel="noopener" aria-label="Public DocSem dataset">
                     Dataset
                 </a>
                 <a href="{SOURCE_REPO_URL}" target="_blank" rel="noopener" aria-label="Canonical GSM-SEM GitHub repository">
@@ -1587,13 +1896,7 @@ with PortalBlocks(**blocks_options) as demo:
                 <strong>Validation ground truth refreshed September 3, 2026.</strong>
                 Three organizer-only validation labels have now been corrected, most recently on September 3, 2026, following additional data review. All existing submissions were rescored, and the leaderboard now reflects the updated results. Public validation inputs, the task definition, and the data format are unchanged.
             </p>
-            <p>
-                <strong>Final rankings will use a held-out test set.</strong>
-                The public test tasks and PDFs are available in the
-                <a href="https://huggingface.co/datasets/{PUBLIC_DATASET_REPO}" target="_blank" rel="noopener">public dataset</a>.
-                Test submissions are not open yet. Organizers will announce activation after the private
-                scoring key is installed and verified; those results will determine the final leaderboard.
-            </p>
+            {_test_release_notice_html()}
         </section>
         """
     )
@@ -1635,7 +1938,6 @@ with PortalBlocks(**blocks_options) as demo:
             file_input = gr.File(
                 label="Submission file",
                 file_types=[".jsonl", ".json"],
-                height=112,
                 scale=4,
                 elem_id="submission-file",
             )
@@ -1654,6 +1956,20 @@ with PortalBlocks(**blocks_options) as demo:
             visible=False,
             height=160,
             elem_id="score-output",
+        )
+
+    with gr.Accordion("Cite this dataset", open=False, elem_id="dataset-citation"):
+        gr.Markdown(
+            f"Citation source: [GSM-SEM on arXiv]({DATASET_CITATION_URL}). "
+            "Use the copy control on the BibTeX block below."
+        )
+        gr.Code(
+            value=DATASET_BIBTEX,
+            language=None,
+            lines=10,
+            label="BibTeX citation",
+            interactive=False,
+            elem_id="dataset-citation-code",
         )
 
     with gr.Group(visible=False, elem_id="test-history-section") as test_history_group:

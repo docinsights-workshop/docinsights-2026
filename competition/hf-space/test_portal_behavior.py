@@ -8,7 +8,7 @@ from unittest.mock import patch
 import gradio as gr
 
 import app
-from submission_service import SubmissionService
+from submission_service import SubmissionService, TrustedTestConfig
 
 
 PROFILE_A = {
@@ -27,6 +27,18 @@ GOLD_DIGEST = "c" * 64
 SCORER_REVISION = "d" * 40
 SCORER_DIGEST = "e" * 64
 SOURCE_REVISION = "f" * 40
+
+
+def trusted_test_config(policy):
+    return TrustedTestConfig(
+        policy=policy,
+        labels=[],
+        scoring_gold_sha256=policy.gold_sha256,
+        private_revision="d" * 40,
+        public_revision="e" * 40,
+        public_repo_id="public/docsem",
+        task_manifest_path="test/tasks.jsonl",
+    )
 
 
 def canonical_json(value):
@@ -252,8 +264,7 @@ class PortalBehaviorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_public_test_inputs_notice_keeps_scoring_closed(self):
         public_dataset_url = (
-            "https://huggingface.co/datasets/"
-            "amitbcp/docinsights-2026-shared-task-data"
+            "https://huggingface.co/datasets/amitbcp/docinsights-2026-shared-task-data"
         )
         initial_portal = "\n".join(
             str(component["props"].get("value", ""))
@@ -279,6 +290,183 @@ class PortalBehaviorTests(unittest.IsolatedAsyncioTestCase):
             instructions["value"],
         )
         self.assertFalse(submit_button["interactive"])
+
+    def test_test_release_notice_follows_authoritative_disabled_open_and_closed_state(
+        self,
+    ):
+        deployment = app.TestDeploymentConfig(
+            submissions_enabled=True,
+            public_leaderboard_enabled=False,
+            release_id="docsem-test-2026",
+            task_manifest_sha256="a" * 64,
+            gold_sha256="b" * 64,
+            open_at=dt.datetime(2026, 9, 5, tzinfo=dt.timezone.utc),
+            close_at=dt.datetime(2026, 9, 11, 12, tzinfo=dt.timezone.utc),
+            release_config_path="private/test_release.json",
+            gold_config_path="private/test_labels.jsonl",
+        )
+        disabled = app._test_release_notice_html(
+            dt.datetime(2026, 9, 6, tzinfo=dt.timezone.utc),
+            deployment=deployment,
+            submissions_enabled=False,
+            write_token="server-token",
+        )
+        open_notice = app._test_release_notice_html(
+            dt.datetime(2026, 9, 6, tzinfo=dt.timezone.utc),
+            deployment=deployment,
+            submissions_enabled=True,
+            write_token="server-token",
+            authoritative_loader=lambda now: trusted_test_config(
+                deployment.expected_policy
+            ),
+        )
+        closed = app._test_release_notice_html(
+            deployment.close_at,
+            deployment=deployment,
+            submissions_enabled=True,
+            write_token="server-token",
+        )
+        disabled_after_close = app._test_release_notice_html(
+            deployment.close_at,
+            deployment=deployment,
+            submissions_enabled=False,
+            write_token=None,
+        )
+
+        self.assertIn("Test submissions are not open yet.", disabled)
+        self.assertNotIn("Test submissions are open.", disabled)
+        self.assertIn("Test submissions are open.", open_notice)
+        self.assertNotIn("Test submissions are not open yet.", open_notice)
+        self.assertIn("Test submissions are closed.", closed)
+        self.assertNotIn("Test submissions are open.", closed)
+        self.assertIn("Test submissions are closed.", disabled_after_close)
+        self.assertNotIn("Test submissions are not open yet.", disabled_after_close)
+        for required_link in (
+            "https://huggingface.co/datasets/amitbcp/docinsights-2026-shared-task-data",
+            app.WORKSHOP_URL,
+            app.PARTICIPANT_GUIDE_URL,
+        ):
+            with self.subTest(required_link=required_link):
+                self.assertIn(required_link, open_notice)
+
+    def test_countdown_uses_exact_deployment_close_instant_and_aoe_boundary(self):
+        close_at = dt.datetime(2026, 9, 11, 12, tzinfo=dt.timezone.utc)
+
+        self.assertEqual(
+            app._deadline_labels(close_at),
+            (
+                "September 10, 2026 at 11:59:59 PM Anywhere on Earth",
+                "September 11, 2026 at 12:00:00 UTC",
+            ),
+        )
+        self.assertEqual(
+            app._countdown_text(
+                close_at,
+                dt.datetime(2026, 9, 10, 9, 57, 56, tzinfo=dt.timezone.utc),
+            ),
+            "1 day, 2 hours, 2 minutes, 4 seconds remaining",
+        )
+        self.assertEqual(
+            app._countdown_text(close_at, close_at), "Test submissions are closed."
+        )
+        self.assertEqual(
+            app._countdown_text(close_at, close_at + dt.timedelta(seconds=1)),
+            "Test submissions are closed.",
+        )
+
+    def test_test_policy_copy_explains_private_feedback_and_rank_contract(self):
+        notice = app._test_release_notice_html(
+            dt.datetime(2026, 9, 6, tzinfo=dt.timezone.utc),
+            deployment=app.TestDeploymentConfig(
+                submissions_enabled=True,
+                public_leaderboard_enabled=False,
+                release_id="docsem-test-2026",
+                task_manifest_sha256="a" * 64,
+                gold_sha256="b" * 64,
+                open_at=dt.datetime(2026, 9, 5, tzinfo=dt.timezone.utc),
+                close_at=dt.datetime(2026, 9, 11, 12, tzinfo=dt.timezone.utc),
+                release_config_path="private/test_release.json",
+                gold_config_path="private/test_labels.jsonl",
+            ),
+            submissions_enabled=True,
+            write_token="server-token",
+            authoritative_loader=lambda now: trusted_test_config(
+                app.TestReleasePolicy(
+                    release_id="docsem-test-2026",
+                    task_manifest_sha256="a" * 64,
+                    gold_sha256="b" * 64,
+                    open_at=dt.datetime(2026, 9, 5, tzinfo=dt.timezone.utc),
+                    close_at=dt.datetime(2026, 9, 11, 12, tzinfo=dt.timezone.utc),
+                    enabled=True,
+                )
+            ),
+        )
+
+        self.assertIn("3 accepted test submissions per Hugging Face account", notice)
+        self.assertIn("Attempt 1", notice)
+        self.assertIn("private to that signed-in account", notice)
+        self.assertIn("Joint Accuracy", notice)
+        self.assertIn("Answer Accuracy", notice)
+        self.assertIn("Evidence F1", notice)
+        self.assertIn("Attempts 2–3", notice)
+        self.assertIn("withheld", notice)
+        self.assertIn("provisional public ranks use only attempt 1", notice)
+        self.assertIn("no metrics", notice)
+        self.assertIn("best of all 3 eligible attempts", notice)
+
+    def test_open_copy_requires_authoritative_private_release_verification(self):
+        deployment = app.TestDeploymentConfig(
+            submissions_enabled=True,
+            public_leaderboard_enabled=False,
+            release_id="docsem-test-2026",
+            task_manifest_sha256="a" * 64,
+            gold_sha256="b" * 64,
+            open_at=dt.datetime(2026, 9, 5, tzinfo=dt.timezone.utc),
+            close_at=dt.datetime(2026, 9, 11, 12, tzinfo=dt.timezone.utc),
+            release_config_path="private/test_release.json",
+            gold_config_path="private/test_labels.jsonl",
+        )
+        now = dt.datetime(2026, 9, 6, tzinfo=dt.timezone.utc)
+
+        def unavailable(_):
+            raise RuntimeError("private release unavailable")
+
+        mismatched_policy = app.TestReleasePolicy(
+            release_id="different-release",
+            task_manifest_sha256="a" * 64,
+            gold_sha256="b" * 64,
+            open_at=deployment.open_at,
+            close_at=deployment.close_at,
+            enabled=True,
+        )
+        unavailable_notice = app._test_release_notice_html(
+            now,
+            deployment=deployment,
+            submissions_enabled=True,
+            write_token="server-token",
+            authoritative_loader=unavailable,
+        )
+        mismatched_notice = app._test_release_notice_html(
+            now,
+            deployment=deployment,
+            submissions_enabled=True,
+            write_token="server-token",
+            authoritative_loader=lambda current: trusted_test_config(mismatched_policy),
+        )
+        verified_notice = app._test_release_notice_html(
+            now,
+            deployment=deployment,
+            submissions_enabled=True,
+            write_token="server-token",
+            authoritative_loader=lambda current: trusted_test_config(
+                deployment.expected_policy
+            ),
+        )
+
+        for refused in (unavailable_notice, mismatched_notice):
+            self.assertIn("Test submissions are not open yet.", refused)
+            self.assertNotIn("Test submissions are open.", refused)
+        self.assertIn("Test submissions are open.", verified_notice)
 
     async def test_test_ui_requires_write_token_and_current_open_server_window(self):
         policy = app.TestReleasePolicy(
@@ -311,13 +499,29 @@ class PortalBehaviorTests(unittest.IsolatedAsyncioTestCase):
         )
         for name, write_token, now, expected_open in cases:
             with self.subTest(name=name):
+                deployment = app.TestDeploymentConfig(
+                    submissions_enabled=True,
+                    public_leaderboard_enabled=False,
+                    release_id=policy.release_id,
+                    task_manifest_sha256=policy.task_manifest_sha256,
+                    gold_sha256=policy.gold_sha256,
+                    open_at=policy.open_at,
+                    close_at=policy.close_at,
+                    release_config_path="private/test_release.json",
+                    gold_config_path="private/test_labels.jsonl",
+                )
                 with (
                     patch.object(app, "TEST_SUBMISSIONS_ENABLED", True),
                     patch.object(app, "WRITE_TOKEN", write_token),
+                    patch.object(app, "TEST_DEPLOYMENT", deployment),
                     patch.object(
                         app,
-                        "TEST_DEPLOYMENT",
-                        SimpleNamespace(expected_policy=policy),
+                        "_SUBMISSION_SERVICE",
+                        SimpleNamespace(
+                            test_config_loader=lambda current: trusted_test_config(
+                                policy
+                            )
+                        ),
                     ),
                     patch.object(app, "_server_now", return_value=now, create=True),
                 ):
@@ -325,12 +529,16 @@ class PortalBehaviorTests(unittest.IsolatedAsyncioTestCase):
 
                 updates = response["data"]
                 self.assertEqual(updates[2]["interactive"], expected_open)
-                self.assertIn(
+                expected_copy = (
                     "Test submissions are open."
                     if expected_open
-                    else "Test submissions are not open yet.",
-                    updates[0]["value"],
+                    else (
+                        "Test submissions are closed."
+                        if now >= policy.close_at
+                        else "Test submissions are not open yet."
+                    )
                 )
+                self.assertIn(expected_copy, updates[0]["value"])
 
     async def test_validation_endpoint_remains_anonymous_and_uses_legacy_metadata(self):
         captured = {}
@@ -417,7 +625,6 @@ class PortalBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("evidence_f1", serialized)
         self.assertNotIn("evidence_exact_match", serialized)
         self.assertNotIn("per_example", serialized)
-
 
     def test_disabled_final_leaderboard_is_notice_only_without_private_fetch(self):
         with (
