@@ -4,7 +4,7 @@ challenge_items:
   - label: DocSem Competition
     date: August 3–September 10, 2026
     type: challenge
-    note: The training split was updated on August 31 to correct seven annotation inconsistencies. A held-out test set will be released five days before the September 10 final submission deadline.
+    note: The training split was updated on August 31 to correct seven annotation inconsistencies. The held-out test set was released on September 5, five days before the September 10 final submission deadline.
   - label: Dr.DocBench Competition
     date: August 10–October 10, 2026
     time: 12:59 PM UTC deadline
