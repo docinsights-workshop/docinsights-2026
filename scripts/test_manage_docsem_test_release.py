@@ -413,7 +413,7 @@ class ManageReleaseTests(unittest.TestCase):
     def test_verify_finalized_binds_final_artifacts_and_hashes(self):
         final = canonical(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "split": "test",
                 "release_id": RELEASE_ID,
                 "task_manifest_sha256": TASK_DIGEST,
@@ -462,6 +462,30 @@ class ManageReleaseTests(unittest.TestCase):
             now=dt.datetime(2026, 9, 11, 12, 0, 2, tzinfo=UTC),
         )
         self.assertEqual(receipt["state"], "finalized")
+
+        legacy_final_value = json.loads(final)
+        legacy_final_value["schema_version"] = 1
+        legacy_final = canonical(legacy_final_value)
+        legacy_audit_value = json.loads(audit)
+        legacy_audit_value["public_projection_sha256"] = hashlib.sha256(
+            legacy_final
+        ).hexdigest()
+        legacy_audit = canonical(legacy_audit_value)
+        legacy_hub = FakeHub(
+            finalized_release(legacy_final, legacy_audit),
+            paths={
+                "projections/test/public_provisional.json": canonical(provisional()),
+                "projections/test/public_final.json": legacy_final,
+                "private/test_finalization_audit.json": legacy_audit,
+            },
+        )
+        with self.assertRaises(manager.ReleaseError):
+            self.run_manager(
+                legacy_hub,
+                "verify",
+                expected_state="finalized",
+                now=dt.datetime(2026, 9, 11, 12, 0, 2, tzinfo=UTC),
+            )
 
         hub.snapshots[PRIVATE_HEAD]["projections/test/public_final.json"] += b" "
         with self.assertRaises(manager.ReleaseError):

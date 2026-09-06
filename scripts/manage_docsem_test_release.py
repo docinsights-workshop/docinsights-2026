@@ -400,7 +400,7 @@ def _validate_final_projection(raw: bytes) -> Mapping:
         not isinstance(value, Mapping)
         or set(value) != _PROVISIONAL_FIELDS
         or type(value.get("schema_version")) is not int
-        or value.get("schema_version") != 1
+        or value.get("schema_version") != 2
         or value.get("split") != "test"
         or value.get("release_id") != RELEASE_ID
         or value.get("task_manifest_sha256") != TASK_MANIFEST_SHA256
