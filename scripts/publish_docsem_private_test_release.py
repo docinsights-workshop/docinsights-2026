@@ -2219,15 +2219,23 @@ class HuggingFaceBackend(_GuardedHuggingFaceBackend):
                 parts = tuple(item for item in changes.split(b"\0") if item)
                 if not parts:
                     continue
-                if len(parts) != 2:
+                if len(parts) % 2:
                     raise ReleaseError("Public history change metadata is malformed.")
                 try:
-                    status = parts[0].decode("ascii")
-                    changed_path = parts[1].decode("utf-8")
+                    records = tuple(
+                        (
+                            parts[index].decode("ascii"),
+                            parts[index + 1].decode("utf-8"),
+                        )
+                        for index in range(0, len(parts), 2)
+                    )
                 except UnicodeDecodeError as exc:
                     raise ReleaseError(
                         "Public history change metadata is malformed."
                     ) from exc
+                if len(set(records)) != 1:
+                    raise ReleaseError("Public history change metadata is ambiguous.")
+                status, changed_path = records[0]
                 if changed_path != LEGACY_PUBLIC_HISTORY_PATH:
                     raise ReleaseError("Public history change path is inconsistent.")
                 seconds = self._run_history_git(

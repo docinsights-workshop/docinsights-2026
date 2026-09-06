@@ -2070,10 +2070,45 @@ class PrivateContinuationTests(unittest.TestCase):
         )
         (work / "data/dev_labels.jsonl").unlink()
         subprocess.run(["git", "-C", str(work), "add", "-A"], check=True)
-        subprocess.run(
-            ["git", "-C", str(work), "commit", "-m", "synthetic delete"],
+        present_revision = subprocess.run(
+            ["git", "-C", str(work), "rev-parse", "HEAD"],
             check=True,
             capture_output=True,
+            text=True,
+        ).stdout.strip()
+        add_revision = subprocess.run(
+            ["git", "-C", str(work), "rev-parse", "HEAD^"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        deleted_tree = subprocess.run(
+            ["git", "-C", str(work), "write-tree"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        delete_revision = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(work),
+                "commit-tree",
+                deleted_tree,
+                "-p",
+                present_revision,
+                "-p",
+                add_revision,
+                "-m",
+                "synthetic merge delete",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        subprocess.run(
+            ["git", "-C", str(work), "update-ref", "HEAD", delete_revision],
+            check=True,
         )
         (work / "README.md").write_bytes(b"current snapshot\n")
         subprocess.run(["git", "-C", str(work), "add", "."], check=True)
