@@ -152,13 +152,19 @@ class FakeHub:
         self.commit_error = None
         self.postwrite_corruption = None
         self.read_calls = []
+        self.public_state_calls = 0
+        self.move_public_on_call = None
 
     def identity(self, token):
         return self.identity_value
 
     def repository_state(self, repository, token):
         if repository == "owner/public":
-            return SimpleNamespace(revision=self.public_head, private=False)
+            self.public_state_calls += 1
+            revision = self.public_head
+            if self.public_state_calls == self.move_public_on_call:
+                revision = "8" * 40
+            return SimpleNamespace(revision=revision, private=False)
         return SimpleNamespace(revision=self.private_head, private=True)
 
     def list_paths(self, repository, revision, token):
@@ -503,6 +509,13 @@ class ManageReleaseTests(unittest.TestCase):
         with self.assertRaises(manager.ConcurrentUpdateError):
             self.run_manager(hub, "activate", open_at=OPEN_AT)
         self.assertEqual(len(hub.commit_calls), 1)
+
+    def test_activation_rechecks_the_public_anchor_at_the_write_boundary(self):
+        hub = FakeHub()
+        hub.move_public_on_call = 2
+        with self.assertRaises(manager.ReleaseError):
+            self.run_manager(hub, "activate", open_at=OPEN_AT)
+        self.assertEqual(hub.commit_calls, [])
 
     def test_ambiguous_commit_or_postwrite_failure_is_uncertain_and_not_retried(self):
         hub = FakeHub()

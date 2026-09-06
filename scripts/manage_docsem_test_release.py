@@ -650,6 +650,26 @@ def _recheck_after_conflict(hub, token: str) -> None:
         return
 
 
+def _require_write_boundary(hub, token: str, expected_private_head: str) -> None:
+    """Recheck mutable identity/HEAD/visibility anchors before the only write."""
+
+    _validate_identity(hub.identity(token))
+    private_state = hub.repository_state(PRIVATE_REPOSITORY, token)
+    if (
+        getattr(private_state, "revision", None) != expected_private_head
+        or getattr(private_state, "private", None) is not True
+    ):
+        raise ConcurrentUpdateError(
+            "The private repository changed; re-evaluate from its new exact head."
+        )
+    public_state = hub.repository_state(PUBLIC_REPOSITORY, token)
+    if (
+        getattr(public_state, "revision", None) != PUBLIC_REVISION
+        or getattr(public_state, "private", None) is not False
+    ):
+        raise ReleaseError("The public release head or visibility changed.")
+
+
 def _commit_and_verify(
     *,
     hub,
@@ -660,6 +680,7 @@ def _commit_and_verify(
     expected_state: str,
     now: dt.datetime,
 ) -> str:
+    _require_write_boundary(hub, token, before.revision)
     try:
         returned = hub.create_commit(
             PRIVATE_REPOSITORY, before.revision, files, message, token
