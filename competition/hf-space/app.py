@@ -1121,8 +1121,7 @@ def _validate_provisional_projection(projection, release):
         or projection.get("schema_version") != 3
         or projection.get("split") != "test"
         or projection.get("release_id") != release.get("release_id")
-        or projection.get("task_manifest_sha256")
-        != release.get("task_manifest_sha256")
+        or projection.get("task_manifest_sha256") != release.get("task_manifest_sha256")
         or not isinstance(projection.get("rows"), list)
         or len(projection["rows"]) > FINAL_TEST_MAX_ROWS
     ):
@@ -1356,9 +1355,8 @@ def _validate_final_audit(audit, release, projection_sha256):
     ):
         raise FinalLeaderboardError("The final test leaderboard is not available.")
     eligible_attempts = audit.get("eligible_attempts")
-    if (
-        not isinstance(eligible_attempts, list)
-        or len(eligible_attempts) != audit.get("eligible_attempt_count")
+    if not isinstance(eligible_attempts, list) or len(eligible_attempts) != audit.get(
+        "eligible_attempt_count"
     ):
         raise FinalLeaderboardError("The final test leaderboard is not available.")
     for attempt in eligible_attempts:
@@ -1371,9 +1369,7 @@ def _validate_final_audit(audit, release, projection_sha256):
             or not 1 <= attempt["attempt_number"] <= 3
             or type(attempt.get("selected")) is not bool
             or _SHA256.fullmatch(str(attempt.get("record_sha256", ""))) is None
-            or _SHA256.fullmatch(
-                str(attempt.get("rescored_metrics_sha256", ""))
-            )
+            or _SHA256.fullmatch(str(attempt.get("rescored_metrics_sha256", "")))
             is None
         ):
             raise FinalLeaderboardError("The final test leaderboard is not available.")
@@ -1443,9 +1439,7 @@ def _load_provisional_test_projection(
             _artifact_bytes(artifact_reader(FINAL_TEST_RELEASE_PATH, revision))
         )
         projection = _decode_final_json(
-            _artifact_bytes(
-                artifact_reader(PROVISIONAL_TEST_PROJECTION_PATH, revision)
-            )
+            _artifact_bytes(artifact_reader(PROVISIONAL_TEST_PROJECTION_PATH, revision))
         )
         _validate_active_test_release(release, deployment, current)
         _validate_provisional_projection(projection, release)
@@ -2132,9 +2126,7 @@ def split_ui(split_label):
             "Existing validation results remain readable below."
         )
     return (
-        gr.update(
-            value=validation_copy
-        ),
+        gr.update(value=validation_copy),
         gr.update(visible=True),
         gr.update(
             value="Validate and score", interactive=VALIDATION_SUBMISSIONS_ENABLED

@@ -83,7 +83,11 @@ def parse_submission_text(text):
         rows = json.loads(stripped)
     elif stripped.startswith("{") and "\n" not in stripped:
         obj = json.loads(stripped)
-        rows = obj["predictions"] if isinstance(obj, dict) and "predictions" in obj else [obj]
+        rows = (
+            obj["predictions"]
+            if isinstance(obj, dict) and "predictions" in obj
+            else [obj]
+        )
     else:
         rows = []
         for line_number, line in enumerate(stripped.splitlines(), start=1):
@@ -92,10 +96,14 @@ def parse_submission_text(text):
             try:
                 rows.append(json.loads(line))
             except json.JSONDecodeError as exc:
-                raise SubmissionError(f"Invalid JSONL at line {line_number}: {exc}") from exc
+                raise SubmissionError(
+                    f"Invalid JSONL at line {line_number}: {exc}"
+                ) from exc
 
     if not isinstance(rows, list):
-        raise SubmissionError("Submission must be JSONL, a JSON list, or an object with a predictions list.")
+        raise SubmissionError(
+            "Submission must be JSONL, a JSON list, or an object with a predictions list."
+        )
     return rows
 
 
@@ -111,12 +119,16 @@ def validate_predictions(rows, expected_ids=None):
                 raise SubmissionError(f"Prediction at index {index} is missing {key}.")
         instance_id = row["instance_id"]
         if not isinstance(instance_id, str) or not instance_id.strip():
-            raise SubmissionError(f"Prediction at index {index} has an invalid instance_id.")
+            raise SubmissionError(
+                f"Prediction at index {index} has an invalid instance_id."
+            )
         if instance_id in seen:
             raise SubmissionError(f"Duplicate instance_id: {instance_id}")
         seen.add(instance_id)
         if not isinstance(row["answer"], str):
-            raise SubmissionError(f"Prediction for {instance_id} must have a string answer.")
+            raise SubmissionError(
+                f"Prediction for {instance_id} must have a string answer."
+            )
         evidence_set(row["evidence"])
 
     if expected_ids is not None:
@@ -124,9 +136,13 @@ def validate_predictions(rows, expected_ids=None):
         missing = sorted(expected - seen)
         extra = sorted(seen - expected)
         if missing:
-            raise SubmissionError(f"Missing predictions for {len(missing)} ids: {', '.join(missing[:5])}")
+            raise SubmissionError(
+                f"Missing predictions for {len(missing)} ids: {', '.join(missing[:5])}"
+            )
         if extra:
-            raise SubmissionError(f"Unexpected prediction ids ({len(extra)}): {', '.join(extra[:5])}")
+            raise SubmissionError(
+                f"Unexpected prediction ids ({len(extra)}): {', '.join(extra[:5])}"
+            )
     return True
 
 
@@ -138,7 +154,9 @@ def load_jsonl_text(text):
         try:
             rows.append(json.loads(line))
         except json.JSONDecodeError as exc:
-            raise SubmissionError(f"Invalid JSONL at line {line_number}: {exc}") from exc
+            raise SubmissionError(
+                f"Invalid JSONL at line {line_number}: {exc}"
+            ) from exc
     if not rows:
         raise SubmissionError("JSONL file is empty.")
     return rows

@@ -319,9 +319,7 @@ class PortalBehaviorTests(unittest.IsolatedAsyncioTestCase):
 
     def test_validation_maintenance_state_disables_only_submission_ui(self):
         with patch.object(app, "VALIDATION_SUBMISSIONS_ENABLED", False):
-            intro, contact, submit, history = app.split_ui(
-                app.VALIDATION_SPLIT_LABEL
-            )
+            intro, contact, submit, history = app.split_ui(app.VALIDATION_SPLIT_LABEL)
         with patch.object(app, "_load_leaderboard_rows", return_value=[]):
             heading, leaderboard, refresh = app.leaderboard_view(
                 app.VALIDATION_LEADERBOARD_LABEL
@@ -720,7 +718,9 @@ class PortalBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("<table", content["value"].casefold())
         self.assertFalse(refresh["visible"])
 
-    def test_provisional_loader_reads_only_release_and_rank_projection_at_one_head(self):
+    def test_provisional_loader_reads_only_release_and_rank_projection_at_one_head(
+        self,
+    ):
         hub = FinalLeaderboardHub()
         artifacts = provisional_artifacts()
         reads = []
@@ -1045,7 +1045,9 @@ class PortalBehaviorTests(unittest.IsolatedAsyncioTestCase):
         )
 
         invalid_audit_attempt = dict(base)
-        audit = json.loads(invalid_audit_attempt["private/test_finalization_audit.json"])
+        audit = json.loads(
+            invalid_audit_attempt["private/test_finalization_audit.json"]
+        )
         audit["eligible_attempts"][0].pop("joint_accuracy")
         invalid_audit_attempt["private/test_finalization_audit.json"] = canonical_json(
             audit

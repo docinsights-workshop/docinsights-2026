@@ -501,13 +501,13 @@ def _validate_metrics(metrics, predictions) -> None:
         "per_example",
     }:
         raise ValueError()
-    for field in (
+    for metric_name in (
         "joint_accuracy",
         "answer_accuracy",
         "evidence_exact_match",
         "evidence_f1",
     ):
-        value = metrics.get(field)
+        value = metrics.get(metric_name)
         if (
             type(value) is not float
             or not math.isfinite(value)
@@ -542,13 +542,13 @@ def _validate_metrics(metrics, predictions) -> None:
         if not instance_id or instance_id in actual_ids:
             raise ValueError()
         actual_ids.add(instance_id)
-        for field in (
+        for metric_name in (
             "answer_exact_match",
             "evidence_exact_match",
             "evidence_f1",
             "joint_exact_match",
         ):
-            value = row.get(field)
+            value = row.get(metric_name)
             if (
                 type(value) is not float
                 or not math.isfinite(value)

@@ -35,7 +35,11 @@ FIXTURE_ATTEMPTS = [
     {
         "submission_id": "higher-answer",
         "submitted_at": "2026-09-05T08:00:00Z",
-        "metrics": {"joint_accuracy": 0.6, "answer_accuracy": 0.99, "evidence_f1": 0.99},
+        "metrics": {
+            "joint_accuracy": 0.6,
+            "answer_accuracy": 0.99,
+            "evidence_f1": 0.99,
+        },
     },
 ]
 
@@ -129,7 +133,11 @@ class TestPolicyTests(unittest.TestCase):
     def test_canonical_hash_is_stable_for_payload_order_and_mapping_order(self):
         identity = OAuthIdentity(sub="stable-1", username="u", email="a@example.org")
         first = [
-            {"instance_id": "two", "answer": " Final Answer: 42 ", "evidence": ["B2", "a1"]},
+            {
+                "instance_id": "two",
+                "answer": " Final Answer: 42 ",
+                "evidence": ["B2", "a1"],
+            },
             {"instance_id": "one", "answer": "yes", "evidence": ["a"]},
         ]
         reordered = [
@@ -171,7 +179,12 @@ class TestPolicyTests(unittest.TestCase):
 
         self.assertEqual(
             response,
-            {"accepted": True, "attempt": 2, "receipt": "receipt-2", "score": "withheld"},
+            {
+                "accepted": True,
+                "attempt": 2,
+                "receipt": "receipt-2",
+                "score": "withheld",
+            },
         )
 
     def test_attempt_three_feedback_withholds_every_metric(self):
@@ -182,7 +195,9 @@ class TestPolicyTests(unittest.TestCase):
         self.assertNotIn("evidence_f1", response)
 
     def test_best_attempt_uses_joint_accuracy_then_answer_f1_time_and_id(self):
-        self.assertEqual(select_best_attempt(FIXTURE_ATTEMPTS)["submission_id"], "expected-id")
+        self.assertEqual(
+            select_best_attempt(FIXTURE_ATTEMPTS)["submission_id"], "expected-id"
+        )
 
     def test_best_attempt_uses_submission_id_as_last_tie_breaker(self):
         attempts = [
@@ -205,16 +220,26 @@ class TestPolicyTests(unittest.TestCase):
             {
                 "submission_id": "offset-earlier",
                 "accepted_at": "2026-09-05T10:00:00+01:00",
-                "metrics": {"joint_accuracy": 0.7, "answer_accuracy": 0.9, "evidence_f1": 0.8},
+                "metrics": {
+                    "joint_accuracy": 0.7,
+                    "answer_accuracy": 0.9,
+                    "evidence_f1": 0.8,
+                },
             },
             {
                 "submission_id": "utc-later",
                 "accepted_at": "2026-09-05T09:30:00Z",
-                "metrics": {"joint_accuracy": 0.7, "answer_accuracy": 0.9, "evidence_f1": 0.8},
+                "metrics": {
+                    "joint_accuracy": 0.7,
+                    "answer_accuracy": 0.9,
+                    "evidence_f1": 0.8,
+                },
             },
         ]
 
-        self.assertEqual(select_best_attempt(attempts)["submission_id"], "offset-earlier")
+        self.assertEqual(
+            select_best_attempt(attempts)["submission_id"], "offset-earlier"
+        )
 
     def test_best_attempt_rejects_missing_timestamp(self):
         with self.assertRaisesRegex(TestPolicyError, "timestamp"):
@@ -222,7 +247,11 @@ class TestPolicyTests(unittest.TestCase):
                 [
                     {
                         "submission_id": "missing-time",
-                        "metrics": {"joint_accuracy": 0.7, "answer_accuracy": 0.9, "evidence_f1": 0.8},
+                        "metrics": {
+                            "joint_accuracy": 0.7,
+                            "answer_accuracy": 0.9,
+                            "evidence_f1": 0.8,
+                        },
                     }
                 ]
             )
@@ -234,7 +263,11 @@ class TestPolicyTests(unittest.TestCase):
                     {
                         "submission_id": "malformed-time",
                         "accepted_at": "not-a-timestamp",
-                        "metrics": {"joint_accuracy": 0.7, "answer_accuracy": 0.9, "evidence_f1": 0.8},
+                        "metrics": {
+                            "joint_accuracy": 0.7,
+                            "answer_accuracy": 0.9,
+                            "evidence_f1": 0.8,
+                        },
                     }
                 ]
             )

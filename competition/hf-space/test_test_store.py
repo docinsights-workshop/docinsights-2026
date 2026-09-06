@@ -513,12 +513,8 @@ class HubTestStoreTests(unittest.TestCase):
             hub.files[f"attempts/test/{key}/{receipt.submission_id}.json"]
         )
         account = json.loads(hub.files[f"projections/test/accounts/{key}.json"])
-        organizer = json.loads(
-            hub.files["projections/test/organizer_leaderboard.json"]
-        )
-        provisional = json.loads(
-            hub.files["projections/test/public_provisional.json"]
-        )
+        organizer = json.loads(hub.files["projections/test/organizer_leaderboard.json"])
+        provisional = json.loads(hub.files["projections/test/public_provisional.json"])
         self.assertEqual(
             [value["schema_version"] for value in (attempt, account, organizer)],
             [3, 3, 3],
@@ -562,11 +558,16 @@ class HubTestStoreTests(unittest.TestCase):
         self.assertEqual(receipt.attempt, 2)
         self.assertNotIn(
             "projections/test/public_provisional.json",
-            {operation.path_in_repo for operation in hub.create_calls[-1]["operations"]},
+            {
+                operation.path_in_repo
+                for operation in hub.create_calls[-1]["operations"]
+            },
         )
         self.assertEqual(hub.files["projections/test/public_provisional.json"], before)
 
-    def test_new_account_recomputes_provisional_from_immutable_attempt_one_records(self):
+    def test_new_account_recomputes_provisional_from_immutable_attempt_one_records(
+        self,
+    ):
         hub = InMemoryHub()
         store = HubTestStore(
             hub,
@@ -589,9 +590,7 @@ class HubTestStoreTests(unittest.TestCase):
             {**METRICS, "joint_accuracy": 0.75, "answer_accuracy": 0.75},
         )
 
-        provisional = json.loads(
-            hub.files["projections/test/public_provisional.json"]
-        )
+        provisional = json.loads(hub.files["projections/test/public_provisional.json"])
         self.assertEqual(
             provisional["rows"],
             [
@@ -701,9 +700,7 @@ class HubTestStoreTests(unittest.TestCase):
     def test_private_policy_cannot_extend_the_hard_close(self):
         hub = InMemoryHub(
             files={
-                "sealed/release.json": release_bytes(
-                    close_at="2026-09-12T12:00:00Z"
-                )
+                "sealed/release.json": release_bytes(close_at="2026-09-12T12:00:00Z")
             }
         )
         store = HubTestStore(
