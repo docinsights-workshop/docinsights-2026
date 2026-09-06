@@ -13,6 +13,7 @@ from test_policy import (
 
 
 METRICS = {
+    "joint_accuracy": 0.54321,
     "answer_accuracy": 0.812345,
     "evidence_f1": 0.654321,
     "evidence_exact_match": 0.5,
@@ -24,17 +25,17 @@ FIXTURE_ATTEMPTS = [
     {
         "submission_id": "later-id",
         "submitted_at": "2026-09-05T10:00:00Z",
-        "metrics": {"answer_accuracy": 0.9, "evidence_f1": 0.8},
+        "metrics": {"joint_accuracy": 0.7, "answer_accuracy": 0.9, "evidence_f1": 0.8},
     },
     {
         "submission_id": "expected-id",
         "submitted_at": "2026-09-05T09:00:00Z",
-        "metrics": {"answer_accuracy": 0.9, "evidence_f1": 0.8},
+        "metrics": {"joint_accuracy": 0.7, "answer_accuracy": 0.9, "evidence_f1": 0.8},
     },
     {
         "submission_id": "higher-answer",
         "submitted_at": "2026-09-05T08:00:00Z",
-        "metrics": {"answer_accuracy": 0.89, "evidence_f1": 0.99},
+        "metrics": {"joint_accuracy": 0.6, "answer_accuracy": 0.99, "evidence_f1": 0.99},
     },
 ]
 
@@ -154,7 +155,14 @@ class TestPolicyTests(unittest.TestCase):
 
         self.assertEqual(
             set(response),
-            {"accepted", "attempt", "receipt", "answer_accuracy", "evidence_f1"},
+            {
+                "accepted",
+                "attempt",
+                "receipt",
+                "joint_accuracy",
+                "answer_accuracy",
+                "evidence_f1",
+            },
         )
         self.assertNotIn("per_example", response)
 
@@ -173,20 +181,36 @@ class TestPolicyTests(unittest.TestCase):
         self.assertNotIn("answer_accuracy", response)
         self.assertNotIn("evidence_f1", response)
 
-    def test_best_attempt_uses_accuracy_f1_time_and_id(self):
+    def test_best_attempt_uses_joint_accuracy_then_answer_f1_time_and_id(self):
         self.assertEqual(select_best_attempt(FIXTURE_ATTEMPTS)["submission_id"], "expected-id")
+
+    def test_best_attempt_uses_submission_id_as_last_tie_breaker(self):
+        attempts = [
+            {
+                "submission_id": submission_id,
+                "submitted_at": "2026-09-05T09:00:00Z",
+                "metrics": {
+                    "joint_accuracy": 0.7,
+                    "answer_accuracy": 0.9,
+                    "evidence_f1": 0.8,
+                },
+            }
+            for submission_id in ("z-id", "a-id")
+        ]
+
+        self.assertEqual(select_best_attempt(attempts)["submission_id"], "a-id")
 
     def test_best_attempt_orders_aware_timestamps_by_utc_instant(self):
         attempts = [
             {
                 "submission_id": "offset-earlier",
                 "accepted_at": "2026-09-05T10:00:00+01:00",
-                "metrics": {"answer_accuracy": 0.9, "evidence_f1": 0.8},
+                "metrics": {"joint_accuracy": 0.7, "answer_accuracy": 0.9, "evidence_f1": 0.8},
             },
             {
                 "submission_id": "utc-later",
                 "accepted_at": "2026-09-05T09:30:00Z",
-                "metrics": {"answer_accuracy": 0.9, "evidence_f1": 0.8},
+                "metrics": {"joint_accuracy": 0.7, "answer_accuracy": 0.9, "evidence_f1": 0.8},
             },
         ]
 
@@ -198,7 +222,7 @@ class TestPolicyTests(unittest.TestCase):
                 [
                     {
                         "submission_id": "missing-time",
-                        "metrics": {"answer_accuracy": 0.9, "evidence_f1": 0.8},
+                        "metrics": {"joint_accuracy": 0.7, "answer_accuracy": 0.9, "evidence_f1": 0.8},
                     }
                 ]
             )
@@ -210,7 +234,7 @@ class TestPolicyTests(unittest.TestCase):
                     {
                         "submission_id": "malformed-time",
                         "accepted_at": "not-a-timestamp",
-                        "metrics": {"answer_accuracy": 0.9, "evidence_f1": 0.8},
+                        "metrics": {"joint_accuracy": 0.7, "answer_accuracy": 0.9, "evidence_f1": 0.8},
                     }
                 ]
             )

@@ -351,7 +351,7 @@ class LeaderboardRankingTests(unittest.TestCase):
 
 
 class JointMetricScoringTests(unittest.TestCase):
-    def test_shared_scorer_keeps_the_legacy_test_metric_contract(self):
+    def test_official_shared_scorer_emits_joint_aggregate_and_per_example_metric(self):
         metrics = score_predictions(
             [{"instance_id": "one", "answer": "10", "evidence": ["b01"]}],
             [{"instance_id": "one", "answer": "10", "evidence": ["b01"]}],
@@ -363,6 +363,7 @@ class JointMetricScoringTests(unittest.TestCase):
                 "answer_accuracy",
                 "evidence_exact_match",
                 "evidence_f1",
+                "joint_accuracy",
                 "examples",
                 "per_example",
             },
@@ -374,6 +375,7 @@ class JointMetricScoringTests(unittest.TestCase):
                 "answer_exact_match",
                 "evidence_exact_match",
                 "evidence_f1",
+                "joint_exact_match",
             },
         )
 
@@ -391,13 +393,15 @@ class JointMetricScoringTests(unittest.TestCase):
             {"instance_id": "neither", "answer": "41", "evidence": ["b07"]},
         ]
 
-        metrics = score_validation_predictions(predictions, labels)
+        metrics = score_predictions(predictions, labels)
 
         self.assertEqual(metrics["joint_accuracy"], 0.25)
         self.assertEqual(
             [row["joint_exact_match"] for row in metrics["per_example"]],
             [1.0, 0.0, 0.0, 0.0],
         )
+
+        self.assertEqual(score_validation_predictions(predictions, labels), metrics)
 
     def test_leaderboard_row_carries_joint_accuracy(self):
         row = leaderboard_row(

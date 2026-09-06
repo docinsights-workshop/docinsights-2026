@@ -235,22 +235,29 @@ def _accepted_timestamp(attempt: Mapping) -> dt.datetime:
     return parsed.astimezone(dt.timezone.utc)
 
 
-def select_best_attempt(attempts):
-    """Select an account's best attempt using the documented deterministic order."""
+def rank_attempts(attempts):
+    """Return accepted attempts in the documented deterministic ranking order."""
 
     if not isinstance(attempts, (list, tuple)) or not attempts:
         raise TestPolicyError("At least one accepted test attempt is required.")
     if any(not isinstance(attempt, Mapping) for attempt in attempts):
         raise TestPolicyError("Accepted attempts must be objects.")
-    return min(
+    return sorted(
         attempts,
         key=lambda attempt: (
+            -_metric(attempt, "joint_accuracy"),
             -_metric(attempt, "answer_accuracy"),
             -_metric(attempt, "evidence_f1"),
             _accepted_timestamp(attempt),
             str(attempt.get("submission_id", "")),
         ),
     )
+
+
+def select_best_attempt(attempts):
+    """Select an account's best attempt using the documented deterministic order."""
+
+    return rank_attempts(attempts)[0]
 
 
 def participant_test_response(attempt: int, metrics: Mapping, receipt: str) -> dict:
@@ -264,6 +271,7 @@ def participant_test_response(attempt: int, metrics: Mapping, receipt: str) -> d
         raise TestPolicyError("A test receipt is required.")
     if attempt == 1:
         try:
+            joint_accuracy = round(float(metrics["joint_accuracy"]), 6)
             answer_accuracy = round(float(metrics["answer_accuracy"]), 6)
             evidence_f1 = round(float(metrics["evidence_f1"]), 6)
         except (KeyError, TypeError, ValueError) as exc:
@@ -272,6 +280,7 @@ def participant_test_response(attempt: int, metrics: Mapping, receipt: str) -> d
             "accepted": True,
             "attempt": attempt,
             "receipt": receipt,
+            "joint_accuracy": joint_accuracy,
             "answer_accuracy": answer_accuracy,
             "evidence_f1": evidence_f1,
         }

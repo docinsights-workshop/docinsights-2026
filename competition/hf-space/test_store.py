@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import math
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -16,6 +17,7 @@ from huggingface_hub.errors import EntryNotFoundError, HfHubHTTPError
 from test_contract import (
     MAX_LEDGER_FILE_BYTES,
     bounded_private_text,
+    is_valid_public_text,
     repository_id,
     revision_digest,
     sha256_digest,
@@ -27,11 +29,17 @@ from test_policy import (
     TestReleasePolicy,
     account_key,
     canonical_submission_hash,
+    rank_attempts,
     select_best_attempt,
 )
 
 
 ORGANIZER_PATH = "projections/test/organizer_leaderboard.json"
+PROVISIONAL_PATH = "projections/test/public_provisional.json"
+LEDGER_SCHEMA_VERSION = 3
+TEST_SUBMISSION_CLOSE_AT = dt.datetime(
+    2026, 9, 11, 12, 0, tzinfo=dt.timezone.utc
+)
 MAX_COMMIT_ATTEMPTS = 5
 
 
@@ -57,6 +65,8 @@ class _Snapshot:
     attempts: tuple[dict, ...]
     attempt_record_sha256: Mapping[str, str]
     organizer: dict
+    provisional: dict
+    provisional_raw: bytes
 
 
 class _Unavailable(Exception):
@@ -96,6 +106,7 @@ class HubTestStore:
             validate_test_predictions(predictions)
             normalized_predictions = _json_copy(predictions)
             normalized_metrics = _json_copy(metrics)
+            _validate_metrics(normalized_metrics, normalized_predictions)
         except Exception:
             raise TestStoreError("Test submission could not be accepted.") from None
 
@@ -103,8 +114,6 @@ class HubTestStore:
         for _ in range(MAX_COMMIT_ATTEMPTS):
             try:
                 snapshot = self._load_snapshot(key)
-                plan_now = self.now_provider()
-                _require_open(snapshot.policy, plan_now)
                 _verify_release(snapshot, normalized_metadata)
                 submission_hash = canonical_submission_hash(
                     normalized_predictions,
@@ -126,9 +135,9 @@ class HubTestStore:
 
                 attempt_number = len(snapshot.attempts) + 1
 
-                # Take a new authoritative instant for every CAS attempt. A request
-                # that was open while planning but crosses the deadline must never
-                # materialize an attempt record or reach create_commit().
+                # Resample the authoritative Space-server clock immediately before
+                # every exact-parent CAS. Conflict retries therefore cannot carry a
+                # stale pre-deadline admission decision across the hard close.
                 commit_now = self.now_provider()
                 _require_open(snapshot.policy, commit_now)
                 accepted_at = _accepted_at(commit_now)
@@ -167,6 +176,19 @@ class HubTestStore:
                 )
                 account_projection_bytes = _bounded_json_bytes(account_projection)
                 organizer_projection_bytes = _bounded_json_bytes(organizer_projection)
+                provisional_projection_bytes = None
+                if attempt_number == 1:
+                    first_attempts = self._load_attempt_one_records(snapshot)
+                    if snapshot.provisional != _provisional_projection(
+                        snapshot.policy, first_attempts
+                    ):
+                        raise _Unavailable()
+                    provisional_projection_bytes = _bounded_json_bytes(
+                        _provisional_projection(
+                            snapshot.policy,
+                            [*first_attempts, record],
+                        )
+                    )
 
                 operations = _commit_operations(
                     key,
@@ -174,9 +196,10 @@ class HubTestStore:
                     record_bytes,
                     account_projection_bytes,
                     organizer_projection_bytes,
+                    provisional_projection_bytes,
                 )
                 try:
-                    self.api.create_commit(
+                    committed = self.api.create_commit(
                         repo_id=self.repo_id,
                         repo_type="dataset",
                         revision="main",
@@ -185,9 +208,22 @@ class HubTestStore:
                         commit_message=f"Accept DocSem test attempt {attempt_number}",
                     )
                 except HfHubHTTPError as exc:
-                    if _is_parent_conflict(exc):
+                    if _is_parent_conflict(exc) or _is_uncertain_commit_error(exc):
                         continue
                     raise
+                committed_revision = getattr(committed, "oid", None)
+                if not isinstance(committed_revision, str) or not committed_revision:
+                    # A write with no authoritative revision is uncertain. Reloading
+                    # lets the canonical submission hash reconcile it without a
+                    # duplicate attempt.
+                    continue
+                self._verify_commit_readback(
+                    committed_revision,
+                    {
+                        operation.path_in_repo: operation.path_or_fileobj
+                        for operation in operations
+                    },
+                )
                 return TestReceipt(True, attempt_number, candidate_id, accepted_at)
             except HfHubHTTPError:
                 raise TestStoreError(
@@ -202,6 +238,32 @@ class HubTestStore:
                     "Test submission is temporarily unavailable."
                 ) from None
         raise TestStoreError("Test submission is temporarily unavailable.")
+
+    def _verify_commit_readback(self, revision: str, expected: Mapping[str, bytes]):
+        for path, raw in expected.items():
+            if not isinstance(raw, bytes) or self._read_required(path, revision) != raw:
+                raise _Unavailable()
+
+    def _load_attempt_one_records(self, snapshot: _Snapshot) -> list[dict]:
+        records = []
+        seen = set()
+        for account in snapshot.organizer.get("accounts", []):
+            key = account.get("account_key") if isinstance(account, Mapping) else None
+            if (
+                not isinstance(key, str)
+                or len(key) != 64
+                or any(character not in "0123456789abcdef" for character in key)
+                or key in seen
+            ):
+                raise _Unavailable()
+            seen.add(key)
+            attempts, _ = self._load_account_attempts(
+                key, snapshot.sha, snapshot.policy
+            )
+            if not attempts:
+                raise _Unavailable()
+            records.append(attempts[0])
+        return records
 
     def account_history(self, identity) -> list[dict]:
         try:
@@ -251,8 +313,10 @@ class HubTestStore:
         self._require_config_paths()
         sha = self._head_sha()
         release_raw = self._read_required(self.release_config_path, sha)
-        gold = self._read_required(self.gold_config_path, sha)
         policy = _release_policy(release_raw)
+        if not policy.enabled:
+            raise _ReleaseClosed()
+        gold = self._read_required(self.gold_config_path, sha)
         _validate_gold(gold)
         attempts, attempt_record_sha256 = self._load_account_attempts(key, sha, policy)
         organizer = self._read_json_optional(
@@ -261,6 +325,9 @@ class HubTestStore:
             {**_release_state(policy), "accounts": []},
         )
         _validate_organizer_projection(organizer, policy)
+        provisional_raw = self._read_required(PROVISIONAL_PATH, sha)
+        provisional = _decode_json(provisional_raw)
+        _validate_provisional_projection(provisional, policy)
         return _Snapshot(
             sha,
             policy,
@@ -268,6 +335,8 @@ class HubTestStore:
             tuple(attempts),
             attempt_record_sha256,
             organizer,
+            provisional,
+            provisional_raw,
         )
 
     def _require_config_paths(self) -> None:
@@ -417,9 +486,79 @@ def _validate_attempt_contract(record) -> None:
             "submission_name",
         ):
             bounded_private_text(record.get(field), field)
-        validate_test_predictions(record.get("predictions"))
+        predictions = record.get("predictions")
+        validate_test_predictions(predictions)
+        _validate_metrics(record.get("metrics"), predictions)
     except ValueError:
         raise _Unavailable() from None
+
+
+def _validate_metrics(metrics, predictions) -> None:
+    if not isinstance(metrics, Mapping) or set(metrics) != {
+        "joint_accuracy",
+        "answer_accuracy",
+        "evidence_exact_match",
+        "evidence_f1",
+        "examples",
+        "per_example",
+    }:
+        raise ValueError()
+    for field in (
+        "joint_accuracy",
+        "answer_accuracy",
+        "evidence_exact_match",
+        "evidence_f1",
+    ):
+        value = metrics.get(field)
+        if (
+            type(value) is not float
+            or not math.isfinite(value)
+            or not 0.0 <= value <= 1.0
+        ):
+            raise ValueError()
+    examples = metrics.get("examples")
+    per_example = metrics.get("per_example")
+    if (
+        type(examples) is not int
+        or examples <= 0
+        or not isinstance(per_example, list)
+        or len(per_example) != examples
+        or examples != len(predictions)
+    ):
+        raise ValueError()
+    expected_ids = {row["instance_id"].strip() for row in predictions}
+    actual_ids = set()
+    for row in per_example:
+        if not isinstance(row, Mapping) or set(row) != {
+            "instance_id",
+            "answer_exact_match",
+            "evidence_exact_match",
+            "evidence_f1",
+            "joint_exact_match",
+        }:
+            raise ValueError()
+        instance_id = row.get("instance_id")
+        if not isinstance(instance_id, str) or instance_id in actual_ids:
+            raise ValueError()
+        instance_id = instance_id.strip()
+        if not instance_id or instance_id in actual_ids:
+            raise ValueError()
+        actual_ids.add(instance_id)
+        for field in (
+            "answer_exact_match",
+            "evidence_exact_match",
+            "evidence_f1",
+            "joint_exact_match",
+        ):
+            value = row.get(field)
+            if (
+                type(value) is not float
+                or not math.isfinite(value)
+                or not 0.0 <= value <= 1.0
+            ):
+                raise ValueError()
+    if actual_ids != expected_ids:
+        raise ValueError()
 
 
 def _json_copy(value):
@@ -487,6 +626,8 @@ def _require_open(policy: TestReleasePolicy, now):
         if str(exc) == "Test submissions are not open.":
             raise _ReleaseClosed() from None
         raise _Unavailable() from None
+    if now >= TEST_SUBMISSION_CLOSE_AT:
+        raise _ReleaseClosed()
 
 
 def _verify_release(snapshot: _Snapshot, metadata: Mapping):
@@ -605,7 +746,7 @@ def _organizer_projection(current, key, policy, attempts, best) -> dict:
 
 def _release_state(policy: TestReleasePolicy) -> dict:
     return {
-        "schema_version": 2,
+        "schema_version": LEDGER_SCHEMA_VERSION,
         "split": "test",
         "release_id": policy.release_id,
         "task_manifest_sha256": policy.task_manifest_sha256,
@@ -645,6 +786,55 @@ def _validate_organizer_projection(value, policy: TestReleasePolicy):
         _validate_release_state(account, policy)
 
 
+def _provisional_projection(policy: TestReleasePolicy, first_attempts) -> dict:
+    ranked = rank_attempts(list(first_attempts)) if first_attempts else []
+    return {
+        "schema_version": LEDGER_SCHEMA_VERSION,
+        "split": "test",
+        "release_id": policy.release_id,
+        "task_manifest_sha256": policy.task_manifest_sha256,
+        "rows": [
+            {
+                "rank": rank,
+                "hf_username": attempt["hf_username"],
+                "team": attempt["team"],
+            }
+            for rank, attempt in enumerate(ranked, start=1)
+        ],
+    }
+
+
+def _validate_provisional_projection(value, policy: TestReleasePolicy):
+    if (
+        not isinstance(value, Mapping)
+        or set(value)
+        != {
+            "schema_version",
+            "split",
+            "release_id",
+            "task_manifest_sha256",
+            "rows",
+        }
+        or value.get("schema_version") != LEDGER_SCHEMA_VERSION
+        or type(value.get("schema_version")) is not int
+        or value.get("split") != "test"
+        or value.get("release_id") != policy.release_id
+        or value.get("task_manifest_sha256") != policy.task_manifest_sha256
+        or not isinstance(value.get("rows"), list)
+    ):
+        raise _Unavailable()
+    for expected_rank, row in enumerate(value["rows"], start=1):
+        if (
+            not isinstance(row, Mapping)
+            or set(row) != {"rank", "hf_username", "team"}
+            or type(row.get("rank")) is not int
+            or row.get("rank") != expected_rank
+            or not is_valid_public_text(row.get("hf_username"))
+            or not is_valid_public_text(row.get("team"))
+        ):
+            raise _Unavailable()
+
+
 def _json_bytes(value) -> bytes:
     serialized = json.dumps(
         value,
@@ -668,8 +858,9 @@ def _commit_operations(
     record_bytes,
     account_projection_bytes,
     organizer_projection_bytes,
+    provisional_projection_bytes=None,
 ):
-    return [
+    operations = [
         CommitOperationAdd(
             path_in_repo=f"attempts/test/{key}/{submission_id}.json",
             path_or_fileobj=record_bytes,
@@ -683,6 +874,14 @@ def _commit_operations(
             path_or_fileobj=organizer_projection_bytes,
         ),
     ]
+    if provisional_projection_bytes is not None:
+        operations.append(
+            CommitOperationAdd(
+                path_in_repo=PROVISIONAL_PATH,
+                path_or_fileobj=provisional_projection_bytes,
+            )
+        )
+    return operations
 
 
 def _accepted_receipt(record) -> TestReceipt:
@@ -697,3 +896,8 @@ def _accepted_receipt(record) -> TestReceipt:
 
 def _is_parent_conflict(exc: HfHubHTTPError) -> bool:
     return getattr(getattr(exc, "response", None), "status_code", None) == 409
+
+
+def _is_uncertain_commit_error(exc: HfHubHTTPError) -> bool:
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    return status is None or status >= 500

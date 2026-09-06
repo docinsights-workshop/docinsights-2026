@@ -156,6 +156,7 @@ def score_predictions(rows, labels):
     answer_scores = []
     evidence_exact_scores = []
     evidence_f1_scores = []
+    joint_scores = []
     per_example = []
 
     for instance_id, gold in gold_by_id.items():
@@ -165,15 +166,18 @@ def score_predictions(rows, labels):
         gold_evidence = evidence_set(gold["evidence"])
         evidence_exact = float(pred_evidence == gold_evidence)
         ev_f1 = evidence_f1(pred["evidence"], gold["evidence"])
+        joint_exact = float(answer_score == 1.0 and evidence_exact == 1.0)
         answer_scores.append(answer_score)
         evidence_exact_scores.append(evidence_exact)
         evidence_f1_scores.append(ev_f1)
+        joint_scores.append(joint_exact)
         per_example.append(
             {
                 "instance_id": instance_id,
                 "answer_exact_match": answer_score,
                 "evidence_exact_match": evidence_exact,
                 "evidence_f1": ev_f1,
+                "joint_exact_match": joint_exact,
             }
         )
 
@@ -182,29 +186,16 @@ def score_predictions(rows, labels):
         "answer_accuracy": round(sum(answer_scores) / count, 6),
         "evidence_exact_match": round(sum(evidence_exact_scores) / count, 6),
         "evidence_f1": round(sum(evidence_f1_scores) / count, 6),
+        "joint_accuracy": round(sum(joint_scores) / count, 6),
         "examples": count,
         "per_example": per_example,
     }
 
 
 def score_validation_predictions(rows, labels):
-    """Score validation rows and add the validation-only joint metric."""
+    """Compatibility name for the official scorer shared by both splits."""
 
-    metrics = score_predictions(rows, labels)
-    joint_scores = []
-    per_example = []
-    for example in metrics["per_example"]:
-        joint_exact = float(
-            example["answer_exact_match"] == 1.0
-            and example["evidence_exact_match"] == 1.0
-        )
-        joint_scores.append(joint_exact)
-        per_example.append({**example, "joint_exact_match": joint_exact})
-    return {
-        **metrics,
-        "joint_accuracy": round(sum(joint_scores) / metrics["examples"], 6),
-        "per_example": per_example,
-    }
+    return score_predictions(rows, labels)
 
 
 def leaderboard_row(

@@ -121,6 +121,7 @@ class RecordingStore:
                 "submission_name": "first",
                 "submitted_at": "2026-09-05T12:00:01Z",
                 "metrics": {
+                    "joint_accuracy": 1.0,
                     "answer_accuracy": 1.0,
                     "evidence_exact_match": 1.0,
                     "evidence_f1": 1.0,
@@ -135,6 +136,7 @@ class RecordingStore:
                 "submission_name": "second",
                 "submitted_at": "2026-09-05T12:00:02Z",
                 "metrics": {
+                    "joint_accuracy": 0.25,
                     "answer_accuracy": 0.5,
                     "evidence_f1": 0.5,
                     "per_example": [{"instance_id": "secret-test-id"}],
@@ -508,6 +510,7 @@ class SplitAwareServiceTests(unittest.TestCase):
                 "accepted": True,
                 "attempt": 1,
                 "receipt": "receipt-1",
+                "joint_accuracy": 1.0,
                 "answer_accuracy": 1.0,
                 "evidence_f1": 1.0,
                 "accepted_at": "2026-09-05T12:00:01Z",
@@ -564,6 +567,7 @@ class SplitAwareServiceTests(unittest.TestCase):
             "submission_name": "original-name",
             "submitted_at": "2026-09-05T12:00:09Z",
             "metrics": {
+                "joint_accuracy": 0.125,
                 "answer_accuracy": 0.25,
                 "evidence_exact_match": 0.0,
                 "evidence_f1": 0.5,
@@ -587,6 +591,7 @@ class SplitAwareServiceTests(unittest.TestCase):
                 "accepted": True,
                 "attempt": 1,
                 "receipt": "persisted-receipt",
+                "joint_accuracy": 0.125,
                 "answer_accuracy": 0.25,
                 "evidence_f1": 0.5,
                 "accepted_at": "2026-09-05T12:00:09Z",
@@ -606,7 +611,11 @@ class SplitAwareServiceTests(unittest.TestCase):
             "submission_id": "winning-race-receipt",
             "submission_name": "original-name",
             "submitted_at": "2026-09-05T12:00:11Z",
-            "metrics": {"answer_accuracy": 0.25, "evidence_f1": 0.5},
+            "metrics": {
+                "joint_accuracy": 0.125,
+                "answer_accuracy": 0.25,
+                "evidence_f1": 0.5,
+            },
         }
 
         class RacingRetryStore(RecordingStore):
@@ -623,6 +632,7 @@ class SplitAwareServiceTests(unittest.TestCase):
         result = service.submit_for_split("test", upload, TEST_META, PROFILE)
 
         self.assertEqual(result["receipt"], "winning-race-receipt")
+        self.assertEqual(result["joint_accuracy"], 0.125)
         self.assertEqual(result["answer_accuracy"], 0.25)
         self.assertEqual(result["evidence_f1"], 0.5)
 
@@ -776,11 +786,20 @@ class SplitAwareServiceTests(unittest.TestCase):
                 if not was_released:
                     raise AssertionError("scoring gate fixture timed out")
                 return {
+                    "joint_accuracy": 1.0,
                     "answer_accuracy": 1.0,
                     "evidence_exact_match": 1.0,
                     "evidence_f1": 1.0,
                     "examples": 1,
-                    "per_example": [],
+                    "per_example": [
+                        {
+                            "instance_id": "test-1",
+                            "answer_exact_match": 1.0,
+                            "evidence_exact_match": 1.0,
+                            "evidence_f1": 1.0,
+                            "joint_exact_match": 1.0,
+                        }
+                    ],
                 }
             finally:
                 with active_lock:
@@ -860,21 +879,33 @@ class SplitAwareServiceTests(unittest.TestCase):
                 "submission_id": "receipt-1",
                 "submission_name": "first",
                 "submitted_at": "2026-09-05T12:00:01Z",
-                "metrics": {"answer_accuracy": 1.0, "evidence_f1": 0.75},
+                "metrics": {
+                    "joint_accuracy": 0.875,
+                    "answer_accuracy": 1.0,
+                    "evidence_f1": 0.75,
+                },
             },
             {
                 "attempt_number": 2,
                 "submission_id": "receipt-2",
                 "submission_name": "second",
                 "submitted_at": "2026-09-05T12:00:02Z",
-                "metrics": {"answer_accuracy": 0.125, "evidence_f1": 0.25},
+                "metrics": {
+                    "joint_accuracy": 0.125,
+                    "answer_accuracy": 0.125,
+                    "evidence_f1": 0.25,
+                },
             },
             {
                 "attempt_number": 3,
                 "submission_id": "receipt-3",
                 "submission_name": "third",
                 "submitted_at": "2026-09-05T12:00:03Z",
-                "metrics": {"answer_accuracy": 0.5, "evidence_f1": 0.625},
+                "metrics": {
+                    "joint_accuracy": 0.25,
+                    "answer_accuracy": 0.5,
+                    "evidence_f1": 0.625,
+                },
             },
         )
 
@@ -897,6 +928,7 @@ class SplitAwareServiceTests(unittest.TestCase):
         )
         self.assertEqual(result["attempts"][0]["answer_accuracy"], 1.0)
         self.assertEqual(result["attempts"][0]["evidence_f1"], 0.75)
+        self.assertEqual(result["attempts"][0]["joint_accuracy"], 0.875)
         self.assertEqual(result["attempts"][1]["score"], "withheld")
         self.assertEqual(result["attempts"][2]["score"], "withheld")
         serialized = json.dumps(result)
@@ -917,6 +949,7 @@ class SplitAwareServiceTests(unittest.TestCase):
                     "accepted": True,
                     "attempt": 1,
                     "receipt": "receipt-1",
+                    "joint_accuracy": 1.0,
                     "answer_accuracy": 1.0,
                     "evidence_f1": 1.0,
                     "submission_name": "first",
@@ -956,7 +989,7 @@ class SplitAwareServiceTests(unittest.TestCase):
 
     def test_gradio_handler_returns_only_attempt_appropriate_feedback(self):
         for attempt, expected in (
-            (1, {"answer_accuracy", "evidence_f1"}),
+            (1, {"joint_accuracy", "answer_accuracy", "evidence_f1"}),
             (3, {"score"}),
         ):
             with self.subTest(attempt=attempt):
@@ -970,7 +1003,8 @@ class SplitAwareServiceTests(unittest.TestCase):
                 metric_keys = {
                     key
                     for key in result
-                    if key in {"answer_accuracy", "evidence_f1", "score"}
+                    if key
+                    in {"joint_accuracy", "answer_accuracy", "evidence_f1", "score"}
                 }
                 self.assertEqual(metric_keys, expected)
                 self.assertNotIn("evidence_exact_match", result)
