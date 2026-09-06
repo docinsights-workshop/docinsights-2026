@@ -1,6 +1,13 @@
 import unittest
 
-from scoring import SubmissionError, normalize_participant_names, rank_leaderboard
+from scoring import (
+    SubmissionError,
+    leaderboard_row,
+    normalize_participant_names,
+    rank_leaderboard,
+    score_predictions,
+    score_validation_predictions,
+)
 
 
 def leaderboard_entry(
@@ -12,6 +19,7 @@ def leaderboard_entry(
     answer_accuracy,
     evidence_exact_match,
     evidence_f1,
+    joint_accuracy=0.0,
     participant_names=None,
 ):
     row = {
@@ -22,6 +30,7 @@ def leaderboard_entry(
         "answer_accuracy": answer_accuracy,
         "evidence_exact_match": evidence_exact_match,
         "evidence_f1": evidence_f1,
+        "joint_accuracy": joint_accuracy,
         "examples": 217,
     }
     if participant_names is not None:
@@ -30,6 +39,118 @@ def leaderboard_entry(
 
 
 class LeaderboardRankingTests(unittest.TestCase):
+    def test_joint_accuracy_is_the_primary_ranking_metric(self):
+        rows = [
+            leaderboard_entry(
+                team="Answer Leader",
+                contact="answer@example.org",
+                submission="answer-first",
+                submitted_at="2026-07-30T01:00:00Z",
+                answer_accuracy=1.0,
+                evidence_exact_match=0.0,
+                evidence_f1=1.0,
+                joint_accuracy=0.5,
+            ),
+            leaderboard_entry(
+                team="Joint Leader",
+                contact="joint@example.org",
+                submission="joint-first",
+                submitted_at="2026-07-30T02:00:00Z",
+                answer_accuracy=0.7,
+                evidence_exact_match=0.7,
+                evidence_f1=0.7,
+                joint_accuracy=0.6,
+            ),
+        ]
+
+        ranked = rank_leaderboard(rows)
+
+        self.assertEqual(
+            [row["team"] for row in ranked], ["Joint Leader", "Answer Leader"]
+        )
+
+    def test_joint_ties_use_answer_then_evidence_f1(self):
+        rows = [
+            leaderboard_entry(
+                team="Evidence Leader",
+                contact="evidence@example.org",
+                submission="evidence-first",
+                submitted_at="2026-07-30T01:00:00Z",
+                answer_accuracy=0.8,
+                evidence_exact_match=0.8,
+                evidence_f1=0.9,
+                joint_accuracy=0.7,
+            ),
+            leaderboard_entry(
+                team="Answer Leader",
+                contact="answer@example.org",
+                submission="answer-first",
+                submitted_at="2026-07-30T02:00:00Z",
+                answer_accuracy=0.9,
+                evidence_exact_match=0.8,
+                evidence_f1=0.1,
+                joint_accuracy=0.7,
+            ),
+            leaderboard_entry(
+                team="Evidence Trailer",
+                contact="trailer@example.org",
+                submission="evidence-last",
+                submitted_at="2026-07-30T03:00:00Z",
+                answer_accuracy=0.8,
+                evidence_exact_match=0.8,
+                evidence_f1=0.2,
+                joint_accuracy=0.7,
+            ),
+        ]
+
+        ranked = rank_leaderboard(rows)
+
+        self.assertEqual(
+            [row["team"] for row in ranked],
+            ["Answer Leader", "Evidence Leader", "Evidence Trailer"],
+        )
+
+    def test_metric_ties_use_time_then_normalized_team_and_contact(self):
+        rows = [
+            leaderboard_entry(
+                team="Same Team",
+                contact="z@example.org",
+                submission="z-contact",
+                submitted_at="2026-07-30T02:00:00Z",
+                answer_accuracy=0.8,
+                evidence_exact_match=0.8,
+                evidence_f1=0.8,
+                joint_accuracy=0.8,
+            ),
+            leaderboard_entry(
+                team="  same   team ",
+                contact=" A@example.org ",
+                submission="a-contact",
+                submitted_at="2026-07-30T02:00:00Z",
+                answer_accuracy=0.8,
+                evidence_exact_match=0.8,
+                evidence_f1=0.8,
+                joint_accuracy=0.8,
+            ),
+            leaderboard_entry(
+                team="Later Alphabetically",
+                contact="later@example.org",
+                submission="earlier-time",
+                submitted_at="2026-07-30T01:00:00Z",
+                answer_accuracy=0.8,
+                evidence_exact_match=0.8,
+                evidence_f1=0.8,
+                joint_accuracy=0.8,
+            ),
+        ]
+
+        ranked = rank_leaderboard(rows)
+
+        self.assertEqual(
+            [row["submission_name"] for row in ranked],
+            ["earlier-time", "a-contact", "z-contact"],
+        )
+
     def test_same_team_and_email_show_latest_attempt(self):
         rows = [
             leaderboard_entry(
@@ -227,6 +348,73 @@ class LeaderboardRankingTests(unittest.TestCase):
             ranked[0]["participant_names"],
             "Ioannis Tzachristas, Georgios Tzachristas, Theofanis Tzachristas, Constantinos Antoniou",
         )
+
+
+class JointMetricScoringTests(unittest.TestCase):
+    def test_shared_scorer_keeps_the_legacy_test_metric_contract(self):
+        metrics = score_predictions(
+            [{"instance_id": "one", "answer": "10", "evidence": ["b01"]}],
+            [{"instance_id": "one", "answer": "10", "evidence": ["b01"]}],
+        )
+
+        self.assertEqual(
+            set(metrics),
+            {
+                "answer_accuracy",
+                "evidence_exact_match",
+                "evidence_f1",
+                "examples",
+                "per_example",
+            },
+        )
+        self.assertEqual(
+            set(metrics["per_example"][0]),
+            {
+                "instance_id",
+                "answer_exact_match",
+                "evidence_exact_match",
+                "evidence_f1",
+            },
+        )
+
+    def test_joint_exact_match_requires_answer_and_exact_evidence_on_same_example(self):
+        labels = [
+            {"instance_id": "both", "answer": "10", "evidence": ["b01", "b02"]},
+            {"instance_id": "answer-only", "answer": "20", "evidence": ["b03", "b04"]},
+            {"instance_id": "evidence-only", "answer": "30", "evidence": ["b05"]},
+            {"instance_id": "neither", "answer": "40", "evidence": ["b06"]},
+        ]
+        predictions = [
+            {"instance_id": "both", "answer": "10.0", "evidence": [" B02 ", "b01"]},
+            {"instance_id": "answer-only", "answer": "20", "evidence": ["b03"]},
+            {"instance_id": "evidence-only", "answer": "31", "evidence": ["B05"]},
+            {"instance_id": "neither", "answer": "41", "evidence": ["b07"]},
+        ]
+
+        metrics = score_validation_predictions(predictions, labels)
+
+        self.assertEqual(metrics["joint_accuracy"], 0.25)
+        self.assertEqual(
+            [row["joint_exact_match"] for row in metrics["per_example"]],
+            [1.0, 0.0, 0.0, 0.0],
+        )
+
+    def test_leaderboard_row_carries_joint_accuracy(self):
+        row = leaderboard_row(
+            "Example Team",
+            "lead@example.org",
+            "baseline",
+            {
+                "answer_accuracy": 0.75,
+                "evidence_exact_match": 0.5,
+                "evidence_f1": 0.625,
+                "joint_accuracy": 0.375,
+                "examples": 8,
+            },
+            "2026-09-05T12:00:00Z",
+        )
+
+        self.assertEqual(row["joint_accuracy"], 0.375)
 
 
 if __name__ == "__main__":

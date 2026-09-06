@@ -24,7 +24,7 @@ from scoring import (
     parse_submission_text,
     rank_leaderboard,
     safe_slug,
-    score_predictions,
+    score_validation_predictions,
 )
 from submission_service import HubTestConfigLoader, SubmissionService, TrustedTestConfig
 from test_contract import is_valid_public_text
@@ -942,6 +942,7 @@ def leaderboard_html():
                 <td>{html.escape(str(row.get("team", "")))}</td>
                 <td>{html.escape(str(row.get("submission_name", "")))}</td>
                 <td class="leaderboard-attempts">{int(row.get("attempts", 1))}</td>
+                <td class="leaderboard-metric">{_format_metric(row.get("joint_accuracy", 0.0))}</td>
                 <td class="leaderboard-metric">{_format_metric(row.get("answer_accuracy", 0.0))}</td>
                 <td class="leaderboard-metric">{_format_metric(row.get("evidence_f1", 0.0))}</td>
                 <td class="leaderboard-date">{html.escape(_format_timestamp(row.get("submitted_at", "")))}</td>
@@ -951,7 +952,7 @@ def leaderboard_html():
 
     if not body_rows:
         body_rows.append(
-            '<tr><td class="leaderboard-empty" colspan="7">No scored submissions yet.</td></tr>'
+            '<tr><td class="leaderboard-empty" colspan="8">No scored submissions yet.</td></tr>'
         )
 
     return f"""
@@ -959,12 +960,13 @@ def leaderboard_html():
         <table aria-label="DocSem validation leaderboard">
             <colgroup>
                 <col style="width: 6%">
-                <col style="width: 20%">
-                <col style="width: 22%">
-                <col style="width: 10%">
-                <col style="width: 15%">
-                <col style="width: 12%">
-                <col style="width: 15%">
+                <col style="width: 17%">
+                <col style="width: 18%">
+                <col style="width: 9%">
+                <col style="width: 13%">
+                <col style="width: 13%">
+                <col style="width: 11%">
+                <col style="width: 13%">
             </colgroup>
             <thead>
                 <tr>
@@ -972,6 +974,7 @@ def leaderboard_html():
                     <th scope="col">Team</th>
                     <th scope="col">Latest submission</th>
                     <th class="leaderboard-attempts" scope="col">Attempts</th>
+                    <th class="leaderboard-metric" scope="col">Joint accuracy</th>
                     <th class="leaderboard-metric" scope="col">Answer accuracy</th>
                     <th class="leaderboard-metric" scope="col">Evidence F1</th>
                     <th scope="col">Submitted (UTC)</th>
@@ -1371,7 +1374,7 @@ def _validation_leaderboard_heading():
     return """
     <div>
         <h2>Validation leaderboard</h2>
-        <p>Provisional validation results from each team's latest attempt. Ranked by answer accuracy, then evidence F1. Leaderboard refreshed September 3, 2026 after the organizer-only ground-truth correction; all existing submissions were rescored. Final standings will use the held-out test set.</p>
+        <p>Provisional validation results from each team's latest attempt. Answer accuracy is the share with an exact normalized answer; Evidence F1 gives partial credit for overlap between predicted and gold evidence sets; Joint accuracy requires both the exact normalized answer and the entire normalized evidence set to be correct on the same example. Ranked by joint accuracy, then answer accuracy, then evidence F1. Leaderboard refreshed September 3, 2026 after the organizer-only ground-truth correction; all existing submissions were rescored. Final standings will use the held-out test set.</p>
     </div>
     """
 
@@ -1445,7 +1448,7 @@ def evaluate_submission(
         text = Path(file_obj.name).read_text(encoding="utf-8")
         rows = parse_submission_text(text)
         labels = _load_gold_rows()
-        metrics = score_predictions(rows, labels)
+        metrics = score_validation_predictions(rows, labels)
         message = _persist_submission(
             rows,
             team.strip(),
@@ -1464,6 +1467,7 @@ def evaluate_submission(
             "answer_accuracy": metrics["answer_accuracy"],
             "evidence_exact_match": metrics["evidence_exact_match"],
             "evidence_f1": metrics["evidence_f1"],
+            "joint_accuracy": metrics["joint_accuracy"],
             "examples": metrics["examples"],
             "message": message,
         },

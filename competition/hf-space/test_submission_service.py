@@ -179,6 +179,26 @@ def configured_service(store=None, loader=None):
 
 
 class LegacyValidationCharacterizationTests(unittest.TestCase):
+    def test_validation_leaderboard_defines_metrics_and_joint_first_ranking(self):
+        with patch.object(app, "_load_leaderboard_rows", return_value=[]):
+            rendered = app.leaderboard_html()
+        heading = app._validation_leaderboard_heading()
+
+        self.assertIn("Joint accuracy", rendered)
+        self.assertLess(
+            rendered.index("Joint accuracy"), rendered.index("Answer accuracy")
+        )
+        self.assertLess(
+            rendered.index("Answer accuracy"), rendered.index("Evidence F1")
+        )
+        self.assertIn("exact normalized answer", heading)
+        self.assertIn("partial credit", heading)
+        self.assertIn("entire normalized evidence set", heading)
+        self.assertIn(
+            "Ranked by joint accuracy, then answer accuracy, then evidence F1",
+            heading,
+        )
+
     def test_validation_leaderboard_fixture_preserves_exact_rendered_row(self):
         rows = [
             {
@@ -189,6 +209,7 @@ class LegacyValidationCharacterizationTests(unittest.TestCase):
                 "answer_accuracy": 1.0,
                 "evidence_exact_match": 1.0,
                 "evidence_f1": 1.0,
+                "joint_accuracy": 1.0,
                 "examples": 1,
                 "attempts": 2,
             }
@@ -203,6 +224,7 @@ class LegacyValidationCharacterizationTests(unittest.TestCase):
                 <td>Fixture Team</td>
                 <td>baseline</td>
                 <td class=\"leaderboard-attempts\">2</td>
+                <td class=\"leaderboard-metric\">100.00%</td>
                 <td class=\"leaderboard-metric\">100.00%</td>
                 <td class=\"leaderboard-metric\">100.00%</td>
                 <td class=\"leaderboard-date\">2026-09-05 12:00:00</td>
@@ -257,6 +279,7 @@ class LegacyValidationCharacterizationTests(unittest.TestCase):
                 "answer_accuracy",
                 "evidence_exact_match",
                 "evidence_f1",
+                "joint_accuracy",
                 "examples",
                 "message",
             },
@@ -268,6 +291,7 @@ class LegacyValidationCharacterizationTests(unittest.TestCase):
                     "answer_accuracy",
                     "evidence_exact_match",
                     "evidence_f1",
+                    "joint_accuracy",
                     "examples",
                 )
             },
@@ -275,6 +299,7 @@ class LegacyValidationCharacterizationTests(unittest.TestCase):
                 "answer_accuracy": 1.0,
                 "evidence_exact_match": 1.0,
                 "evidence_f1": 1.0,
+                "joint_accuracy": 1.0,
                 "examples": 1,
             },
         )
@@ -288,6 +313,7 @@ class LegacyValidationCharacterizationTests(unittest.TestCase):
                 "answer_accuracy": 1.0,
                 "evidence_exact_match": 1.0,
                 "evidence_f1": 1.0,
+                "joint_accuracy": 1.0,
                 "examples": 1,
                 "per_example": [
                     {
@@ -295,6 +321,7 @@ class LegacyValidationCharacterizationTests(unittest.TestCase):
                         "answer_exact_match": 1.0,
                         "evidence_exact_match": 1.0,
                         "evidence_f1": 1.0,
+                        "joint_exact_match": 1.0,
                     }
                 ],
             },
@@ -342,6 +369,7 @@ class SplitAwareServiceTests(unittest.TestCase):
                     "answer_accuracy": 1.0,
                     "evidence_exact_match": 1.0,
                     "evidence_f1": 1.0,
+                    "joint_accuracy": 1.0,
                     "examples": 1,
                     "message": "legacy persistence",
                 },

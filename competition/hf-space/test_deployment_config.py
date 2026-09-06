@@ -28,7 +28,9 @@ VALID_RELEASE = {
 def assert_anonymous_validation_fixture(test_case):
     upload = tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False)
     test_case.addCleanup(Path(upload.name).unlink, missing_ok=True)
-    upload.write(json.dumps({"instance_id": "val-1", "answer": "42", "evidence": ["b1"]}))
+    upload.write(
+        json.dumps({"instance_id": "val-1", "answer": "42", "evidence": ["b1"]})
+    )
     upload.close()
     service = SubmissionService(
         validation_submitter=app._legacy_validation_submitter,
@@ -60,6 +62,7 @@ def assert_anonymous_validation_fixture(test_case):
             "answer_accuracy": 1.0,
             "evidence_exact_match": 1.0,
             "evidence_f1": 1.0,
+            "joint_accuracy": 1.0,
             "examples": 1,
             "message": "legacy persistence",
         },

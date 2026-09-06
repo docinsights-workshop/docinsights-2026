@@ -187,6 +187,26 @@ def score_predictions(rows, labels):
     }
 
 
+def score_validation_predictions(rows, labels):
+    """Score validation rows and add the validation-only joint metric."""
+
+    metrics = score_predictions(rows, labels)
+    joint_scores = []
+    per_example = []
+    for example in metrics["per_example"]:
+        joint_exact = float(
+            example["answer_exact_match"] == 1.0
+            and example["evidence_exact_match"] == 1.0
+        )
+        joint_scores.append(joint_exact)
+        per_example.append({**example, "joint_exact_match": joint_exact})
+    return {
+        **metrics,
+        "joint_accuracy": round(sum(joint_scores) / metrics["examples"], 6),
+        "per_example": per_example,
+    }
+
+
 def leaderboard_row(
     team,
     contact,
@@ -203,6 +223,7 @@ def leaderboard_row(
         "answer_accuracy": metrics["answer_accuracy"],
         "evidence_exact_match": metrics["evidence_exact_match"],
         "evidence_f1": metrics["evidence_f1"],
+        "joint_accuracy": metrics["joint_accuracy"],
         "examples": metrics["examples"],
     }
     if participant_names is not None:
@@ -270,10 +291,12 @@ def rank_leaderboard(rows):
     return sorted(
         latest_leaderboard_rows(rows),
         key=lambda row: (
+            -float(row.get("joint_accuracy", 0.0)),
             -float(row.get("answer_accuracy", 0.0)),
             -float(row.get("evidence_f1", 0.0)),
             str(row.get("submitted_at", "")),
             normalize_identity(row.get("team", "")),
+            normalize_identity(row.get("contact", "")),
         ),
     )
 
