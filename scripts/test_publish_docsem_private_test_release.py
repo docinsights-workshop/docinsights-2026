@@ -284,6 +284,10 @@ class PinnedDefaultTests(unittest.TestCase):
             publisher.LEGACY_HISTORY_POLICY, "legacy-private-label-cycle-v1"
         )
         self.assertEqual(
+            publisher.LEGACY_HISTORY_METADATA_SHA256,
+            "8b45d281919041c8772075e9ea9cde70263eccafe80c106deec9bd3a48e11bd8",
+        )
+        self.assertEqual(
             publisher.LEGACY_PUBLIC_HISTORY_POLICY,
             "legacy-public-development-label-cycle-v1",
         )
@@ -296,6 +300,7 @@ class PinnedDefaultTests(unittest.TestCase):
 class PrivateContinuationTests(unittest.TestCase):
     LEGACY_POLICY = "legacy-private-label-cycle-v1"
     LEGACY_CONFIRM = "ACKNOWLEDGE_RETAINED_LEGACY_PRIVATE_LABEL_HISTORY"
+    LEGACY_ROOT = "0" * 40
     LEGACY_ADD = "1" * 40
     LEGACY_DELETE = "2" * 40
     PUBLIC_HISTORY_POLICY = "legacy-public-development-label-cycle-v1"
@@ -376,7 +381,7 @@ class PrivateContinuationTests(unittest.TestCase):
                 [
                     {
                         "revision": self.LEGACY_ADD,
-                        "parents": [],
+                        "parents": [self.LEGACY_ROOT],
                         "timestamp": "2020-01-01T00:00:00Z",
                         "status": "A",
                         "path": "private/test_labels.jsonl",
@@ -510,7 +515,7 @@ class PrivateContinuationTests(unittest.TestCase):
         return (
             publisher.PrivateHistoryEvent(
                 revision=self.LEGACY_ADD,
-                parents=(),
+                parents=(self.LEGACY_ROOT,),
                 timestamp="2020-01-01T00:00:00Z",
                 status="A",
                 path="private/test_labels.jsonl",
@@ -529,6 +534,7 @@ class PrivateContinuationTests(unittest.TestCase):
     def configure_exact_legacy_history(self):
         self.hub.history_events_override = self.exact_legacy_events()
         self.hub.history_reachable_override = {
+            self.LEGACY_ROOT,
             self.LEGACY_ADD,
             self.LEGACY_DELETE,
             self.hub.private_revision,
@@ -1381,7 +1387,7 @@ class PrivateContinuationTests(unittest.TestCase):
         with self.assertRaises(publisher.ReleaseError):
             self.release_call()
 
-    def test_legacy_history_defaults_to_reject_but_named_profile_matches_dry_run(self):
+    def test_legacy_first_child_add_defaults_to_reject_but_policy_matches_dry_run(self):
         self.prepare()
         self.configure_exact_legacy_history()
         with self.assertRaises(publisher.ReleaseError):
@@ -1445,9 +1451,11 @@ class PrivateContinuationTests(unittest.TestCase):
         for events in mutations:
             with self.subTest(events=events):
                 self.hub.history_events_override = tuple(events)
-                self.hub.history_reachable_override = {
-                    event.revision for event in events
-                } | {self.hub.private_revision}
+                self.hub.history_reachable_override = (
+                    {event.revision for event in events}
+                    | {parent for event in events for parent in event.parents}
+                    | {self.LEGACY_ROOT, self.hub.private_revision}
+                )
                 with self.assertRaises(publisher.ReleaseError):
                     self.release_call(legacy_history_policy=self.LEGACY_POLICY)
         self.configure_exact_legacy_history()
@@ -1456,6 +1464,10 @@ class PrivateContinuationTests(unittest.TestCase):
             self.release_call(legacy_history_policy=self.LEGACY_POLICY)
         self.configure_exact_legacy_history()
         self.hub.history_reachable_override.remove(self.LEGACY_DELETE)
+        with self.assertRaises(publisher.ReleaseError):
+            self.release_call(legacy_history_policy=self.LEGACY_POLICY)
+        self.configure_exact_legacy_history()
+        self.hub.history_reachable_override.remove(self.LEGACY_ROOT)
         with self.assertRaises(publisher.ReleaseError):
             self.release_call(legacy_history_policy=self.LEGACY_POLICY)
 
@@ -1504,11 +1516,14 @@ class PrivateContinuationTests(unittest.TestCase):
         audit = self.hub.history_audit(
             publisher.PRIVATE_HF_REPOSITORY, self.hub.private_revision, "token"
         )
+        non_root_parent_map = dict(audit.parent_map)
+        non_root_parent_map[self.LEGACY_ROOT] = (self.hub.private_revision,)
         malformed = (
             replace(audit, head="f" * 40),
             replace(audit, shallow=True),
             replace(audit, blob_objects_fetched=True),
             replace(audit, parent_map={}),
+            replace(audit, parent_map=non_root_parent_map),
             replace(
                 audit,
                 reachable=frozenset(f"{index:040x}" for index in range(10_001)),
@@ -1600,7 +1615,7 @@ class PrivateContinuationTests(unittest.TestCase):
                 self.hub.history_events_override = events
                 self.hub.history_reachable_override = {
                     event.revision for event in events
-                } | {"d" * 40}
+                } | {self.LEGACY_ROOT, "b" * 40, "d" * 40}
                 with self.assertRaises(publisher.ReleaseError):
                     publisher.run_private_continuation(
                         second_config,

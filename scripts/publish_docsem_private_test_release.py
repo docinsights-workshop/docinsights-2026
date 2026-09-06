@@ -83,7 +83,7 @@ CONFIRMATION = "PUBLISH_DISABLED_PRIVATE_TEST_RELEASE"
 LEGACY_HISTORY_POLICY = "legacy-private-label-cycle-v1"
 LEGACY_HISTORY_CONFIRMATION = "ACKNOWLEDGE_RETAINED_LEGACY_PRIVATE_LABEL_HISTORY"
 LEGACY_HISTORY_METADATA_SHA256 = (
-    "17107b3da2db03b98356ba11ead006be38d85dad06f8f9b9e20a3bd02a5d1215"
+    "8b45d281919041c8772075e9ea9cde70263eccafe80c106deec9bd3a48e11bd8"
 )
 LEGACY_PUBLIC_HISTORY_POLICY = "legacy-public-development-label-cycle-v1"
 LEGACY_PUBLIC_HISTORY_CONFIRMATION = (
@@ -904,7 +904,8 @@ def _validate_private_history(
         len(legacy) == 2
         and legacy[0].status == "A"
         and legacy[0].path == "private/test_labels.jsonl"
-        and legacy[0].parents == ()
+        and len(legacy[0].parents) == 1
+        and audit.parent_map.get(legacy[0].parents[0]) == ()
         and legacy[1].status == "D"
         and legacy[1].path == "private/test_labels.jsonl"
         and legacy[1].parents == (legacy[0].revision,)
