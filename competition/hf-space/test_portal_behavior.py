@@ -202,11 +202,13 @@ class FinalLeaderboardHub:
 
 class AccountHistoryStore:
     def __init__(self):
-        self.requested_subjects = []
+        self.requested_identities = []
 
     def account_history(self, identity):
-        self.requested_subjects.append(identity.sub)
-        if identity.sub == "subject-a":
+        self.requested_identities.append(
+            (identity.identity_kind, identity.identity_subject)
+        )
+        if identity.identity_subject == "subject-a":
             return [
                 {
                     "attempt_number": 1,
@@ -300,9 +302,13 @@ class PortalBehaviorTests(unittest.IsolatedAsyncioTestCase):
     async def test_split_selection_adapts_instructions_contact_and_test_history(self):
         test_response = await self.invoke("select_split", [app.TEST_SPLIT_LABEL])
         test_updates = test_response["data"]
-        self.assertIn("Sign in with Hugging Face", test_updates[0]["value"])
+        self.assertIn(
+            "Sign in with Hugging Face (recommended)", test_updates[0]["value"]
+        )
+        self.assertIn("Signed-out users", test_updates[0]["value"])
+        self.assertIn("keyed to that email", test_updates[0]["value"])
         self.assertIn("Test submissions are not open yet", test_updates[0]["value"])
-        self.assertFalse(test_updates[1]["visible"])
+        self.assertTrue(test_updates[1]["visible"])
         self.assertEqual(test_updates[2]["value"], "Submit test predictions")
         self.assertFalse(test_updates[2]["interactive"])
         self.assertTrue(test_updates[3]["visible"])
@@ -473,12 +479,14 @@ class PortalBehaviorTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-        self.assertIn("3 accepted test submissions per Hugging Face account", notice)
+        self.assertIn("3 accepted test submissions per identity", notice)
+        self.assertIn("Hugging Face account or normalized contact email", notice)
+        self.assertIn("alternate anonymous emails", notice)
         self.assertIn("Attempt 1", notice)
-        self.assertIn("private to that signed-in account", notice)
-        self.assertIn("Joint Accuracy", notice)
-        self.assertIn("Answer Accuracy", notice)
-        self.assertIn("Evidence F1", notice)
+        self.assertIn("private to that submitting identity", notice)
+        self.assertIn("Joint Exact Accuracy", notice)
+        self.assertIn("Answer Exact Accuracy", notice)
+        self.assertIn("Evidence F1 (macro)", notice)
         self.assertIn("Attempts 2–3", notice)
         self.assertIn("withheld", notice)
         self.assertIn("provisional public ranks use only attempt 1", notice)
@@ -635,25 +643,27 @@ class PortalBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured["contact"], "lead@example.org")
         self.assertEqual(response["data"][0]["value"].root["split"], "validation")
 
-    async def test_unauthenticated_test_submit_and_history_fail_closed(self):
+    async def test_signed_out_test_submit_and_history_require_contact_email(self):
         for api_name, inputs in (
             (
                 "submit_predictions",
                 [app.TEST_SPLIT_LABEL, None, "Team A", "Alice", "", "final"],
             ),
-            ("my_test_submissions", []),
+            ("my_test_submissions", [""]),
         ):
             with self.subTest(api_name=api_name):
-                with self.assertRaisesRegex(Exception, "Sign in with Hugging Face"):
+                with self.assertRaisesRegex(Exception, "valid contact email"):
                     await self.invoke(api_name, inputs)
 
     async def test_history_endpoint_is_bound_to_injected_subject_and_masks_email(self):
         service, store = configured_service()
         with patch.object(app, "_SUBMISSION_SERVICE", service):
-            response = await self.invoke("my_test_submissions", [], PROFILE_A)
+            response = await self.invoke(
+                "my_test_submissions", ["ignored@example.org"], PROFILE_A
+            )
 
         serialized = json.dumps(response["data"])
-        self.assertEqual(store.requested_subjects, ["subject-a"])
+        self.assertEqual(store.requested_identities, [("huggingface", "subject-a")])
         self.assertIn("receipt-a1", serialized)
         self.assertIn("receipt-a2", serialized)
         self.assertIn("100.00%", serialized)
@@ -668,6 +678,41 @@ class PortalBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("25.00%", serialized)
         self.assertNotIn("50.00%", serialized)
         self.assertNotIn("secret-a", serialized)
+
+    async def test_anonymous_history_endpoint_uses_normalized_contact_without_exposure(
+        self,
+    ):
+        service, store = configured_service()
+        with patch.object(app, "_SUBMISSION_SERVICE", service):
+            response = await self.invoke(
+                "my_test_submissions", [" Anonymous@Example.ORG "]
+            )
+
+        serialized = json.dumps(response["data"])
+        self.assertEqual(
+            store.requested_identities,
+            [("email", "anonymous@example.org")],
+        )
+        self.assertIn("receipt-b1", serialized)
+        self.assertNotIn("anonymous@example.org", serialized)
+
+    def test_history_missing_joint_is_visibly_not_yet_computed(self):
+        rendered = app._test_history_html(
+            [
+                {
+                    "attempt": 1,
+                    "receipt": "legacy-receipt",
+                    "submission_name": "legacy",
+                    "accepted_at": "2026-09-05T12:00:00Z",
+                    "answer_accuracy": 0.75,
+                    "evidence_f1": 0.625,
+                }
+            ],
+            "l***@example.org",
+        )
+
+        self.assertIn("Joint Exact Accuracy Not yet computed", rendered)
+        self.assertNotIn("Joint Exact Accuracy 0.00%", rendered)
 
     async def test_later_attempt_submit_update_serializes_no_metrics(self):
         class LaterAttemptService:
@@ -767,7 +812,8 @@ class PortalBehaviorTests(unittest.IsolatedAsyncioTestCase):
             "evidence",
             "score",
             "email",
-            "hf_subject",
+            "identity_subject",
+            "contact_email",
             "participant_names",
             "predictions",
             "submission_name",
@@ -854,6 +900,7 @@ class PortalBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Validation leaderboard", heading["value"])
         self.assertIn("Legacy Team", content["value"])
         self.assertIn("62.50%", content["value"])
+        self.assertIn("Not yet computed", content["value"])
         self.assertNotIn("private@example.org", content["value"])
         self.assertTrue(refresh["visible"])
 
@@ -972,7 +1019,8 @@ class PortalBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("<script>", rendered)
         for private_name in (
             "email",
-            "hf_subject",
+            "identity_subject",
+            "contact_email",
             "participant_names",
             "predictions",
             "per_example",
@@ -1020,7 +1068,7 @@ class PortalBehaviorTests(unittest.IsolatedAsyncioTestCase):
         projection = json.loads(
             extra_private_field["projections/test/public_final.json"]
         )
-        projection["rows"][0]["verified_email"] = "secret@example.org"
+        projection["rows"][0]["contact_email"] = "secret@example.org"
         extra_private_field["projections/test/public_final.json"] = canonical_json(
             projection
         )

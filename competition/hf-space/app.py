@@ -28,7 +28,12 @@ from scoring import (
 )
 from submission_service import HubTestConfigLoader, SubmissionService, TrustedTestConfig
 from test_contract import is_valid_public_text
-from test_policy import OFFICIAL_TEST_CLOSE_AT, TestReleasePolicy
+from test_policy import (
+    OFFICIAL_TEST_CLOSE_AT,
+    TestPolicyError,
+    TestReleasePolicy,
+    normalize_contact_email,
+)
 from test_store import HubTestStore
 
 
@@ -963,6 +968,18 @@ def _format_metric(value):
     return f"{float(value) * 100:.2f}%"
 
 
+def _format_joint_metric(value):
+    if value is None:
+        return "Not yet computed"
+    try:
+        metric = float(value)
+    except (TypeError, ValueError):
+        return "Not yet computed"
+    if not math.isfinite(metric):
+        return "Not yet computed"
+    return _format_metric(metric)
+
+
 def _format_timestamp(value):
     return str(value).replace("T", " ").removesuffix("Z")
 
@@ -978,7 +995,7 @@ def leaderboard_html():
                 <td>{html.escape(str(row.get("team", "")))}</td>
                 <td>{html.escape(str(row.get("submission_name", "")))}</td>
                 <td class="leaderboard-attempts">{int(row.get("attempts", 1))}</td>
-                <td class="leaderboard-metric">{_format_metric(row.get("joint_accuracy", 0.0))}</td>
+                <td class="leaderboard-metric">{_format_joint_metric(row.get("joint_accuracy"))}</td>
                 <td class="leaderboard-metric">{_format_metric(row.get("answer_accuracy", 0.0))}</td>
                 <td class="leaderboard-metric">{_format_metric(row.get("evidence_f1", 0.0))}</td>
                 <td class="leaderboard-date">{html.escape(_format_timestamp(row.get("submitted_at", "")))}</td>
@@ -1010,9 +1027,9 @@ def leaderboard_html():
                     <th scope="col">Team</th>
                     <th scope="col">Latest submission</th>
                     <th class="leaderboard-attempts" scope="col">Attempts</th>
-                    <th class="leaderboard-metric" scope="col">Joint accuracy</th>
-                    <th class="leaderboard-metric" scope="col">Answer accuracy</th>
-                    <th class="leaderboard-metric" scope="col">Evidence F1</th>
+                    <th class="leaderboard-metric" scope="col">Joint Exact Accuracy</th>
+                    <th class="leaderboard-metric" scope="col">Answer Exact Accuracy</th>
+                    <th class="leaderboard-metric" scope="col">Evidence F1 (macro)</th>
                     <th scope="col">Submitted (UTC)</th>
                 </tr>
             </thead>
@@ -1572,9 +1589,9 @@ def final_test_leaderboard_html(projection):
                     <th scope="col">Team</th>
                     <th scope="col">Selected submission</th>
                     <th class="leaderboard-attempts" scope="col">Selected attempt</th>
-                    <th class="leaderboard-metric" scope="col">Joint accuracy</th>
-                    <th class="leaderboard-metric" scope="col">Answer accuracy</th>
-                    <th class="leaderboard-metric" scope="col">Evidence F1</th>
+                    <th class="leaderboard-metric" scope="col">Joint Exact Accuracy</th>
+                    <th class="leaderboard-metric" scope="col">Answer Exact Accuracy</th>
+                    <th class="leaderboard-metric" scope="col">Evidence F1 (macro)</th>
                 </tr>
             </thead>
             <tbody>{"".join(body_rows)}</tbody>
@@ -1629,7 +1646,7 @@ def _validation_leaderboard_heading():
     return """
     <div>
         <h2>Validation leaderboard</h2>
-        <p>Provisional validation results from each team's latest attempt. Answer accuracy is the share with an exact normalized answer; Evidence F1 gives partial credit for overlap between predicted and gold evidence sets; Joint accuracy requires both the exact normalized answer and the entire normalized evidence set to be correct on the same example. Ranked by joint accuracy, then answer accuracy, then evidence F1. Leaderboard refreshed September 3, 2026 after the organizer-only ground-truth correction; all existing submissions were rescored. Final standings will use the held-out test set.</p>
+        <p>Provisional validation results from each team's latest attempt. Answer Exact Accuracy is the share with an exact normalized answer; Evidence F1 (macro) gives partial credit for overlap between predicted and gold evidence sets; Joint Exact Accuracy requires both the exact normalized answer and the entire normalized evidence set to be correct on the same example. Ranked by Joint Exact Accuracy, then Answer Exact Accuracy, then Evidence F1, accepted time, and stable submission ID. Leaderboard refreshed September 3, 2026 after the organizer-only ground-truth correction; all existing submissions were rescored. Final standings will use the held-out test set.</p>
     </div>
     """
 
@@ -1800,9 +1817,9 @@ def submit_for_split(split, file_obj, metadata, oauth_profile):
         raise gr.Error(str(exc)) from None
 
 
-def history_for_oauth(oauth_profile):
+def history_for_identity(contact_email, oauth_profile):
     try:
-        return _SUBMISSION_SERVICE.history_for_oauth(oauth_profile)
+        return _SUBMISSION_SERVICE.history_for_identity(contact_email, oauth_profile)
     except SubmissionError as exc:
         raise gr.Error(str(exc)) from None
 
@@ -1839,13 +1856,18 @@ def submit_predictions(
     return gr.update(value=response, visible=True)
 
 
-def _masked_email(profile):
-    email = profile.get("email") if profile is not None else None
-    if not isinstance(email, str) or "@" not in email:
-        raise gr.Error("Sign in with Hugging Face to retrieve test submissions.")
-    local, domain = email.strip().casefold().rsplit("@", maxsplit=1)
+def _masked_email(profile, contact_email):
+    try:
+        data = dict(profile) if profile is not None else {}
+    except (TypeError, ValueError):
+        data = {}
+    try:
+        email = normalize_contact_email(data.get("email") if data else contact_email)
+    except TestPolicyError as exc:
+        raise gr.Error(str(exc)) from None
+    local, domain = email.rsplit("@", maxsplit=1)
     if not local or not domain:
-        raise gr.Error("Sign in with Hugging Face to retrieve test submissions.")
+        raise gr.Error("Enter a valid contact email for test submissions.")
     return f"{local[0]}***@{domain}"
 
 
@@ -1855,9 +1877,12 @@ def _test_history_html(attempts, masked_email):
         number = int(attempt.get("attempt", 0))
         if number == 1:
             feedback = (
-                f"Joint accuracy {_format_metric(attempt.get('joint_accuracy', 0.0))}; "
-                f"answer accuracy {_format_metric(attempt.get('answer_accuracy', 0.0))}; "
-                f"evidence F1 {_format_metric(attempt.get('evidence_f1', 0.0))}"
+                "Joint Exact Accuracy "
+                f"{_format_joint_metric(attempt.get('joint_accuracy'))}; "
+                "Answer Exact Accuracy "
+                f"{_format_metric(attempt.get('answer_accuracy', 0.0))}; "
+                "Evidence F1 (macro) "
+                f"{_format_metric(attempt.get('evidence_f1', 0.0))}"
             )
         else:
             feedback = "Score withheld until finalization"
@@ -1892,10 +1917,10 @@ def _test_history_html(attempts, masked_email):
     """
 
 
-def my_test_submissions(oauth_profile: gr.OAuthProfile | None):
-    attempts = history_for_oauth(oauth_profile)
+def my_test_submissions(contact_email, oauth_profile: gr.OAuthProfile | None):
+    attempts = history_for_identity(contact_email, oauth_profile)
     return gr.update(
-        value=_test_history_html(attempts, _masked_email(oauth_profile)),
+        value=_test_history_html(attempts, _masked_email(oauth_profile, contact_email)),
         visible=True,
     )
 
@@ -2085,9 +2110,11 @@ def _test_release_notice_html(
         'target="_blank" rel="noopener">participant guide</a> before uploading.</p>'
         f"{countdown}"
         '<p class="test-policy"><strong>Test policy:</strong> Up to '
-        "3 accepted test submissions per Hugging Face account. Attempt 1 metrics—"
-        "Joint Accuracy, Answer Accuracy, and Evidence F1—are private to that signed-in "
-        "account. Attempts 2–3 are accepted with their metrics withheld. During the "
+        "3 accepted test submissions per identity: Hugging Face account or normalized "
+        "contact email. Sign-in is recommended; alternate anonymous emails cannot be "
+        "prevented from obtaining separate quotas. Attempt 1 metrics—Joint Exact "
+        "Accuracy, Answer Exact Accuracy, and Evidence F1 (macro)—are private to that "
+        "submitting identity. Attempts 2–3 are accepted with their metrics withheld. During the "
         "open window, provisional public ranks use only attempt 1 and display no metrics. "
         "After the window closes, the final ranking uses the best of all 3 eligible "
         "attempts.</p></div>"
@@ -2101,12 +2128,15 @@ def split_ui(split_label):
             gr.update(
                 value=(
                     "### Submit final test predictions\n"
-                    "Sign in with Hugging Face. Your verified account email replaces the "
-                    "validation contact field.\n\n"
+                    "Sign in with Hugging Face (recommended) to key attempts to your "
+                    "HF account; your verified profile email is used privately and any "
+                    "typed contact is ignored for identity. Signed-out users must enter "
+                    "a valid contact email and are keyed to that email. Alternate "
+                    "anonymous emails cannot be prevented from receiving separate quotas.\n\n"
                     f"{_test_release_notice_html()}"
                 )
             ),
-            gr.update(visible=False),
+            gr.update(visible=True),
             gr.update(
                 value="Submit test predictions",
                 interactive=test_open,
@@ -2202,7 +2232,7 @@ with PortalBlocks(**blocks_options) as demo:
             label="Evaluation split",
             interactive=True,
         )
-        gr.LoginButton("Sign in with Hugging Face")
+        gr.LoginButton("Sign in with Hugging Face (recommended)")
         with warnings.catch_warnings():
             warnings.filterwarnings(
                 "ignore",
@@ -2229,7 +2259,10 @@ with PortalBlocks(**blocks_options) as demo:
                 label="Participant name(s)",
                 placeholder="A. Researcher, B. Researcher",
             )
-            contact = gr.Textbox(label="Contact email", placeholder="lead@example.org")
+            contact = gr.Textbox(
+                label="Contact email (required if signed out)",
+                placeholder="lead@example.org",
+            )
             submission_name = gr.Textbox(
                 label="Submission name", placeholder="baseline-v1"
             )
@@ -2258,6 +2291,22 @@ with PortalBlocks(**blocks_options) as demo:
             elem_id="score-output",
         )
 
+    with gr.Accordion(
+        "How metrics are computed", open=False, elem_id="metric-explanation"
+    ):
+        gr.Markdown(
+            "**Answer Exact Accuracy** is the mean exact normalized answer match.\n\n"
+            "For each task, evidence precision and recall use set overlap, and their "
+            "harmonic mean gives the task-level evidence F1. **Evidence F1 (macro)** "
+            "is then macro-averaged across tasks. Partial evidence earns partial credit.\n\n"
+            "**Joint Exact Accuracy** is the mean of `answer exact AND evidence set "
+            "exact` on the same task. It is therefore never greater than Answer Exact "
+            "Accuracy or Evidence Exact Match. It does not AND the two aggregate "
+            "percentages and does not use evidence F1.\n\n"
+            "Ranking order is Joint Exact Accuracy, Answer Exact Accuracy, Evidence F1, "
+            "accepted time and stable submission ID."
+        )
+
     with gr.Accordion("Cite this dataset", open=False, elem_id="dataset-citation"):
         gr.Markdown(
             f"Citation source: [GSM-SEM on arXiv]({DATASET_CITATION_URL}). "
@@ -2275,11 +2324,15 @@ with PortalBlocks(**blocks_options) as demo:
     with gr.Group(visible=False, elem_id="test-history-section") as test_history_group:
         gr.Markdown(
             "### My test submissions\n"
-            "Receipts are retrieved only for the currently signed-in account."
+            "Signed-in history uses your Hugging Face account. Signed-out history uses "
+            "the normalized contact email entered above."
         )
         refresh_history = gr.Button("Refresh my submissions", variant="secondary")
         test_history = gr.HTML(
-            value="<p>Sign in with Hugging Face to retrieve your test receipts.</p>"
+            value=(
+                "<p>Sign in with Hugging Face (recommended) or enter your contact "
+                "email to retrieve test receipts.</p>"
+            )
         )
 
     submit.click(
@@ -2297,7 +2350,7 @@ with PortalBlocks(**blocks_options) as demo:
     )
     refresh_history.click(
         my_test_submissions,
-        inputs=None,
+        inputs=contact,
         outputs=test_history,
         api_name="my_test_submissions",
     )

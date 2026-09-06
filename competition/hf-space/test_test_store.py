@@ -11,16 +11,18 @@ from types import SimpleNamespace
 from huggingface_hub.errors import EntryNotFoundError, HfHubHTTPError
 from requests import Response
 
-from test_policy import OAuthIdentity, account_key
+from test_policy import TestIdentity, account_key
 from test_store import HubTestStore, TestStoreError
 
 
 NOW = dt.datetime(2026, 9, 5, 12, 0, tzinfo=dt.timezone.utc)
 TEST_CLOSE = dt.datetime(2026, 9, 11, 12, 0, tzinfo=dt.timezone.utc)
-IDENTITY = OAuthIdentity(
-    sub="oauth-subject-private",
-    username="private-user",
-    email="private@example.org",
+IDENTITY = TestIdentity(
+    identity_kind="huggingface",
+    identity_subject="oauth-subject-private",
+    hf_username="private-user",
+    contact_email="private@example.org",
+    email_verified=True,
 )
 TASK_DIGEST = "a" * 64
 GOLD = b'{"instance_id":"test-1","answer":"withheld gold","evidence":["b1"]}\n'
@@ -56,6 +58,21 @@ METRICS = {
         }
     ],
 }
+
+
+def unsafe_identity(**changes):
+    values = {
+        "identity_kind": IDENTITY.identity_kind,
+        "identity_subject": IDENTITY.identity_subject,
+        "hf_username": IDENTITY.hf_username,
+        "contact_email": IDENTITY.contact_email,
+        "email_verified": IDENTITY.email_verified,
+    }
+    values.update(changes)
+    identity = object.__new__(TestIdentity)
+    for field, value in values.items():
+        object.__setattr__(identity, field, value)
+    return identity
 
 
 def provisional_bytes(rows=()):
@@ -318,9 +335,9 @@ class HubTestStoreTests(unittest.TestCase):
     def test_direct_store_bounds_identity_and_private_metadata_before_io(self):
         """Catches unbounded OAuth or participant metadata reaching JSON persistence."""
         identity_cases = {
-            "subject": OAuthIdentity("s" * 4_097, IDENTITY.username, IDENTITY.email),
-            "username": OAuthIdentity(IDENTITY.sub, "u" * 4_097, IDENTITY.email),
-            "email": OAuthIdentity(IDENTITY.sub, IDENTITY.username, "e" * 4_097),
+            "subject": unsafe_identity(identity_subject="s" * 4_097),
+            "username": unsafe_identity(hf_username="u" * 4_097),
+            "email": unsafe_identity(contact_email="e" * 4_097),
         }
         metadata_cases = {
             "team": {**META, "team": "t" * 4_097},
@@ -363,14 +380,14 @@ class HubTestStoreTests(unittest.TestCase):
         """Catches control characters crossing the immutable-ledger boundary."""
 
         identity_cases = {
-            "subject NUL": OAuthIdentity(
-                f"{IDENTITY.sub}\0x", IDENTITY.username, IDENTITY.email
+            "subject NUL": unsafe_identity(
+                identity_subject=f"{IDENTITY.identity_subject}\0x"
             ),
-            "username newline": OAuthIdentity(
-                IDENTITY.sub, f"{IDENTITY.username}\nspoof", IDENTITY.email
+            "username newline": unsafe_identity(
+                hf_username=f"{IDENTITY.hf_username}\nspoof"
             ),
-            "email tab": OAuthIdentity(
-                IDENTITY.sub, IDENTITY.username, f"{IDENTITY.email}\tspoof"
+            "email tab": unsafe_identity(
+                contact_email=f"{IDENTITY.contact_email}\tspoof"
             ),
         }
         metadata_cases = {
@@ -461,35 +478,33 @@ class HubTestStoreTests(unittest.TestCase):
         self.assertEqual(len(store.account_history(IDENTITY)), 1)
         self.assertEqual(len(hub.create_calls), 1)
 
-    def test_exact_retry_refuses_participant_metadata_drift(self):
-        hub = InMemoryHub()
-        store = HubTestStore(
-            hub,
-            repo_id="private/repo",
-            release_config_path="sealed/release.json",
-            gold_config_path="sealed/gold.jsonl",
-            now_provider=lambda: NOW,
-        )
-        first = store.submit(IDENTITY, META, PREDICTIONS, METRICS)
-
+    def test_changed_participant_metadata_is_a_new_attempt_not_an_exact_retry(self):
         for field, value in (
             ("team", "Changed Team"),
             ("participant_names", "Changed Participant"),
             ("submission_name", "changed run"),
         ):
             with self.subTest(field=field):
-                with self.assertRaisesRegex(TestStoreError, "could not be accepted"):
-                    store.submit(
-                        IDENTITY,
-                        {**META, field: value},
-                        PREDICTIONS,
-                        METRICS,
-                    )
+                hub = InMemoryHub()
+                store = HubTestStore(
+                    hub,
+                    repo_id="private/repo",
+                    release_config_path="sealed/release.json",
+                    gold_config_path="sealed/gold.jsonl",
+                    now_provider=lambda: NOW,
+                )
+                first = store.submit(IDENTITY, META, PREDICTIONS, METRICS)
 
-        self.assertEqual(len(hub.create_calls), 1)
-        self.assertEqual(
-            store.account_history(IDENTITY)[0]["submission_id"], first.submission_id
-        )
+                changed = store.submit(
+                    IDENTITY,
+                    {**META, field: value},
+                    PREDICTIONS,
+                    METRICS,
+                )
+
+                self.assertEqual((first.attempt, changed.attempt), (1, 2))
+                self.assertNotEqual(first.submission_id, changed.submission_id)
+                self.assertEqual(len(hub.create_calls), 2)
 
     def test_exact_retry_lookup_returns_immutable_record_without_commit(self):
         hub = InMemoryHub()
@@ -588,6 +603,57 @@ class HubTestStoreTests(unittest.TestCase):
         )
         self.assertEqual(set(provisional["rows"][0]), {"rank", "hf_username", "team"})
 
+    def test_private_attempt_and_organizer_use_exact_identity_v3_fields(self):
+        hub = InMemoryHub()
+        store = HubTestStore(
+            hub,
+            repo_id="private/repo",
+            release_config_path="sealed/release.json",
+            gold_config_path="sealed/gold.jsonl",
+            now_provider=lambda: NOW,
+        )
+
+        receipt = store.submit(IDENTITY, META, PREDICTIONS, METRICS)
+
+        key = account_key(IDENTITY)
+        attempt = json.loads(
+            hub.files[f"attempts/test/{key}/{receipt.submission_id}.json"]
+        )
+        organizer = json.loads(
+            hub.files["projections/test/organizer_leaderboard.json"]
+        )["accounts"][0]
+        expected = {
+            "identity_kind": "huggingface",
+            "identity_subject": "oauth-subject-private",
+            "hf_username": "private-user",
+            "contact_email": "private@example.org",
+            "email_verified": True,
+        }
+        for record in (attempt, organizer):
+            self.assertEqual({field: record[field] for field in expected}, expected)
+            self.assertNotIn("hf_subject", record)
+            self.assertNotIn("verified_email", record)
+
+    def test_email_identity_public_projection_never_contains_contact_email(self):
+        hub = InMemoryHub()
+        identity = TestIdentity.from_email(" Anonymous@Example.ORG ")
+        store = HubTestStore(
+            hub,
+            repo_id="private/repo",
+            release_config_path="sealed/release.json",
+            gold_config_path="sealed/gold.jsonl",
+            now_provider=lambda: NOW,
+        )
+
+        store.submit(identity, META, PREDICTIONS, METRICS)
+
+        projection = json.loads(hub.files["projections/test/public_provisional.json"])
+        self.assertEqual(
+            projection["rows"],
+            [{"rank": 1, "hf_username": "Not signed in", "team": "Private Team"}],
+        )
+        self.assertNotIn("anonymous@example.org", json.dumps(projection))
+
     def test_later_attempt_never_writes_or_changes_provisional_ranks(self):
         hub = InMemoryHub()
         store = HubTestStore(
@@ -629,10 +695,12 @@ class HubTestStoreTests(unittest.TestCase):
             now_provider=lambda: NOW,
         )
         store.submit(IDENTITY, META, PREDICTIONS, METRICS)
-        other = OAuthIdentity(
-            sub="oauth-subject-other",
-            username="other-user",
-            email="other@example.org",
+        other = TestIdentity(
+            identity_kind="huggingface",
+            identity_subject="oauth-subject-other",
+            hf_username="other-user",
+            contact_email="other@example.org",
+            email_verified=True,
         )
 
         store.submit(
@@ -806,10 +874,12 @@ class HubTestStoreTests(unittest.TestCase):
                 clock[0] = TEST_CLOSE
 
         hub.download_hook = cross_close_during_reconstruction
-        other = OAuthIdentity(
-            sub="oauth-subject-other",
-            username="other-user",
-            email="other@example.org",
+        other = TestIdentity(
+            identity_kind="huggingface",
+            identity_subject="oauth-subject-other",
+            hf_username="other-user",
+            contact_email="other@example.org",
+            email_verified=True,
         )
         second_store = HubTestStore(
             hub,
@@ -1124,7 +1194,7 @@ class HubTestStoreTests(unittest.TestCase):
             gold_config_path="sealed/gold.jsonl",
             now_provider=lambda: NOW,
         )
-        incomplete = OAuthIdentity(sub="subject-only", username="", email="")
+        incomplete = unsafe_identity(hf_username="", contact_email="")
 
         with self.assertRaisesRegex(TestStoreError, "could not be accepted"):
             store.submit(incomplete, META, PREDICTIONS, METRICS)
@@ -1161,6 +1231,38 @@ class HubTestStoreTests(unittest.TestCase):
         )
         self.assertEqual(len(hub.create_calls), 3)
         self.assertEqual(len(store.account_history(IDENTITY)), 3)
+
+    def test_email_identity_receives_exactly_three_unique_attempts(self):
+        hub = InMemoryHub()
+        identity = TestIdentity.from_email("quota@example.org")
+        store = HubTestStore(
+            hub,
+            repo_id="private/repo",
+            release_config_path="sealed/release.json",
+            gold_config_path="sealed/gold.jsonl",
+            now_provider=lambda: NOW,
+        )
+
+        receipts = [
+            store.submit(
+                identity,
+                META,
+                [
+                    {
+                        "instance_id": "test-1",
+                        "answer": f"answer-{index}",
+                        "evidence": ["b1"],
+                    }
+                ],
+                METRICS,
+            )
+            for index in range(4)
+        ]
+
+        self.assertEqual(
+            [receipt.accepted for receipt in receipts], [True, True, True, False]
+        )
+        self.assertEqual([receipt.attempt for receipt in receipts], [1, 2, 3, None])
 
     def test_uncertain_postcommit_error_deduplicates_by_canonical_hash(self):
         hub = InMemoryHub()
@@ -1306,8 +1408,8 @@ class HubTestStoreTests(unittest.TestCase):
 
         message = str(caught.exception)
         for private_value in (
-            IDENTITY.email,
-            IDENTITY.sub,
+            IDENTITY.contact_email,
+            IDENTITY.identity_subject,
             PREDICTIONS[0]["answer"],
             "0.25",
             "score",
@@ -1328,8 +1430,8 @@ class HubTestStoreTests(unittest.TestCase):
 
         message = hub.create_calls[0]["commit_message"]
         for private_value in (
-            IDENTITY.email,
-            IDENTITY.sub,
+            IDENTITY.contact_email,
+            IDENTITY.identity_subject,
             PREDICTIONS[0]["answer"],
             "0.25",
             "score",

@@ -60,7 +60,7 @@ class PortalLayoutTests(unittest.TestCase):
 
         self.assertIn("Validation (development)", serialized)
         self.assertIn("Test (final)", serialized)
-        self.assertIn("Sign in with Hugging Face", serialized)
+        self.assertIn("Sign in with Hugging Face (recommended)", serialized)
         self.assertIn("My test submissions", serialized)
 
         split_selectors = [
@@ -73,6 +73,32 @@ class PortalLayoutTests(unittest.TestCase):
         self.assertEqual(
             split_selectors[0]["props"]["value"], "Validation (development)"
         )
+
+    def test_metric_explanation_accordion_is_collapsed_and_defines_exact_formulas(self):
+        config = demo.get_config_file()
+        accordions = [
+            component
+            for component in config["components"]
+            if component["type"] == "accordion"
+            and component["props"].get("label") == "How metrics are computed"
+        ]
+        serialized = json.dumps(config)
+
+        self.assertEqual(len(accordions), 1)
+        self.assertFalse(accordions[0]["props"]["open"])
+        for required in (
+            "mean exact normalized answer match",
+            "set overlap",
+            "harmonic mean",
+            "macro-averaged across tasks",
+            "Partial evidence earns partial credit",
+            "answer exact AND evidence set exact",
+            "does not AND the two aggregate percentages",
+            "does not use evidence F1",
+            "accepted time and stable submission ID",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, serialized)
 
     def test_initial_public_config_does_not_serialize_private_test_state(self):
         serialized = json.dumps(demo.get_config_file()).casefold()
@@ -217,9 +243,13 @@ class PortalLayoutTests(unittest.TestCase):
         readme = (Path(__file__).parent / "README.md").read_text(encoding="utf-8")
 
         self.assertIn("The held-out test inputs have been released", readme)
-        self.assertIn("3 accepted test submissions per Hugging Face account", readme)
-        self.assertIn("Joint Accuracy, Answer Accuracy, and Evidence F1", readme)
-        self.assertIn("private to that signed-in account", readme)
+        self.assertIn("3 accepted test submissions per identity", readme)
+        self.assertIn(
+            "Joint Exact Accuracy, Answer Exact Accuracy, and Evidence F1 (macro)",
+            readme,
+        )
+        self.assertIn("private to that submitting identity", readme)
+        self.assertIn("alternate anonymous emails", readme)
         self.assertIn("provisional public ranks use only attempt 1", readme)
         self.assertIn("display no metrics", readme)
         self.assertIn("best of all 3 eligible attempts", readme)

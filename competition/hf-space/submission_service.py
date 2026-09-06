@@ -29,7 +29,7 @@ from test_contract import (
     validate_test_predictions,
 )
 from test_policy import (
-    OAuthIdentity,
+    TestIdentity,
     TestPolicyError,
     TestReleasePolicy,
     participant_test_response,
@@ -202,7 +202,10 @@ class SubmissionService:
         return self._submit_test(file_obj, metadata, oauth_profile)
 
     def _submit_test(self, file_obj, metadata, oauth_profile) -> dict:
-        identity = _oauth_identity(oauth_profile)
+        contact_email = (
+            metadata.get("contact") if isinstance(metadata, Mapping) else None
+        )
+        identity = _test_identity(oauth_profile, contact_email)
         try:
             request_now = self.now_provider()
             config = self.test_config_loader(request_now)
@@ -277,8 +280,8 @@ class SubmissionService:
         except Exception:
             raise SubmissionError(TEST_UNAVAILABLE) from None
 
-    def history_for_oauth(self, oauth_profile) -> list[dict]:
-        identity = _oauth_identity(oauth_profile)
+    def history_for_identity(self, contact_email, oauth_profile) -> list[dict]:
+        identity = _test_identity(oauth_profile, contact_email)
         try:
             attempts = self.test_store.account_history(identity)
             return [_history_response(attempt) for attempt in attempts]
@@ -286,6 +289,11 @@ class SubmissionService:
             raise SubmissionError(
                 "Test submission history is temporarily unavailable."
             ) from None
+
+    def history_for_oauth(self, oauth_profile) -> list[dict]:
+        """Compatibility wrapper for authenticated history callers."""
+
+        return self.history_for_identity(None, oauth_profile)
 
 
 def _split(value) -> SubmissionSplit:
@@ -295,12 +303,28 @@ def _split(value) -> SubmissionSplit:
         raise SubmissionError("Select validation or test.") from None
 
 
-def _oauth_identity(profile) -> OAuthIdentity:
+def _test_identity(profile, contact_email) -> TestIdentity:
+    if profile is None:
+        try:
+            return TestIdentity.from_email(contact_email)
+        except (TestPolicyError, TypeError, ValueError) as exc:
+            raise SubmissionError(str(exc)) from None
     try:
-        return OAuthIdentity.from_profile(profile)
+        data = dict(profile)
     except (TestPolicyError, TypeError, ValueError):
         raise SubmissionError(
-            "Sign in with Hugging Face to submit test predictions."
+            "A complete verified Hugging Face profile is required when sign-in data is present."
+        ) from None
+    if not data:
+        try:
+            return TestIdentity.from_email(contact_email)
+        except (TestPolicyError, TypeError, ValueError) as exc:
+            raise SubmissionError(str(exc)) from None
+    try:
+        return TestIdentity.from_profile(data)
+    except (TestPolicyError, TypeError, ValueError):
+        raise SubmissionError(
+            "A complete verified Hugging Face profile is required when sign-in data is present."
         ) from None
 
 

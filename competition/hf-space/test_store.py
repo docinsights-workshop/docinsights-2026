@@ -24,8 +24,8 @@ from test_contract import (
     validate_test_predictions,
 )
 from test_policy import (
-    OAuthIdentity,
     OFFICIAL_TEST_CLOSE_AT,
+    TestIdentity,
     TestPolicyError,
     TestReleasePolicy,
     account_key,
@@ -50,9 +50,11 @@ RELEASE_STATE_FIELDS = frozenset(
 ATTEMPT_RECORD_FIELDS = RELEASE_STATE_FIELDS | {
     "submission_id",
     "account_key",
-    "hf_subject",
+    "identity_kind",
+    "identity_subject",
     "hf_username",
-    "verified_email",
+    "contact_email",
+    "email_verified",
     "scoring_gold_sha256",
     "scoring_private_revision",
     "scoring_public_revision",
@@ -82,9 +84,11 @@ ORGANIZER_ACCOUNT_FIELDS = RELEASE_STATE_FIELDS | {
     "account_key",
     "attempt_count",
     "best_submission_id",
-    "hf_subject",
+    "identity_kind",
+    "identity_subject",
     "hf_username",
-    "verified_email",
+    "contact_email",
+    "email_verified",
     "team",
     "participant_names",
     "submission_name",
@@ -171,6 +175,7 @@ class HubTestStore:
                     "test",
                     snapshot.policy.release_id,
                     identity,
+                    normalized_metadata,
                 )
                 existing = _find_submission(snapshot.attempts, submission_hash)
                 if existing is not None:
@@ -412,6 +417,7 @@ class HubTestStore:
                 "test",
                 snapshot.policy.release_id,
                 identity,
+                normalized_metadata,
             )
             existing = _find_submission(snapshot.attempts, submission_hash)
             if existing is not None:
@@ -558,13 +564,17 @@ class HubTestStore:
 
 
 def _complete_identity_key(identity) -> str:
-    if not isinstance(identity, OAuthIdentity):
+    if not isinstance(identity, TestIdentity):
         raise _InvalidSubmission()
     try:
-        bounded_private_text(identity.sub, "hf_subject")
-        bounded_private_text(identity.username, "hf_username")
-        bounded_private_text(identity.email, "verified_email")
-    except ValueError:
+        TestIdentity(
+            identity.identity_kind,
+            identity.identity_subject,
+            identity.hf_username,
+            identity.contact_email,
+            identity.email_verified,
+        )
+    except (ValueError, TestPolicyError):
         raise _InvalidSubmission()
     return account_key(identity)
 
@@ -610,9 +620,9 @@ def _validate_attempt_contract(record) -> None:
             raise ValueError()
         for field in (
             "release_id",
-            "hf_subject",
+            "identity_subject",
             "hf_username",
-            "verified_email",
+            "contact_email",
             "team",
             "participant_names",
             "submission_name",
@@ -627,7 +637,25 @@ def _validate_attempt_contract(record) -> None:
             or record["attempt_number"] < 1
         ):
             raise ValueError()
-    except ValueError:
+        identity = TestIdentity(
+            record.get("identity_kind"),
+            record.get("identity_subject"),
+            record.get("hf_username"),
+            record.get("contact_email"),
+            record.get("email_verified"),
+        )
+        if account_key(identity) != record.get("account_key"):
+            raise ValueError()
+        expected_hash = canonical_submission_hash(
+            predictions,
+            "test",
+            record.get("release_id"),
+            identity,
+            record,
+        )
+        if record.get("submission_hash") != expected_hash:
+            raise ValueError()
+    except (ValueError, TestPolicyError):
         raise _Unavailable() from None
 
 
@@ -822,7 +850,7 @@ def _accepted_at(now) -> str:
 
 def _attempt_record(
     *,
-    identity: OAuthIdentity,
+    identity: TestIdentity,
     key: str,
     metadata: Mapping,
     predictions,
@@ -837,9 +865,11 @@ def _attempt_record(
         **_release_state(policy),
         "submission_id": submission_id,
         "account_key": key,
-        "hf_subject": identity.sub,
-        "hf_username": identity.username,
-        "verified_email": identity.email,
+        "identity_kind": identity.identity_kind,
+        "identity_subject": identity.identity_subject,
+        "hf_username": identity.hf_username,
+        "contact_email": identity.contact_email,
+        "email_verified": identity.email_verified,
         "scoring_gold_sha256": metadata["scoring_gold_sha256"],
         "scoring_private_revision": metadata["scoring_private_revision"],
         "scoring_public_revision": metadata["scoring_public_revision"],
@@ -892,9 +922,11 @@ def _organizer_account(key, policy, attempts, best) -> dict:
         "account_key": key,
         "attempt_count": len(attempts),
         "best_submission_id": best["submission_id"],
-        "hf_subject": best["hf_subject"],
+        "identity_kind": best["identity_kind"],
+        "identity_subject": best["identity_subject"],
         "hf_username": best["hf_username"],
-        "verified_email": best["verified_email"],
+        "contact_email": best["contact_email"],
+        "email_verified": best["email_verified"],
         "team": best["team"],
         "participant_names": best["participant_names"],
         "submission_name": best["submission_name"],

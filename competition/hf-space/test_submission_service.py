@@ -13,7 +13,7 @@ from unittest.mock import patch
 import app
 from scoring import SubmissionError
 from submission_service import HubTestConfigLoader, SubmissionService, TrustedTestConfig
-from test_policy import OAuthIdentity, TestReleasePolicy
+from test_policy import TestIdentity, TestReleasePolicy
 from test_store import TestReceipt, TestStoreError
 
 
@@ -186,20 +186,40 @@ class LegacyValidationCharacterizationTests(unittest.TestCase):
             rendered = app.leaderboard_html()
         heading = app._validation_leaderboard_heading()
 
-        self.assertIn("Joint accuracy", rendered)
+        self.assertIn("Joint Exact Accuracy", rendered)
         self.assertLess(
-            rendered.index("Joint accuracy"), rendered.index("Answer accuracy")
+            rendered.index("Joint Exact Accuracy"),
+            rendered.index("Answer Exact Accuracy"),
         )
         self.assertLess(
-            rendered.index("Answer accuracy"), rendered.index("Evidence F1")
+            rendered.index("Answer Exact Accuracy"),
+            rendered.index("Evidence F1 (macro)"),
         )
         self.assertIn("exact normalized answer", heading)
         self.assertIn("partial credit", heading)
         self.assertIn("entire normalized evidence set", heading)
         self.assertIn(
-            "Ranked by joint accuracy, then answer accuracy, then evidence F1",
+            "Ranked by Joint Exact Accuracy, then Answer Exact Accuracy, then Evidence F1",
             heading,
         )
+
+    def test_validation_missing_joint_renders_not_yet_computed_not_zero(self):
+        row = {
+            "team": "Legacy Team",
+            "contact": "legacy@example.org",
+            "submission_name": "legacy",
+            "submitted_at": "2026-09-05T12:00:00Z",
+            "answer_accuracy": 0.75,
+            "evidence_exact_match": 0.5,
+            "evidence_f1": 0.625,
+            "examples": 8,
+        }
+
+        with patch.object(app, "_load_leaderboard_rows", return_value=[row]):
+            rendered = app.leaderboard_html()
+
+        self.assertIn("Not yet computed", rendered)
+        self.assertNotIn(">0.00%</td>", rendered)
 
     def test_validation_leaderboard_fixture_preserves_exact_rendered_row(self):
         rows = [
@@ -418,11 +438,46 @@ class SplitAwareServiceTests(unittest.TestCase):
         self.assertEqual(result["value"]["answer_accuracy"], 1.0)
         self.assertEqual(result["value"]["message"], "legacy persistence")
 
-    def test_test_rejects_missing_oauth_before_reading_file(self):
+    def test_signed_out_test_requires_valid_contact_before_reading_file(self):
         unreadable = FileProbe()
 
-        with self.assertRaisesRegex(SubmissionError, "Sign in"):
-            configured_service().submit_for_split("test", unreadable, TEST_META, None)
+        for contact in ("", "not-an-email"):
+            with self.subTest(contact=contact):
+                with self.assertRaisesRegex(SubmissionError, "valid contact email"):
+                    configured_service().submit_for_split(
+                        "test", unreadable, {**TEST_META, "contact": contact}, None
+                    )
+
+        self.assertFalse(unreadable.was_read)
+
+    def test_signed_out_test_uses_normalized_email_identity(self):
+        upload = test_file()
+        self.addCleanup(Path(upload.name).unlink, missing_ok=True)
+        store = RecordingStore()
+
+        result = configured_service(store=store).submit_for_split(
+            "test",
+            upload,
+            {**TEST_META, "contact": "  Anonymous+Team@Example.ORG "},
+            None,
+        )
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(
+            store.submissions[0]["identity"],
+            TestIdentity.from_email("anonymous+team@example.org"),
+        )
+
+    def test_nonempty_partial_oauth_never_falls_back_to_typed_email(self):
+        unreadable = FileProbe()
+
+        with self.assertRaisesRegex(SubmissionError, "verified Hugging Face"):
+            configured_service().submit_for_split(
+                "test",
+                unreadable,
+                {**TEST_META, "contact": "valid@example.org"},
+                {"sub": "partial-profile"},
+            )
 
         self.assertFalse(unreadable.was_read)
 
@@ -455,7 +510,7 @@ class SplitAwareServiceTests(unittest.TestCase):
         for name, profile in profile_cases.items():
             with self.subTest(profile=name):
                 unreadable = FileProbe()
-                with self.assertRaisesRegex(SubmissionError, "Sign in"):
+                with self.assertRaisesRegex(SubmissionError, "verified Hugging Face"):
                     configured_service().submit_for_split(
                         "test", unreadable, TEST_META, profile
                     )
@@ -520,7 +575,9 @@ class SplitAwareServiceTests(unittest.TestCase):
         store = RecordingStore()
         service = configured_service(store=store)
 
-        result = service.submit_for_split("test", upload, TEST_META, PROFILE)
+        result = service.submit_for_split(
+            "test", upload, {**TEST_META, "contact": "not-an-email"}, PROFILE
+        )
 
         self.assertEqual(
             result,
@@ -535,7 +592,11 @@ class SplitAwareServiceTests(unittest.TestCase):
             },
         )
         recorded = store.submissions[0]
-        self.assertEqual(recorded["identity"], OAuthIdentity.from_profile(PROFILE))
+        self.assertEqual(recorded["identity"], TestIdentity.from_profile(PROFILE))
+        self.assertNotEqual(
+            recorded["identity"].contact_email,
+            "not-an-email",
+        )
         self.assertEqual(
             recorded["metadata"],
             {
@@ -953,13 +1014,13 @@ class SplitAwareServiceTests(unittest.TestCase):
         for withheld in ("0.125", "0.25", "0.5", "0.625"):
             self.assertNotIn(withheld, serialized)
 
-    def test_history_is_bound_to_oauth_and_suppresses_later_metrics(self):
+    def test_history_prefers_oauth_and_suppresses_later_metrics(self):
         store = RecordingStore()
         service = configured_service(store=store)
 
-        result = service.history_for_oauth(PROFILE)
+        result = service.history_for_identity("ignored@example.org", PROFILE)
 
-        self.assertEqual(store.history_identity, OAuthIdentity.from_profile(PROFILE))
+        self.assertEqual(store.history_identity, TestIdentity.from_profile(PROFILE))
         self.assertEqual(
             result,
             [
@@ -985,6 +1046,18 @@ class SplitAwareServiceTests(unittest.TestCase):
         )
         self.assertNotIn("secret-test-id", json.dumps(result))
         self.assertNotIn("private prediction", json.dumps(result))
+
+    def test_anonymous_history_uses_normalized_contact_email(self):
+        store = RecordingStore()
+        service = configured_service(store=store)
+
+        result = service.history_for_identity(" Anonymous@Example.ORG ", None)
+
+        self.assertEqual(
+            store.history_identity,
+            TestIdentity.from_email("anonymous@example.org"),
+        )
+        self.assertEqual(result[0]["receipt"], "receipt-1")
 
     def test_service_genericizes_private_loader_and_store_failures(self):
         secrets = "secret@example.org private-answer score=0.25"

@@ -2,11 +2,12 @@ import datetime as dt
 import unittest
 
 from test_policy import (
-    OAuthIdentity,
+    TestIdentity,
     TestPolicyError,
     TestReleasePolicy,
     account_key,
     canonical_submission_hash,
+    normalize_contact_email,
     participant_test_response,
     select_best_attempt,
 )
@@ -45,15 +46,89 @@ FIXTURE_ATTEMPTS = [
 
 
 class TestPolicyTests(unittest.TestCase):
-    def test_account_key_uses_stable_subject_not_email(self):
-        first = OAuthIdentity(sub="stable-1", username="u", email="a@example.org")
-        changed = OAuthIdentity(sub="stable-1", username="u2", email="b@example.org")
+    def test_huggingface_identity_uses_stable_subject_and_verified_profile_email(self):
+        first = TestIdentity.from_profile(
+            {
+                "sub": " stable-1 ",
+                "preferred_username": " user-one ",
+                "email": "A@Example.ORG",
+                "email_verified": True,
+            }
+        )
+        changed = TestIdentity.from_profile(
+            {
+                "sub": "stable-1",
+                "preferred_username": "user-two",
+                "email": "b@example.org",
+                "email_verified": True,
+            }
+        )
 
         self.assertEqual(account_key(first), account_key(changed))
+        self.assertEqual(
+            account_key(first),
+            "84b7a751be0df88d96101dcd5fa572beea884f895c2d3aa2bad3dfbf2e9a7a35",
+        )
+        self.assertEqual(
+            first,
+            TestIdentity(
+                identity_kind="huggingface",
+                identity_subject="stable-1",
+                hf_username="user-one",
+                contact_email="a@example.org",
+                email_verified=True,
+            ),
+        )
+
+    def test_email_identity_normalizes_contact_and_uses_kind_scoped_quota_key(self):
+        identity = TestIdentity.from_email("  Person+Paper@Example.ORG ")
+
+        self.assertEqual(
+            identity,
+            TestIdentity(
+                identity_kind="email",
+                identity_subject="person+paper@example.org",
+                hf_username="Not signed in",
+                contact_email="person+paper@example.org",
+                email_verified=False,
+            ),
+        )
+        self.assertEqual(normalize_contact_email(" A@Example.org "), "a@example.org")
+        self.assertEqual(
+            account_key(TestIdentity.from_email("a@example.org")),
+            "c8f9c32bd6374841a1a46c5b33048abd26ec1d020549207ad0eab95562f487c4",
+        )
+        signed_in_same_subject = TestIdentity(
+            identity_kind="huggingface",
+            identity_subject="a@example.org",
+            hf_username="account-a",
+            contact_email="a@example.org",
+            email_verified=True,
+        )
+        self.assertNotEqual(
+            account_key(signed_in_same_subject),
+            account_key(TestIdentity.from_email("a@example.org")),
+        )
+
+    def test_email_syntax_rejects_ambiguous_or_non_normalized_identity_values(self):
+        for value in (
+            "missing-at.example.org",
+            "two@@example.org",
+            ".lead@example.org",
+            "trail.@example.org",
+            "two..dots@example.org",
+            "a@localhost",
+            "a@-example.org",
+            "a@example-.org",
+            "a@exa_mple.org",
+        ):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(TestPolicyError, "valid contact email"):
+                    TestIdentity.from_email(value)
 
     def test_missing_verified_email_is_rejected(self):
         with self.assertRaisesRegex(TestPolicyError, "verified email"):
-            OAuthIdentity.from_profile({"sub": "s", "preferred_username": "u"})
+            TestIdentity.from_profile({"sub": "s", "preferred_username": "u"})
 
     def test_disabled_or_closed_policy_rejects_before_scoring(self):
         policy = TestReleasePolicy.disabled()
@@ -62,7 +137,7 @@ class TestPolicyTests(unittest.TestCase):
             policy.require_open(now=dt.datetime(2026, 9, 5, tzinfo=dt.timezone.utc))
 
     def test_profile_normalizes_email_and_rejects_unverified_email(self):
-        identity = OAuthIdentity.from_profile(
+        identity = TestIdentity.from_profile(
             {
                 "sub": " stable-1 ",
                 "preferred_username": " participant ",
@@ -71,11 +146,11 @@ class TestPolicyTests(unittest.TestCase):
             }
         )
 
-        self.assertEqual(identity.sub, "stable-1")
-        self.assertEqual(identity.username, "participant")
-        self.assertEqual(identity.email, "a@example.org")
+        self.assertEqual(identity.identity_subject, "stable-1")
+        self.assertEqual(identity.hf_username, "participant")
+        self.assertEqual(identity.contact_email, "a@example.org")
         with self.assertRaisesRegex(TestPolicyError, "verified email"):
-            OAuthIdentity.from_profile(
+            TestIdentity.from_profile(
                 {
                     "sub": "s",
                     "preferred_username": "u",
@@ -100,7 +175,7 @@ class TestPolicyTests(unittest.TestCase):
         ):
             with self.subTest(profile=profile):
                 with self.assertRaisesRegex(TestPolicyError, "verified email"):
-                    OAuthIdentity.from_profile(profile)
+                    TestIdentity.from_profile(profile)
 
     def test_active_policy_requires_complete_utc_window(self):
         policy = TestReleasePolicy(
@@ -131,7 +206,19 @@ class TestPolicyTests(unittest.TestCase):
             )
 
     def test_canonical_hash_is_stable_for_payload_order_and_mapping_order(self):
-        identity = OAuthIdentity(sub="stable-1", username="u", email="a@example.org")
+        identity = TestIdentity.from_profile(
+            {
+                "sub": "stable-1",
+                "preferred_username": "u",
+                "email": "a@example.org",
+                "email_verified": True,
+            }
+        )
+        metadata = {
+            "team": "Team One",
+            "participant_names": "Alice Example",
+            "submission_name": "Run One",
+        }
         first = [
             {
                 "instance_id": "two",
@@ -146,16 +233,26 @@ class TestPolicyTests(unittest.TestCase):
         ]
 
         self.assertEqual(
-            canonical_submission_hash(first, "test", "r1", identity),
-            canonical_submission_hash(reordered, "test", "r1", identity),
+            canonical_submission_hash(first, "test", "r1", identity, metadata),
+            canonical_submission_hash(reordered, "test", "r1", identity, metadata),
         )
         self.assertEqual(
-            canonical_submission_hash(first, "test", "r1", identity),
-            "9c1ee6bb4ed181c6de5014df91c7d899fe76c1d6ecc8cbe35b4d57f5ddeddd47",
+            canonical_submission_hash(first, "test", "r1", identity, metadata),
+            "6d847b5dca10df9ce7a976d9454ef2253d69c277df4338e4edcf04c56113726c",
         )
         self.assertNotEqual(
-            canonical_submission_hash(first, "test", "r2", identity),
-            canonical_submission_hash(first, "test", "r1", identity),
+            canonical_submission_hash(first, "test", "r2", identity, metadata),
+            canonical_submission_hash(first, "test", "r1", identity, metadata),
+        )
+        self.assertNotEqual(
+            canonical_submission_hash(first, "test", "r1", identity, metadata),
+            canonical_submission_hash(
+                first,
+                "test",
+                "r1",
+                identity,
+                {**metadata, "submission_name": "Run Two"},
+            ),
         )
 
     def test_attempt_one_feedback_has_only_public_aggregates(self):
