@@ -6,18 +6,19 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import app
-from app import load_test_deployment_config
+from app import load_test_deployment_config, load_validation_submissions_enabled
 from submission_service import SubmissionService
 
 
 VALID_RELEASE = {
     "TEST_SUBMISSIONS_ENABLED": "true",
     "TEST_PUBLIC_LEADERBOARD_ENABLED": "true",
+    "TEST_PROVISIONAL_LEADERBOARD_ENABLED": "true",
     "TEST_RELEASE_ID": "docsem-test-2026-09",
     "TEST_TASK_MANIFEST_SHA256": "a" * 64,
     "TEST_GOLD_SHA256": "b" * 64,
     "TEST_OPEN_AT": "2026-09-05T00:00:00Z",
-    "TEST_CLOSE_AT": "2026-09-10T00:00:00Z",
+    "TEST_CLOSE_AT": "2026-09-11T12:00:00Z",
     "TEST_MAX_ATTEMPTS": "3",
     "TEST_RELEASE_CONFIG_PATH": "private/test_release.json",
     "TEST_GOLD_CONFIG_PATH": "private/test_labels.jsonl",
@@ -75,7 +76,23 @@ class TestDeploymentConfigTests(unittest.TestCase):
 
         self.assertFalse(config.submissions_enabled)
         self.assertFalse(config.public_leaderboard_enabled)
+        self.assertFalse(config.provisional_leaderboard_enabled)
         self.assertEqual(config.max_attempts, 3)
+
+    def test_validation_submissions_default_on_but_explicit_false_is_fail_closed(self):
+        self.assertTrue(load_validation_submissions_enabled({}))
+        self.assertTrue(
+            load_validation_submissions_enabled(
+                {"VALIDATION_SUBMISSIONS_ENABLED": "true"}
+            )
+        )
+        for value in ("false", "0", "no", "invalid"):
+            with self.subTest(value=value):
+                self.assertFalse(
+                    load_validation_submissions_enabled(
+                        {"VALIDATION_SUBMISSIONS_ENABLED": value}
+                    )
+                )
 
     def test_each_missing_required_release_value_disables_requested_test_surfaces(self):
         for missing in (
@@ -93,6 +110,7 @@ class TestDeploymentConfigTests(unittest.TestCase):
 
                 self.assertFalse(config.submissions_enabled)
                 self.assertFalse(config.public_leaderboard_enabled)
+                self.assertFalse(config.provisional_leaderboard_enabled)
                 self.assertEqual(config.max_attempts, 3)
                 assert_anonymous_validation_fixture(self)
 
@@ -106,6 +124,7 @@ class TestDeploymentConfigTests(unittest.TestCase):
 
                 self.assertFalse(config.submissions_enabled)
                 self.assertFalse(config.public_leaderboard_enabled)
+                self.assertFalse(config.provisional_leaderboard_enabled)
                 assert_anonymous_validation_fixture(self)
 
     def test_noncanonical_safe_server_paths_disable_test_and_preserve_validation(self):
@@ -119,6 +138,7 @@ class TestDeploymentConfigTests(unittest.TestCase):
 
                 self.assertFalse(config.submissions_enabled)
                 self.assertFalse(config.public_leaderboard_enabled)
+                self.assertFalse(config.provisional_leaderboard_enabled)
                 assert_anonymous_validation_fixture(self)
 
     def test_malformed_or_non_utc_windows_disable_requested_test_surfaces(self):
@@ -133,6 +153,7 @@ class TestDeploymentConfigTests(unittest.TestCase):
 
                 self.assertFalse(config.submissions_enabled)
                 self.assertFalse(config.public_leaderboard_enabled)
+                self.assertFalse(config.provisional_leaderboard_enabled)
                 assert_anonymous_validation_fixture(self)
 
     def test_malformed_release_id_or_digest_disables_requested_test_surfaces(self):
@@ -146,6 +167,7 @@ class TestDeploymentConfigTests(unittest.TestCase):
 
                 self.assertFalse(config.submissions_enabled)
                 self.assertFalse(config.public_leaderboard_enabled)
+                self.assertFalse(config.provisional_leaderboard_enabled)
                 assert_anonymous_validation_fixture(self)
 
     def test_closed_or_non_three_attempt_configuration_disables_test_surfaces(self):
@@ -156,12 +178,14 @@ class TestDeploymentConfigTests(unittest.TestCase):
                 "TEST_CLOSE_AT": "2026-09-10T00:00:00Z",
             },
             {**VALID_RELEASE, "TEST_MAX_ATTEMPTS": "4"},
+            {**VALID_RELEASE, "TEST_CLOSE_AT": "2026-09-12T12:00:00Z"},
         ):
             with self.subTest(environment=environment):
                 config = load_test_deployment_config(environment)
 
                 self.assertFalse(config.submissions_enabled)
                 self.assertFalse(config.public_leaderboard_enabled)
+                self.assertFalse(config.provisional_leaderboard_enabled)
                 self.assertEqual(config.max_attempts, 3)
                 assert_anonymous_validation_fixture(self)
 
@@ -170,10 +194,24 @@ class TestDeploymentConfigTests(unittest.TestCase):
 
         self.assertTrue(config.submissions_enabled)
         self.assertTrue(config.public_leaderboard_enabled)
+        self.assertTrue(config.provisional_leaderboard_enabled)
         self.assertEqual(config.release_id, "docsem-test-2026-09")
         self.assertEqual(config.max_attempts, 3)
         self.assertEqual(config.feedback_policy, "first-attempt-only")
         self.assertEqual(config.task_manifest_path, "test/tasks.jsonl")
+
+    def test_provisional_and_final_leaderboard_flags_are_independent(self):
+        provisional_only = load_test_deployment_config(
+            {**VALID_RELEASE, "TEST_PUBLIC_LEADERBOARD_ENABLED": "false"}
+        )
+        final_only = load_test_deployment_config(
+            {**VALID_RELEASE, "TEST_PROVISIONAL_LEADERBOARD_ENABLED": "false"}
+        )
+
+        self.assertTrue(provisional_only.provisional_leaderboard_enabled)
+        self.assertFalse(provisional_only.public_leaderboard_enabled)
+        self.assertFalse(final_only.provisional_leaderboard_enabled)
+        self.assertTrue(final_only.public_leaderboard_enabled)
 
 
 if __name__ == "__main__":

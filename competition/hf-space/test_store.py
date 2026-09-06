@@ -25,6 +25,7 @@ from test_contract import (
 )
 from test_policy import (
     OAuthIdentity,
+    OFFICIAL_TEST_CLOSE_AT,
     TestPolicyError,
     TestReleasePolicy,
     account_key,
@@ -37,9 +38,6 @@ from test_policy import (
 ORGANIZER_PATH = "projections/test/organizer_leaderboard.json"
 PROVISIONAL_PATH = "projections/test/public_provisional.json"
 LEDGER_SCHEMA_VERSION = 3
-TEST_SUBMISSION_CLOSE_AT = dt.datetime(
-    2026, 9, 11, 12, 0, tzinfo=dt.timezone.utc
-)
 MAX_COMMIT_ATTEMPTS = 5
 
 
@@ -626,7 +624,7 @@ def _require_open(policy: TestReleasePolicy, now):
         if str(exc) == "Test submissions are not open.":
             raise _ReleaseClosed() from None
         raise _Unavailable() from None
-    if now >= TEST_SUBMISSION_CLOSE_AT:
+    if now >= OFFICIAL_TEST_CLOSE_AT:
         raise _ReleaseClosed()
 
 

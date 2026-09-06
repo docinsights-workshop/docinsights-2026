@@ -698,6 +698,27 @@ class HubTestStoreTests(unittest.TestCase):
         self.assertEqual(hub.create_calls, [])
         self.assertFalse(any(path.startswith("attempts/test/") for path in hub.files))
 
+    def test_private_policy_cannot_extend_the_hard_close(self):
+        hub = InMemoryHub(
+            files={
+                "sealed/release.json": release_bytes(
+                    close_at="2026-09-12T12:00:00Z"
+                )
+            }
+        )
+        store = HubTestStore(
+            hub,
+            repo_id="private/repo",
+            release_config_path="sealed/release.json",
+            gold_config_path="sealed/gold.jsonl",
+            now_provider=lambda: TEST_CLOSE,
+        )
+
+        with self.assertRaisesRegex(TestStoreError, "not open"):
+            store.submit(IDENTITY, META, PREDICTIONS, METRICS)
+
+        self.assertEqual(hub.create_calls, [])
+
     def test_conflict_retry_resamples_time_and_rejects_when_hard_close_crosses(self):
         hub = InMemoryHub(conflicts=1)
         clock_values = iter((TEST_CLOSE - dt.timedelta(microseconds=1), TEST_CLOSE))

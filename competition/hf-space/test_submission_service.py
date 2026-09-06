@@ -344,6 +344,24 @@ class LegacyValidationCharacterizationTests(unittest.TestCase):
 
 
 class SplitAwareServiceTests(unittest.TestCase):
+    def test_validation_maintenance_gate_rejects_before_file_or_submitter_access(self):
+        unreadable = FileProbe()
+        submitter_calls = []
+        service = SubmissionService(
+            validation_submitter=lambda file_obj, metadata: submitter_calls.append(
+                (file_obj, metadata)
+            ),
+            test_store=None,
+            test_config_loader=lambda now: None,
+            validation_submissions_enabled=False,
+        )
+
+        with self.assertRaisesRegex(SubmissionError, "paused for maintenance"):
+            service.submit_for_split("validation", unreadable, {}, None)
+
+        self.assertFalse(unreadable.was_read)
+        self.assertEqual(submitter_calls, [])
+
     def test_validation_service_compatibility_fixture_preserves_exact_public_metrics(
         self,
     ):

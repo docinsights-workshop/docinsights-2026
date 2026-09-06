@@ -18,6 +18,11 @@ class TestPolicyError(ValueError):
     """Raised when a test submission violates a policy invariant."""
 
 
+OFFICIAL_TEST_CLOSE_AT = dt.datetime(
+    2026, 9, 11, 12, 0, tzinfo=dt.timezone.utc
+)
+
+
 def _is_utc(value: dt.datetime) -> bool:
     return value.tzinfo is not None and value.utcoffset() == dt.timedelta(0)
 

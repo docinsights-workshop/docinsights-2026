@@ -28,7 +28,7 @@ from scoring import (
 )
 from submission_service import HubTestConfigLoader, SubmissionService, TrustedTestConfig
 from test_contract import is_valid_public_text
-from test_policy import TestReleasePolicy
+from test_policy import OFFICIAL_TEST_CLOSE_AT, TestReleasePolicy
 from test_store import HubTestStore
 
 
@@ -80,6 +80,7 @@ _REPOSITORY_ID = re.compile(
 )
 FINAL_TEST_RELEASE_PATH = "private/test_release.json"
 FINAL_TEST_GOLD_PATH = "private/test_labels.jsonl"
+PROVISIONAL_TEST_PROJECTION_PATH = "projections/test/public_provisional.json"
 FINAL_TEST_PROJECTION_PATH = "projections/test/public_final.json"
 FINAL_TEST_AUDIT_PATH = "private/test_finalization_audit.json"
 FINAL_TEST_TASK_MANIFEST_PATH = "test/tasks.jsonl"
@@ -93,12 +94,28 @@ FINAL_TEST_PUBLIC_ROW_FIELDS = frozenset(
         "team",
         "submission_name",
         "selected_attempt",
+        "joint_accuracy",
         "answer_accuracy",
         "evidence_f1",
     }
 )
 FINAL_TEST_PROJECTION_FIELDS = frozenset(
     {"schema_version", "split", "release_id", "task_manifest_sha256", "rows"}
+)
+PROVISIONAL_TEST_PUBLIC_ROW_FIELDS = frozenset({"rank", "hf_username", "team"})
+PROVISIONAL_TEST_PROJECTION_FIELDS = FINAL_TEST_PROJECTION_FIELDS
+FINAL_TEST_ELIGIBLE_ATTEMPT_FIELDS = frozenset(
+    {
+        "account_key",
+        "submission_id",
+        "attempt_number",
+        "record_sha256",
+        "selected",
+        "joint_accuracy",
+        "answer_accuracy",
+        "evidence_f1",
+        "rescored_metrics_sha256",
+    }
 )
 
 PORTAL_HEAD = """
@@ -181,6 +198,7 @@ class TestDeploymentConfig:
     close_at: dt.datetime | None
     release_config_path: str | None
     gold_config_path: str | None
+    provisional_leaderboard_enabled: bool = False
     max_attempts: int = 3
     feedback_policy: str = FINAL_TEST_FEEDBACK_POLICY
     task_manifest_path: str = FINAL_TEST_TASK_MANIFEST_PATH
@@ -202,6 +220,17 @@ class TestDeploymentConfig:
 
 def _enabled_value(value) -> bool:
     return str(value or "").strip().casefold() in _TRUE_VALUES
+
+
+def load_validation_submissions_enabled(
+    environment: Mapping[str, object] | None = None,
+) -> bool:
+    """Keep legacy validation open unless operators explicitly set the gate."""
+
+    environment = os.environ if environment is None else environment
+    if "VALIDATION_SUBMISSIONS_ENABLED" not in environment:
+        return True
+    return _enabled_value(environment.get("VALIDATION_SUBMISSIONS_ENABLED"))
 
 
 def _required_value(environment: Mapping[str, object], name: str) -> str | None:
@@ -241,6 +270,9 @@ def load_test_deployment_config(
     requested_public_leaderboard = _enabled_value(
         environment.get("TEST_PUBLIC_LEADERBOARD_ENABLED")
     )
+    requested_provisional_leaderboard = _enabled_value(
+        environment.get("TEST_PROVISIONAL_LEADERBOARD_ENABLED")
+    )
     release_id = _required_value(environment, "TEST_RELEASE_ID")
     task_manifest_sha256 = _required_value(environment, "TEST_TASK_MANIFEST_SHA256")
     gold_sha256 = _required_value(environment, "TEST_GOLD_SHA256")
@@ -263,6 +295,7 @@ def load_test_deployment_config(
         and open_at is not None
         and close_at is not None
         and open_at < close_at
+        and close_at == OFFICIAL_TEST_CLOSE_AT
         and release_config_path == FINAL_TEST_RELEASE_PATH
         and gold_config_path == FINAL_TEST_GOLD_PATH
         and task_manifest_path == FINAL_TEST_TASK_MANIFEST_PATH
@@ -271,6 +304,7 @@ def load_test_deployment_config(
     return TestDeploymentConfig(
         submissions_enabled=requested_submissions and valid,
         public_leaderboard_enabled=requested_public_leaderboard and valid,
+        provisional_leaderboard_enabled=requested_provisional_leaderboard and valid,
         release_id=release_id,
         task_manifest_sha256=task_manifest_sha256,
         gold_sha256=gold_sha256,
@@ -284,8 +318,10 @@ def load_test_deployment_config(
 
 
 TEST_DEPLOYMENT = load_test_deployment_config()
+VALIDATION_SUBMISSIONS_ENABLED = load_validation_submissions_enabled()
 TEST_SUBMISSIONS_ENABLED = TEST_DEPLOYMENT.submissions_enabled
 TEST_PUBLIC_LEADERBOARD_ENABLED = TEST_DEPLOYMENT.public_leaderboard_enabled
+TEST_PROVISIONAL_LEADERBOARD_ENABLED = TEST_DEPLOYMENT.provisional_leaderboard_enabled
 TEST_TASKS_FILE = TEST_DEPLOYMENT.task_manifest_path
 VALIDATION_SPLIT_LABEL = "Validation (development)"
 TEST_SPLIT_LABEL = "Test (final)"
@@ -1043,7 +1079,7 @@ def _validate_final_projection(projection, release):
         not isinstance(projection, Mapping)
         or set(projection) != FINAL_TEST_PROJECTION_FIELDS
         or type(projection.get("schema_version")) is not int
-        or projection.get("schema_version") != 1
+        or projection.get("schema_version") != 2
         or projection.get("split") != "test"
         or projection.get("release_id") != release.get("release_id")
         or projection.get("task_manifest_sha256") != release.get("task_manifest_sha256")
@@ -1065,7 +1101,7 @@ def _validate_final_projection(projection, release):
             )
         ):
             raise FinalLeaderboardError("The final test leaderboard is not available.")
-        for field in ("answer_accuracy", "evidence_f1"):
+        for field in ("joint_accuracy", "answer_accuracy", "evidence_f1"):
             metric = row.get(field)
             if (
                 type(metric) is not float
@@ -1075,6 +1111,34 @@ def _validate_final_projection(projection, release):
                 raise FinalLeaderboardError(
                     "The final test leaderboard is not available."
                 )
+
+
+def _validate_provisional_projection(projection, release):
+    if (
+        not isinstance(projection, Mapping)
+        or set(projection) != PROVISIONAL_TEST_PROJECTION_FIELDS
+        or type(projection.get("schema_version")) is not int
+        or projection.get("schema_version") != 3
+        or projection.get("split") != "test"
+        or projection.get("release_id") != release.get("release_id")
+        or projection.get("task_manifest_sha256")
+        != release.get("task_manifest_sha256")
+        or not isinstance(projection.get("rows"), list)
+        or len(projection["rows"]) > FINAL_TEST_MAX_ROWS
+    ):
+        raise FinalLeaderboardError("The test leaderboard is not available.")
+    for expected_rank, row in enumerate(projection["rows"], start=1):
+        if (
+            not isinstance(row, Mapping)
+            or set(row) != PROVISIONAL_TEST_PUBLIC_ROW_FIELDS
+            or type(row.get("rank")) is not int
+            or row["rank"] != expected_rank
+            or any(
+                not _valid_public_text(row.get(field))
+                for field in ("hf_username", "team")
+            )
+        ):
+            raise FinalLeaderboardError("The test leaderboard is not available.")
 
 
 def _normalized_utc(value):
@@ -1107,6 +1171,7 @@ def _validate_final_deployment(deployment):
         or opened is None
         or closed is None
         or opened >= closed
+        or closed != OFFICIAL_TEST_CLOSE_AT
         or type(max_attempts) is not int
         or max_attempts != 3
         or feedback_policy != FINAL_TEST_FEEDBACK_POLICY
@@ -1116,6 +1181,59 @@ def _validate_final_deployment(deployment):
     ):
         raise FinalLeaderboardError("The final test leaderboard is not available.")
     return opened, closed
+
+
+def _validate_active_test_release(release, deployment, now):
+    required = {
+        "schema_version",
+        "release_id",
+        "task_manifest_sha256",
+        "gold_sha256",
+        "enabled",
+        "finalized",
+        "max_attempts",
+        "feedback_policy",
+        "open_at",
+        "close_at",
+        "public_revision",
+        "public_repo_id",
+        "task_manifest_path",
+    }
+    opened = (
+        _parse_rfc3339_utc(release.get("open_at"))
+        if isinstance(release, Mapping)
+        else None
+    )
+    closed = (
+        _parse_rfc3339_utc(release.get("close_at"))
+        if isinstance(release, Mapping)
+        else None
+    )
+    current = _normalized_utc(now)
+    configured_opened, configured_closed = _validate_final_deployment(deployment)
+    if (
+        not isinstance(release, Mapping)
+        or not required.issubset(release)
+        or type(release.get("schema_version")) is not int
+        or release.get("schema_version") != 1
+        or release.get("release_id") != getattr(deployment, "release_id", None)
+        or release.get("task_manifest_sha256")
+        != getattr(deployment, "task_manifest_sha256", None)
+        or release.get("gold_sha256") != getattr(deployment, "gold_sha256", None)
+        or release.get("enabled") is not True
+        or release.get("finalized") is not False
+        or type(release.get("max_attempts")) is not int
+        or release.get("max_attempts") != 3
+        or release.get("feedback_policy") != FINAL_TEST_FEEDBACK_POLICY
+        or opened != configured_opened
+        or closed != configured_closed
+        or current is None
+        or not opened <= current < closed
+        or _REVISION.fullmatch(str(release.get("public_revision", ""))) is None
+        or _REPOSITORY_ID.fullmatch(str(release.get("public_repo_id", ""))) is None
+        or release.get("task_manifest_path") != FINAL_TEST_TASK_MANIFEST_PATH
+    ):
+        raise FinalLeaderboardError("The test leaderboard is not available.")
 
 
 def _validate_final_release(release, deployment):
@@ -1237,6 +1355,105 @@ def _validate_final_audit(audit, release, projection_sha256):
         or audit.get("selected_account_count") < 0
     ):
         raise FinalLeaderboardError("The final test leaderboard is not available.")
+    eligible_attempts = audit.get("eligible_attempts")
+    if (
+        not isinstance(eligible_attempts, list)
+        or len(eligible_attempts) != audit.get("eligible_attempt_count")
+    ):
+        raise FinalLeaderboardError("The final test leaderboard is not available.")
+    for attempt in eligible_attempts:
+        if (
+            not isinstance(attempt, Mapping)
+            or set(attempt) != FINAL_TEST_ELIGIBLE_ATTEMPT_FIELDS
+            or _SHA256.fullmatch(str(attempt.get("account_key", ""))) is None
+            or not _valid_public_text(attempt.get("submission_id"))
+            or type(attempt.get("attempt_number")) is not int
+            or not 1 <= attempt["attempt_number"] <= 3
+            or type(attempt.get("selected")) is not bool
+            or _SHA256.fullmatch(str(attempt.get("record_sha256", ""))) is None
+            or _SHA256.fullmatch(
+                str(attempt.get("rescored_metrics_sha256", ""))
+            )
+            is None
+        ):
+            raise FinalLeaderboardError("The final test leaderboard is not available.")
+        for field in ("joint_accuracy", "answer_accuracy", "evidence_f1"):
+            metric = attempt.get(field)
+            if (
+                type(metric) is not float
+                or not math.isfinite(metric)
+                or not 0.0 <= metric <= 1.0
+            ):
+                raise FinalLeaderboardError(
+                    "The final test leaderboard is not available."
+                )
+
+
+def _load_provisional_test_projection(
+    *,
+    api=None,
+    artifact_reader=None,
+    deployment=None,
+    repo_id=None,
+    token=None,
+    now=None,
+):
+    """Load one rank-only provisional projection from one exact private HEAD."""
+
+    api = _TEST_HUB_API if api is None else api
+    deployment = TEST_DEPLOYMENT if deployment is None else deployment
+    repo_id = SUBMISSIONS_REPO_ID if repo_id is None else repo_id
+    token = WRITE_TOKEN if token is None else token
+    current = _server_now() if now is None else now
+    _validate_final_deployment(deployment)
+    if (
+        not isinstance(repo_id, str)
+        or _REPOSITORY_ID.fullmatch(repo_id) is None
+        or not isinstance(token, str)
+        or not token.strip()
+    ):
+        raise FinalLeaderboardError("The test leaderboard is not available.")
+    try:
+        info = api.repo_info(
+            repo_id=repo_id,
+            repo_type="dataset",
+            token=token,
+        )
+        revision = getattr(info, "sha", None)
+        if (
+            getattr(info, "private", None) is not True
+            or not isinstance(revision, str)
+            or _REVISION.fullmatch(revision) is None
+        ):
+            raise FinalLeaderboardError("The test leaderboard is not available.")
+
+        if artifact_reader is None:
+
+            def artifact_reader(path, pinned_revision):
+                return _read_hub_file(
+                    repo_id,
+                    path,
+                    token=token,
+                    force_download=True,
+                    revision=pinned_revision,
+                    max_bytes=FINAL_TEST_ARTIFACT_MAX_BYTES,
+                )
+
+        release = _decode_final_json(
+            _artifact_bytes(artifact_reader(FINAL_TEST_RELEASE_PATH, revision))
+        )
+        projection = _decode_final_json(
+            _artifact_bytes(
+                artifact_reader(PROVISIONAL_TEST_PROJECTION_PATH, revision)
+            )
+        )
+        _validate_active_test_release(release, deployment, current)
+        _validate_provisional_projection(projection, release)
+        return projection
+    except FinalLeaderboardError:
+        raise
+    except Exception:
+        raise FinalLeaderboardError("The test leaderboard is not available.") from None
 
 
 def _load_final_test_projection(
@@ -1320,7 +1537,7 @@ def _load_final_test_projection(
 
 
 def final_test_leaderboard_html(projection):
-    """Render only the seven-field public projection with escaped text."""
+    """Render only the exact public final projection with escaped text."""
 
     _validate_final_projection(
         projection,
@@ -1342,13 +1559,14 @@ def final_test_leaderboard_html(projection):
             f"<td>{html.escape(row['team'])}</td>"
             f"<td>{html.escape(row['submission_name'])}</td>"
             f'<td class="leaderboard-attempts">{row["selected_attempt"]}</td>'
+            f'<td class="leaderboard-metric">{_format_metric(row["joint_accuracy"])}</td>'
             f'<td class="leaderboard-metric">{_format_metric(row["answer_accuracy"])}</td>'
             f'<td class="leaderboard-metric">{_format_metric(row["evidence_f1"])}</td>'
             "</tr>"
         )
     if not body_rows:
         body_rows.append(
-            '<tr><td class="leaderboard-empty" colspan="7">No eligible final test submissions.</td></tr>'
+            '<tr><td class="leaderboard-empty" colspan="8">No eligible final test submissions.</td></tr>'
         )
     return f"""
     <div class="leaderboard-table-wrap">
@@ -1360,8 +1578,51 @@ def final_test_leaderboard_html(projection):
                     <th scope="col">Team</th>
                     <th scope="col">Selected submission</th>
                     <th class="leaderboard-attempts" scope="col">Selected attempt</th>
+                    <th class="leaderboard-metric" scope="col">Joint accuracy</th>
                     <th class="leaderboard-metric" scope="col">Answer accuracy</th>
                     <th class="leaderboard-metric" scope="col">Evidence F1</th>
+                </tr>
+            </thead>
+            <tbody>{"".join(body_rows)}</tbody>
+        </table>
+    </div>
+    """
+
+
+def provisional_test_leaderboard_html(projection):
+    """Render only public rank, Hugging Face account, and team fields."""
+
+    _validate_provisional_projection(
+        projection,
+        {
+            "release_id": projection.get("release_id")
+            if isinstance(projection, Mapping)
+            else None,
+            "task_manifest_sha256": projection.get("task_manifest_sha256")
+            if isinstance(projection, Mapping)
+            else None,
+        },
+    )
+    body_rows = [
+        "<tr>"
+        f'<td class="leaderboard-rank">{row["rank"]}</td>'
+        f"<td>{html.escape(row['hf_username'])}</td>"
+        f"<td>{html.escape(row['team'])}</td>"
+        "</tr>"
+        for row in projection["rows"]
+    ]
+    if not body_rows:
+        body_rows.append(
+            '<tr><td class="leaderboard-empty" colspan="3">No accepted test submissions yet.</td></tr>'
+        )
+    return f"""
+    <div class="leaderboard-table-wrap">
+        <table aria-label="DocSem provisional test leaderboard">
+            <thead>
+                <tr>
+                    <th class="leaderboard-rank" scope="col">Rank</th>
+                    <th scope="col">Hugging Face account</th>
+                    <th scope="col">Team</th>
                 </tr>
             </thead>
             <tbody>{"".join(body_rows)}</tbody>
@@ -1388,6 +1649,15 @@ def _final_test_leaderboard_heading():
     """
 
 
+def _provisional_test_leaderboard_heading():
+    return """
+    <div>
+        <h2>Provisional test leaderboard</h2>
+        <p>During the open window, public standings use only each Hugging Face account's first accepted attempt and show rank, account, and team only. Metric values remain private.</p>
+    </div>
+    """
+
+
 def _final_test_notice():
     return (
         '<div class="leaderboard-empty">'
@@ -1409,11 +1679,26 @@ def leaderboard_view(selection):
         )
     if selection != FINAL_TEST_LEADERBOARD_LABEL:
         raise gr.Error("Choose a listed leaderboard view.")
-    if not TEST_PUBLIC_LEADERBOARD_ENABLED:
+    if not TEST_PUBLIC_LEADERBOARD_ENABLED and not TEST_PROVISIONAL_LEADERBOARD_ENABLED:
         return (
             gr.update(value=_final_test_leaderboard_heading()),
             gr.update(value=_final_test_notice()),
             gr.update(visible=False),
+        )
+    if not TEST_PUBLIC_LEADERBOARD_ENABLED:
+        try:
+            projection = _load_provisional_test_projection()
+            content = provisional_test_leaderboard_html(projection)
+        except FinalLeaderboardError:
+            return (
+                gr.update(value=_provisional_test_leaderboard_heading()),
+                gr.update(value=_final_test_notice()),
+                gr.update(visible=False),
+            )
+        return (
+            gr.update(value=_provisional_test_leaderboard_heading()),
+            gr.update(value=content),
+            gr.update(visible=True),
         )
     try:
         projection = _load_final_test_projection()
@@ -1434,6 +1719,8 @@ def leaderboard_view(selection):
 def evaluate_submission(
     file_obj, team, contact, submission_name, participant_names=None
 ):
+    if not VALIDATION_SUBMISSIONS_ENABLED:
+        raise gr.Error("Validation submissions are temporarily paused for maintenance.")
     if file_obj is None:
         raise gr.Error("Upload a JSONL submission file.")
     if not team.strip():
@@ -1489,6 +1776,7 @@ _TEST_HUB_API = HfApi(token=WRITE_TOKEN)
 _PUBLIC_HUB_API = HfApi()
 _SUBMISSION_SERVICE = SubmissionService(
     validation_submitter=_legacy_validation_submitter,
+    validation_submissions_enabled=VALIDATION_SUBMISSIONS_ENABLED,
     test_store=HubTestStore(
         _TEST_HUB_API,
         repo_id=SUBMISSIONS_REPO_ID,
@@ -1573,7 +1861,8 @@ def _test_history_html(attempts, masked_email):
         number = int(attempt.get("attempt", 0))
         if number == 1:
             feedback = (
-                f"Answer accuracy {_format_metric(attempt.get('answer_accuracy', 0.0))}; "
+                f"Joint accuracy {_format_metric(attempt.get('joint_accuracy', 0.0))}; "
+                f"answer accuracy {_format_metric(attempt.get('answer_accuracy', 0.0))}; "
                 f"evidence F1 {_format_metric(attempt.get('evidence_f1', 0.0))}"
             )
         else:
@@ -1830,17 +2119,26 @@ def split_ui(split_label):
             ),
             gr.update(visible=True),
         )
+    validation_copy = (
+        "### Submit validation predictions\n"
+        "Upload one JSON object per instance with `instance_id`, `answer`, and "
+        f"`evidence`. Review the [participant guide]({PARTICIPANT_GUIDE_URL}) "
+        "for the complete format and evaluation protocol."
+    )
+    if not VALIDATION_SUBMISSIONS_ENABLED:
+        validation_copy = (
+            "### Validation submissions paused for maintenance\n"
+            "Validation submissions are temporarily paused for maintenance. "
+            "Existing validation results remain readable below."
+        )
     return (
         gr.update(
-            value=(
-                "### Submit validation predictions\n"
-                "Upload one JSON object per instance with `instance_id`, `answer`, and "
-                f"`evidence`. Review the [participant guide]({PARTICIPANT_GUIDE_URL}) "
-                "for the complete format and evaluation protocol."
-            )
+            value=validation_copy
         ),
         gr.update(visible=True),
-        gr.update(value="Validate and score", interactive=True),
+        gr.update(
+            value="Validate and score", interactive=VALIDATION_SUBMISSIONS_ENABLED
+        ),
         gr.update(visible=False),
     )
 
@@ -1922,12 +2220,17 @@ with PortalBlocks(**blocks_options) as demo:
             gr.LogoutButton("Sign out")
 
     with gr.Group(elem_id="submission-panel"):
-        submission_intro = gr.Markdown(
+        initial_validation_copy = (
             "### Submit validation predictions\n"
             "Upload one JSON object per instance with `instance_id`, `answer`, and "
             f"`evidence`. Review the [participant guide]({PARTICIPANT_GUIDE_URL}) "
             "for the complete format and evaluation protocol."
+            if VALIDATION_SUBMISSIONS_ENABLED
+            else "### Validation submissions paused for maintenance\n"
+            "Validation submissions are temporarily paused for maintenance. "
+            "Existing validation results remain readable below."
         )
+        submission_intro = gr.Markdown(initial_validation_copy)
         with gr.Row(elem_id="submission-fields"):
             team = gr.Textbox(label="Team", placeholder="example-team")
             participant_names = gr.Textbox(
@@ -1953,6 +2256,7 @@ with PortalBlocks(**blocks_options) as demo:
                 submit = gr.Button(
                     "Validate and score",
                     variant="primary",
+                    interactive=VALIDATION_SUBMISSIONS_ENABLED,
                     elem_id="submit-button",
                 )
         result = gr.JSON(

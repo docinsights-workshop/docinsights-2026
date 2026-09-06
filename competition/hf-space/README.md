@@ -37,9 +37,17 @@ The portal has separate **Validation leaderboard** and **Final test leaderboard*
 The checked-in deployment is safe to publish with both test controls disabled:
 
 ```text
+VALIDATION_SUBMISSIONS_ENABLED=true
 TEST_SUBMISSIONS_ENABLED=false
+TEST_PROVISIONAL_LEADERBOARD_ENABLED=false
 TEST_PUBLIC_LEADERBOARD_ENABLED=false
 ```
+
+`VALIDATION_SUBMISSIONS_ENABLED` defaults to `true` for compatibility with the
+existing validation workflow. Set it to `false` only for a bounded organizer
+maintenance window: the server then rejects validation submissions before
+reading the uploaded file or invoking scoring/persistence, while the existing
+validation leaderboard remains readable.
 
 Do not enable either flag for a candidate or partially prepared release. Activation is fail-closed: a requested test surface remains disabled unless all of the following are explicit and valid. These values are deployment secrets/configuration, never participant inputs or rendered Space configuration.
 
@@ -57,11 +65,11 @@ TEST_TASKS_FILE=test/tasks.jsonl
 
 The timestamps must be RFC3339 UTC values ending in `Z`, and the open instant must precede the close instant. The official close value is the exclusive instant immediately after September 10, 2026 at 23:59:59 Anywhere on Earth. The three paths are fixed, server-selected canonical paths; any alternate path fails closed and is never accepted from a participant request. The release identifier, digests, exact normalized UTC window, attempt limit, first-attempt-only feedback policy, and task path must agree exactly with the organizer-pinned server release. The server independently verifies the private scoring material before accepting an upload. `TEST_MAX_ATTEMPTS` is fixed at three. A malformed/missing value, a non-UTC or reversed window, noncanonical path, or any attempt-limit value other than `3` leaves test submission and the public-test flag disabled without changing anonymous validation or the validation leaderboard.
 
-Keep `TEST_PUBLIC_LEADERBOARD_ENABLED=false` until organizer finalization. Enabling it is not a substitute for finalization: the server also requires a private exact-SHA repository snapshot, a finalized and disabled release, matching configured release/task/gold digests, and matching final-projection and audit hashes. It downloads only the fixed server-selected release, sanitized final projection, and finalization audit paths. It never accepts a client-provided split or path and never exposes private per-example results, participant emails, OAuth subjects, raw predictions, unselected attempts, or later-attempt scores.
+`TEST_PROVISIONAL_LEADERBOARD_ENABLED` and `TEST_PUBLIC_LEADERBOARD_ENABLED` are independent. During the open window, enable only the provisional flag; the Space reads the active release and rank-only provisional projection from one exact private repository head and accepts only the exact public row fields `rank`, `hf_username`, and `team`. Keep `TEST_PUBLIC_LEADERBOARD_ENABLED=false` until organizer finalization. Enabling it is not a substitute for finalization: the server also requires a private exact-SHA repository snapshot, a finalized and disabled release, matching configured release/task/gold digests, and matching final-projection and audit hashes. It downloads only the fixed server-selected release, sanitized final projection, and finalization audit paths. It never accepts a client-provided split or path and never exposes private per-example results, participant emails, OAuth subjects, raw predictions, unselected attempts, or later-attempt scores.
 
 The submission form requires participant name(s), team name, contact email, and submission name. Participant names and contact emails are stored only in the private submission repository and are never rendered on the public leaderboard.
 
-The public leaderboard shows the latest submission for each normalized team and contact-email identity, together with its total attempt count. Rankings use the latest attempt's answer accuracy first and evidence F1 as the tie-breaker. A new valid attempt replaces that identity's previously displayed result even when its score is lower. Legacy submissions without participant names remain valid. Evidence exact match is retained in the detailed submission result as a strict diagnostic, but it is not a separate public leaderboard column.
+The validation leaderboard shows the latest submission for each normalized team and contact-email identity, together with its total attempt count. Rankings use joint accuracy first, answer accuracy second, and evidence F1 as the tie-breaker. A new valid attempt replaces that identity's previously displayed result even when its score is lower. Legacy submissions without participant names remain valid. Evidence exact match is retained in the detailed submission result as a strict diagnostic, but it is not a separate public leaderboard column.
 
 For live competition use, configure the Space secrets:
 

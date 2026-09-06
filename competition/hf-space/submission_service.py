@@ -178,12 +178,14 @@ class SubmissionService:
         validation_submitter: Callable,
         test_store,
         test_config_loader: Callable,
+        validation_submissions_enabled: bool = True,
         now_provider: Callable[[], dt.datetime] | None = None,
         scoring_semaphore=None,
     ):
         self.validation_submitter = validation_submitter
         self.test_store = test_store
         self.test_config_loader = test_config_loader
+        self.validation_submissions_enabled = validation_submissions_enabled is True
         self.now_provider = now_provider or (lambda: dt.datetime.now(dt.timezone.utc))
         self.scoring_semaphore = (
             TEST_SCORING_SEMAPHORE if scoring_semaphore is None else scoring_semaphore
@@ -192,6 +194,10 @@ class SubmissionService:
     def submit_for_split(self, split, file_obj, metadata, oauth_profile) -> dict:
         selected = _split(split)
         if selected is SubmissionSplit.VALIDATION:
+            if not self.validation_submissions_enabled:
+                raise SubmissionError(
+                    "Validation submissions are temporarily paused for maintenance."
+                )
             return self.validation_submitter(file_obj, metadata)
         return self._submit_test(file_obj, metadata, oauth_profile)
 
