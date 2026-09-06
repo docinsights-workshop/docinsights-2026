@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 from collections import Counter
@@ -28,6 +29,9 @@ from scoring import (  # noqa: E402
 DEFAULT_REPO_ID = "amitbcp/docinsights-2026-shared-task-submissions"
 DEFAULT_GOLD_FILE = "private/val_labels.jsonl"
 DEFAULT_LEADERBOARD_FILE = "leaderboard/leaderboard.json"
+CANONICAL_SUBMISSION_PATH = re.compile(
+    r"submissions/[A-Za-z0-9][A-Za-z0-9._-]*\.json\Z"
+)
 PRIOR_AGGREGATE_FIELDS = (
     "answer_accuracy",
     "evidence_exact_match",
@@ -204,6 +208,39 @@ def _parse_corrections(path):
     return normalized
 
 
+def _require_canonical_joint_migration_config(args):
+    if args.gold_file != DEFAULT_GOLD_FILE:
+        raise RuntimeError(
+            "Joint metric migration requires the canonical validation gold path"
+        )
+    if args.leaderboard_file != DEFAULT_LEADERBOARD_FILE:
+        raise RuntimeError(
+            "Joint metric migration requires the canonical validation leaderboard path"
+        )
+
+
+def _validated_submission_destinations(repo_files, *, gold_file, leaderboard_file):
+    submission_files = [
+        path
+        for path in repo_files
+        if path.startswith("submissions/") and path.endswith(".json")
+    ]
+    if any(
+        not isinstance(path, str) or not CANONICAL_SUBMISSION_PATH.fullmatch(path)
+        for path in submission_files
+    ):
+        raise RuntimeError(
+            "Stored submissions include a non-canonical submission path"
+        )
+
+    output_paths = [*submission_files, leaderboard_file]
+    if len(set(output_paths)) != len(output_paths) or gold_file in output_paths:
+        raise RuntimeError(
+            "Joint migration output destinations must be unique and disjoint from gold"
+        )
+    return sorted(submission_files)
+
+
 def _parser():
     parser = argparse.ArgumentParser(
         description=(
@@ -255,6 +292,7 @@ def main():
     joint_migration = bool(args.joint_metric_migration)
     expected_submission_count = args.expected_submission_count
     if joint_migration:
+        _require_canonical_joint_migration_config(args)
         if expected_submission_count is None or expected_submission_count < 1:
             raise RuntimeError(
                 "A positive expected submission count is required for joint metric migration"
@@ -306,10 +344,10 @@ def main():
             revision=source_revision,
             token=token,
         )
-        submission_files = sorted(
-            path
-            for path in repo_files
-            if path.startswith("submissions/") and path.endswith(".json")
+        submission_files = _validated_submission_destinations(
+            repo_files,
+            gold_file=args.gold_file,
+            leaderboard_file=args.leaderboard_file,
         )
         if not submission_files:
             raise RuntimeError("No stored JSON submissions found")

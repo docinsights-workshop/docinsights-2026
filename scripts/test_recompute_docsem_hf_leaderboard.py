@@ -56,6 +56,8 @@ class RecomputeTests(unittest.TestCase):
         submission_markers=None,
         labels_before_bytes=None,
         labels_after_bytes=None,
+        gold_file="private/val_labels.jsonl",
+        leaderboard_file="leaderboard/leaderboard.json",
     ):
         temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(temp_dir.cleanup)
@@ -76,8 +78,8 @@ class RecomputeTests(unittest.TestCase):
             joint_metric_migration=joint_metric_migration,
             expected_submission_count=expected_submission_count,
             repo_id="private/repo",
-            gold_file="private/val_labels.jsonl",
-            leaderboard_file="leaderboard/leaderboard.json",
+            gold_file=gold_file,
+            leaderboard_file=leaderboard_file,
             yes=yes,
             maintenance_confirmed=maintenance_confirmed,
         )
@@ -148,6 +150,7 @@ class RecomputeTests(unittest.TestCase):
 
         api.create_commit.side_effect = create_commit
         api.sealed_operations = sealed_operations
+        self.last_api = api
 
         def read_remote(_repo_id, filename, _token, **_kwargs):
             if filename == "private/val_labels.jsonl":
@@ -398,31 +401,65 @@ class RecomputeTests(unittest.TestCase):
         self.assertNotIn("task_1", output)
         self.assertNotIn("secret@example.org", output)
 
-    def test_joint_migration_seals_nested_same_basename_submissions_independently(self):
-        paths = [
-            "submissions/first/shared.json",
-            "submissions/second/shared.json",
-        ]
-        markers = {
-            paths[0]: "first-private-marker",
-            paths[1]: "second-private-marker",
-        }
+    def test_joint_migration_requires_the_canonical_gold_path_before_writes(self):
+        with self.assertRaisesRegex(RuntimeError, "canonical validation gold path"):
+            self._run_main_fixture(
+                yes=True,
+                joint_metric_migration=True,
+                expected_submission_count=1,
+                gold_file="private/alternate-labels.jsonl",
+            )
 
-        _output, api, _reader = self._run_main_fixture(
-            yes=True,
-            joint_metric_migration=True,
-            expected_submission_count=2,
-            submission_paths=paths,
-            submission_markers=markers,
-        )
+        self.last_api.create_commit.assert_not_called()
 
-        self.assertEqual(
-            [
-                json.loads(api.sealed_operations[path])["private_fixture_marker"]
-                for path in paths
-            ],
-            ["first-private-marker", "second-private-marker"],
-        )
+    def test_joint_migration_rejects_gold_or_submission_as_leaderboard_target(self):
+        for leaderboard_file in (
+            "private/val_labels.jsonl",
+            "submissions/private.json",
+        ):
+            with self.subTest(leaderboard_file=leaderboard_file):
+                with self.assertRaisesRegex(
+                    RuntimeError, "canonical validation leaderboard path"
+                ):
+                    self._run_main_fixture(
+                        yes=True,
+                        joint_metric_migration=True,
+                        expected_submission_count=1,
+                        leaderboard_file=leaderboard_file,
+                    )
+
+                self.last_api.create_commit.assert_not_called()
+
+    def test_joint_migration_rejects_duplicate_submission_destinations_before_writes(self):
+        with self.assertRaisesRegex(RuntimeError, "unique and disjoint"):
+            self._run_main_fixture(
+                yes=True,
+                joint_metric_migration=True,
+                expected_submission_count=2,
+                submission_paths=[
+                    "submissions/private.json",
+                    "submissions/private.json",
+                ],
+            )
+
+        self.last_api.create_commit.assert_not_called()
+
+    def test_joint_migration_rejects_unsafe_submission_paths_before_writes(self):
+        for submission_path in (
+            "submissions/nested/private.json",
+            "submissions/../private.json",
+            "submissions/.hidden.json",
+        ):
+            with self.subTest(submission_path=submission_path):
+                with self.assertRaisesRegex(RuntimeError, "canonical submission path"):
+                    self._run_main_fixture(
+                        yes=True,
+                        joint_metric_migration=True,
+                        expected_submission_count=1,
+                        submission_paths=[submission_path],
+                    )
+
+                self.last_api.create_commit.assert_not_called()
 
     def test_joint_migration_rejects_an_exact_label_byte_change_after_commit(self):
         before = (
