@@ -23,7 +23,7 @@ challenge_items:
     type: challenge
     action_label: Download test data
     action_url: https://huggingface.co/datasets/amitbcp/docinsights-2026-shared-task-data
-    note: 1,730 held-out test tasks and PDFs are available without labels. The submission window and portal activation will be announced separately.
+    note: 1,730 held-out test tasks and PDFs are available without labels. The test portal is open through September 10 Anywhere on Earth, with Hugging Face login required, up to three accepted attempts per account, and a six-hour gap between attempts.
   - label: Shared-task Paper Submission Deadline
     date: September 15, 2026
     time: 11:59 PM UTC

@@ -1,6 +1,6 @@
 enabled: true
 label: Latest update
-text: DocSem test data released · Sep 5
-aria_text: The held-out DocSem test data is now available. Once submissions open, each Hugging Face account may submit up to three times; public test ranks are shown without scores until the competition closes.
+text: DocSem test submissions open · Sep 5
+aria_text: DocSem held-out test submissions are open. Hugging Face login is required; each account may submit up to three times with six hours between accepted attempts. Public test ranks are shown without scores until the competition closes.
 action: Details
 url: https://docinsights-workshop.github.io/docinsights-2026/shared-task/

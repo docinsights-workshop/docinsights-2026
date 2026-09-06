@@ -1,7 +1,7 @@
 items:
   - date: September 5, 2026
-    title: DocSem held-out test data released
-    body: The public test split now contains 1,730 held-out tasks and PDFs without labels. Once submissions open, public ranks will be shown without scores during the competition; submitters can view their own scores, and final scores will be revealed after the competition closes.
+    title: DocSem held-out test submissions are open
+    body: The public test split contains 1,730 held-out tasks and PDFs without labels, and the submission portal is open. Hugging Face login is required. Each account may make up to three accepted submissions with at least six hours between them. Attempt 1 shows the submitter's aggregate metrics; attempts 2–3 are score-withheld, and public ranks are shown without scores until final results are revealed after close. Partial files and null abstentions are accepted, with omitted tasks counted as incorrect against the full test set.
   - date: September 3, 2026
     title: Three DocSem validation labels corrected
     body: Three organizer-only validation ground-truth labels have now been corrected, most recently on September 3, following additional data review. All existing submissions were rescored, and the leaderboard now reflects the updated results.
