@@ -38,7 +38,8 @@ digest audit metadata plus allowlisted attempt fields, but never OAuth tokens,
 gold/correct answers, or raw predictions.
 
 The owner-only table, attempt detail, and CSV expose the persisted identity
-kind, private identity subject, displayed Hugging Face username, private contact
-email, and verified-email marker for audit. Email-keyed attempts display
-`Not signed in` as the Hugging Face username. These private identity fields are
-never part of the public provisional or final leaderboard projections.
+kind, private identity subject, authenticated Hugging Face username, private
+verified contact email, and verified-email marker for audit. Test attempts with
+an email-only or otherwise unauthenticated identity fail integrity verification.
+These private identity fields are never part of the public provisional or final
+leaderboard projections.

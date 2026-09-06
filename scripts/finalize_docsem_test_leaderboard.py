@@ -69,6 +69,7 @@ MAX_LABEL_BYTES = 64 * 1024 * 1024
 MAX_AUDIT_RECORDS = 4096
 MAX_ATTEMPTS = 30_000
 METRIC_ABSOLUTE_TOLERANCE = 1e-12
+TEST_ATTEMPT_COOLDOWN_SECONDS = 21_600
 
 PUBLIC_ROW_FIELDS = frozenset(
     {
@@ -497,6 +498,7 @@ def build_finalization(snapshot, now) -> FinalizationPlan:
         ):
             raise FinalizationError("Finalized test artifacts are inconsistent.")
 
+    _validate_attempt_spacing(snapshot.attempts)
     candidates, excluded = _eligible_attempts(snapshot, base_release, close_at)
     decisions, applied_records = _audit_decisions(snapshot, base_release, current)
     candidates, audit_excluded = _apply_audit_decisions(candidates, decisions)
@@ -893,6 +895,35 @@ def _eligible_attempts(snapshot, release, close_at):
     return accepted, excluded
 
 
+def _validate_attempt_spacing(records) -> None:
+    grouped = defaultdict(list)
+    for item in records:
+        record = item.value
+        if not item.committed or not isinstance(record, Mapping):
+            continue
+        account = record.get("account_key")
+        number = record.get("attempt_number")
+        submitted = _parse_utc(record.get("submitted_at"))
+        if (
+            not isinstance(account, str)
+            or _SHA256.fullmatch(account) is None
+            or type(number) is not int
+            or not 1 <= number <= 3
+            or submitted is None
+        ):
+            continue
+        grouped[account].append((number, submitted))
+    for attempts in grouped.values():
+        attempts.sort(key=lambda item: item[0])
+        if [number for number, _ in attempts] != list(range(1, len(attempts) + 1)):
+            continue
+        if any(
+            (later - earlier).total_seconds() < TEST_ATTEMPT_COOLDOWN_SECONDS
+            for (_, earlier), (_, later) in zip(attempts, attempts[1:])
+        ):
+            raise FinalizationError("Private test attempt cooldown is invalid.")
+
+
 def _attempt_reasons(item, snapshot, release, close_at, ids, hashes, account_numbers):
     if not item.committed:
         return {"uncommitted"}
@@ -969,6 +1000,11 @@ def _attempt_reasons(item, snapshot, release, close_at, ids, hashes, account_num
         )
         if identity_fields != PRIVATE_IDENTITY_FIELDS:
             raise ValueError()
+        if (
+            record.get("identity_kind") != "huggingface"
+            or record.get("email_verified") is not True
+        ):
+            raise ValueError()
         for name in ("team", "participant_names", "submission_name"):
             bounded_private_text(record.get(name), name)
         identity = TestIdentity(
@@ -980,9 +1016,14 @@ def _attempt_reasons(item, snapshot, release, close_at, ids, hashes, account_num
         )
         if account_key(identity) != record_account_key:
             raise ValueError()
-        validate_test_predictions(record.get("predictions"))
+        predictions = record.get("predictions")
+        validate_test_predictions(predictions)
+        if len(predictions) != len(snapshot.labels) or [
+            row["instance_id"] for row in predictions
+        ] != [row["instance_id"] for row in snapshot.labels]:
+            raise ValueError()
         expected_hash = canonical_submission_hash(
-            record["predictions"],
+            predictions,
             "test",
             release["release_id"],
             identity,

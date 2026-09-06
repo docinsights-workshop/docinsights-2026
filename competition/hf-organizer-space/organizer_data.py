@@ -27,6 +27,7 @@ from organizer_contract import (
     MAX_INSTANCE_ID_CHARACTERS,
     MAX_LEDGER_FILE_BYTES,
     MAX_TEST_ROWS,
+    TEST_ATTEMPT_COOLDOWN_SECONDS,
     TestIdentity,
     TestContractError,
     TestPolicyError,
@@ -316,6 +317,8 @@ def _verify_snapshot(snapshot: OrganizerSnapshot) -> AuditReport:
         numbers = [item[1].get("attempt_number") for item in entries]
         if numbers != list(range(1, len(entries) + 1)) or len(entries) > MAX_ATTEMPTS:
             issues.add("attempt_numbering_invalid")
+        elif not _attempt_spacing_valid(entries):
+            issues.add("attempt_cooldown_invalid")
 
     projections = {}
     for loaded in snapshot.account_projections:
@@ -876,13 +879,13 @@ def _valid_predictions(predictions, metrics) -> bool:
     examples = metrics.get("examples")
     if len(predictions) != examples:
         return False
-    prediction_ids = {row["instance_id"] for row in predictions}
-    metric_ids = {
+    prediction_ids = [row["instance_id"] for row in predictions]
+    metric_ids = [
         row.get("instance_id")
         for row in metrics.get("per_example", ())
         if isinstance(row, Mapping)
-    }
-    return prediction_ids == metric_ids
+    ]
+    return prediction_ids == sorted(prediction_ids) and prediction_ids == metric_ids
 
 
 def _valid_timestamp(value) -> bool:
@@ -910,6 +913,16 @@ def _attempt_sort_number(record) -> int:
         value
         if isinstance(value, int) and not isinstance(value, bool)
         else MAX_ATTEMPTS + 1
+    )
+
+
+def _attempt_spacing_valid(entries) -> bool:
+    timestamps = [_parse_timestamp(record.get("submitted_at")) for _, record in entries]
+    if any(value is None for value in timestamps):
+        return True
+    return all(
+        (later - earlier).total_seconds() >= TEST_ATTEMPT_COOLDOWN_SECONDS
+        for earlier, later in zip(timestamps, timestamps[1:])
     )
 
 

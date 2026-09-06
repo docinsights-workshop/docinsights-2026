@@ -35,6 +35,7 @@ MAX_PRIVATE_TEXT_CHARACTERS = 4_096
 MAX_PARTICIPANT_NAMES_CHARACTERS = 500
 MAX_REPOSITORY_ID_CHARACTERS = 256
 MAX_LEDGER_FILE_BYTES = 16 * 1024 * 1024
+TEST_ATTEMPT_COOLDOWN_SECONDS = 21_600
 
 PRIVATE_TEXT_LIMITS = {
     "release_id": MAX_PRIVATE_TEXT_CHARACTERS,
@@ -121,7 +122,7 @@ def is_valid_public_text(value) -> bool:
 
 
 def normalize_contact_email(value) -> str:
-    """Normalize and validate the anonymous/verified contact identity."""
+    """Normalize and validate the verified Hugging Face contact email."""
 
     if not isinstance(value, str):
         raise TestPolicyError("Enter a valid contact email for test submissions.")
@@ -287,10 +288,10 @@ def validate_test_predictions(rows) -> None:
             or not identifier.strip()
             or len(identifier) > MAX_INSTANCE_ID_CHARACTERS
             or identifier in identifiers
-            or not isinstance(answer, str)
-            or len(answer) > MAX_ANSWER_CHARACTERS
+            or (answer is not None and not isinstance(answer, str))
+            or (isinstance(answer, str) and len(answer) > MAX_ANSWER_CHARACTERS)
             or not isinstance(evidence, list)
-            or not 1 <= len(evidence) <= MAX_EVIDENCE_IDS
+            or len(evidence) > MAX_EVIDENCE_IDS
             or any(
                 not isinstance(item, str)
                 or not item.strip()
@@ -304,7 +305,7 @@ def validate_test_predictions(rows) -> None:
 
 @dataclass(frozen=True)
 class TestIdentity:
-    """Exact persisted identity envelope used for quota and retry hashing."""
+    """Exact persisted Hugging Face identity used for quota and retry hashing."""
 
     identity_kind: str
     identity_subject: str
@@ -326,17 +327,7 @@ class TestIdentity:
                 or type(self.email_verified) is not bool
             ):
                 raise ValueError()
-            if self.identity_kind == "huggingface":
-                if self.email_verified is not True:
-                    raise ValueError()
-            elif self.identity_kind == "email":
-                if (
-                    self.email_verified is not False
-                    or subject != email
-                    or username != "Not signed in"
-                ):
-                    raise ValueError()
-            else:
+            if self.identity_kind != "huggingface" or self.email_verified is not True:
                 raise ValueError()
         except (TestContractError, TestPolicyError, ValueError):
             raise TestPolicyError("Test submission identity is invalid.") from None
@@ -359,11 +350,6 @@ class TestIdentity:
                 "Test submission requires a verified email and HF identity."
             ) from None
         return cls("huggingface", subject, username, email, True)
-
-    @classmethod
-    def from_email(cls, value):
-        email = normalize_contact_email(value)
-        return cls("email", email, "Not signed in", email, False)
 
 
 def account_key(identity: TestIdentity) -> str:
@@ -397,7 +383,7 @@ def _canonical_predictions(predictions):
         normalized = _canonical_value(row)
         if "instance_id" in normalized:
             normalized["instance_id"] = str(normalized["instance_id"]).strip()
-        if "answer" in normalized:
+        if "answer" in normalized and normalized["answer"] is not None:
             normalized["answer"] = normalize_answer(normalized["answer"])
         if isinstance(normalized.get("evidence"), list):
             normalized["evidence"] = sorted(

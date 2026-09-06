@@ -103,7 +103,11 @@ class OrganizerContractParityTests(unittest.TestCase):
             [{**boundary[0], "evidence": ["e"] * 129}],
             [{**boundary[0], "evidence": ["e" * 257]}],
         )
-        for rows in (boundary, *invalid_rows):
+        abstention = [{"instance_id": "task-1", "answer": None, "evidence": []}]
+        self.assertEqual(
+            _outcome(organizer.validate_test_predictions, abstention)[0], "ok"
+        )
+        for rows in (boundary, abstention, *invalid_rows):
             with self.subTest(kind="predictions", shape=tuple(rows[0])):
                 self.assertEqual(
                     _outcome(organizer.validate_test_predictions, rows),
@@ -281,7 +285,7 @@ class OrganizerContractParityTests(unittest.TestCase):
             participant_policy.account_key(participant_identity),
         )
 
-        anonymous = organizer.TestIdentity(
+        email_identity_args = (
             "email",
             "person@example.org",
             "Not signed in",
@@ -289,19 +293,17 @@ class OrganizerContractParityTests(unittest.TestCase):
             False,
         )
         self.assertEqual(
-            organizer.account_key(anonymous),
-            "a27e3d8f4d6724b79abba77c2352d9416c12526ce092497b6b4282a802a2e346",
+            _outcome(organizer.TestIdentity, *email_identity_args)[0], "error"
         )
-        same_subject_hf = organizer.TestIdentity(
-            "huggingface",
-            "person@example.org",
-            "person",
-            "person@example.org",
-            True,
+        self.assertEqual(
+            _outcome(organizer.TestIdentity, *email_identity_args),
+            _outcome(participant_policy.TestIdentity, *email_identity_args),
         )
-        self.assertNotEqual(
-            organizer.account_key(anonymous), organizer.account_key(same_subject_hf)
+        self.assertEqual(
+            organizer.TEST_ATTEMPT_COOLDOWN_SECONDS,
+            participant_policy.TEST_ATTEMPT_COOLDOWN_SECONDS,
         )
+        self.assertEqual(organizer.TEST_ATTEMPT_COOLDOWN_SECONDS, 21_600)
         self.assertNotEqual(
             organizer_hash,
             organizer.canonical_submission_hash(
@@ -312,8 +314,27 @@ class OrganizerContractParityTests(unittest.TestCase):
                 {**metadata, "submission_name": "different run"},
             ),
         )
+        null_answer = [{"instance_id": "task-a", "answer": None, "evidence": []}]
+        text_answer = [{"instance_id": "task-a", "answer": "none", "evidence": []}]
+        organizer_null = organizer.canonical_submission_hash(
+            null_answer, "test", "release-α", organizer_identity, metadata
+        )
+        organizer_text = organizer.canonical_submission_hash(
+            text_answer, "test", "release-α", organizer_identity, metadata
+        )
+        self.assertNotEqual(organizer_null, organizer_text)
+        self.assertEqual(
+            organizer_null,
+            participant_policy.canonical_submission_hash(
+                null_answer,
+                "test",
+                "release-α",
+                participant_identity,
+                metadata,
+            ),
+        )
 
-    def test_optional_identity_construction_and_email_rules_match_participant(self):
+    def test_mandatory_identity_construction_and_email_rules_match_participant(self):
         """Catches quota identities accepted by only one deployed contract copy."""
 
         organizer = self.organizer_contract()
@@ -341,6 +362,8 @@ class OrganizerContractParityTests(unittest.TestCase):
         }
         organizer_identity = organizer.TestIdentity.from_profile(profile)
         participant_identity = participant_policy.TestIdentity.from_profile(profile)
+        self.assertFalse(hasattr(organizer.TestIdentity, "from_email"))
+        self.assertFalse(hasattr(participant_policy.TestIdentity, "from_email"))
         fields = (
             "identity_kind",
             "identity_subject",
@@ -353,14 +376,6 @@ class OrganizerContractParityTests(unittest.TestCase):
             tuple(getattr(participant_identity, name) for name in fields),
         )
         self.assertEqual(organizer_identity.contact_email, "person@example.org")
-        organizer_email = organizer.TestIdentity.from_email(" Person@Example.Org ")
-        participant_email = participant_policy.TestIdentity.from_email(
-            " Person@Example.Org "
-        )
-        self.assertEqual(
-            tuple(getattr(organizer_email, name) for name in fields),
-            tuple(getattr(participant_email, name) for name in fields),
-        )
 
     def test_best_attempt_metric_and_timestamp_boundaries_match_participant_policy(
         self,

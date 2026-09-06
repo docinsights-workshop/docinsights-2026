@@ -28,7 +28,11 @@ if str(_PARTICIPANT_SPACE) not in sys.path:
 
 from scoring import score_predictions  # noqa: E402
 import test_contract  # noqa: E402
-from test_policy import TestIdentity, account_key  # noqa: E402
+from test_policy import (  # noqa: E402
+    TestIdentity,
+    account_key,
+    canonical_submission_hash,
+)
 from test_store import HubTestStore, TestStoreError  # noqa: E402
 
 
@@ -36,11 +40,11 @@ REVISION = "f" * 40
 TASK_DIGEST = "1" * 64
 GOLD_DIGEST = "2" * 64
 ACCOUNT_A = hashlib.sha256(b"huggingface\0subject-a").hexdigest()
-ACCOUNT_B = hashlib.sha256(b"email\0user-b@example.org").hexdigest()
+ACCOUNT_B = hashlib.sha256(b"huggingface\0subject-b").hexdigest()
 PRIVATE_TOKEN = "organizer-read-token-sentinel"
 HASH_A1 = "5e379bcbcffb670b3d302ca215bc99667907a240860233457fa262e7e725ee98"
 HASH_A2 = "e4ffc1acc767b467a043be82d0d0e80627d33781907a3af793d087af1fefdf12"
-HASH_B1 = "3f5bd2aeb031ea4d56dfc5e14d8cef8d82a65e99bf4d06fb6702a47265b7fc8a"
+HASH_B1 = "7afbcaa66dc52770283c776065ed522e4b22464c96319f85a9f1966a1e21e226"
 ID_A1 = "11111111-1111-4111-8111-111111111111"
 ID_A2 = "22222222-2222-4222-8222-222222222222"
 ID_B1 = "33333333-3333-4333-8333-333333333333"
@@ -86,15 +90,13 @@ def attempt(
         **RELEASE_STATE,
         "submission_id": submission_id,
         "account_key": account,
-        "identity_kind": "huggingface" if account == ACCOUNT_A else "email",
-        "identity_subject": "subject-a"
-        if account == ACCOUNT_A
-        else "user-b@example.org",
-        "hf_username": "user-a" if account == ACCOUNT_A else "Not signed in",
+        "identity_kind": "huggingface",
+        "identity_subject": "subject-a" if account == ACCOUNT_A else "subject-b",
+        "hf_username": "user-a" if account == ACCOUNT_A else "user-b",
         "contact_email": "user-a@example.org"
         if account == ACCOUNT_A
         else "user-b@example.org",
-        "email_verified": account == ACCOUNT_A,
+        "email_verified": True,
         "scoring_gold_sha256": GOLD_DIGEST,
         "scoring_private_revision": "3" * 40,
         "scoring_public_revision": "4" * 40,
@@ -456,11 +458,14 @@ class OrganizerSnapshotTests(unittest.TestCase):
         receipt = store.submit(identity, metadata, predictions, metrics)
         return hub.files, identity, receipt
 
-    def make_real_store(self):
+    def make_real_store(self, labels=None):
         """Return a real store over an in-memory private-Hub fixture."""
         workspace = tempfile.TemporaryDirectory()
         self.addCleanup(workspace.cleanup)
-        gold = b'{"instance_id":"task-0","answer":"42","evidence":["b1"]}\n'
+        labels = labels or [
+            {"instance_id": "task-0", "answer": "42", "evidence": ["b1"]}
+        ]
+        gold = b"".join(json_bytes(row) for row in labels)
         gold_digest = hashlib.sha256(gold).hexdigest()
         release = {
             "schema_version": 1,
@@ -603,7 +608,14 @@ class OrganizerSnapshotTests(unittest.TestCase):
                 "unexpected": "participant-controlled-extra",
             }
         ]
-        metrics = score_predictions(predictions, [json.loads(gold)])
+        valid_predictions = [
+            {
+                name: value
+                for name, value in predictions[0].items()
+                if name != "unexpected"
+            }
+        ]
+        metrics = score_predictions(valid_predictions, [json.loads(gold)])
         store = HubTestStore(
             hub,
             repo_id="private/docsem",
@@ -650,8 +662,7 @@ class OrganizerSnapshotTests(unittest.TestCase):
 
     def test_real_store_and_reader_accept_an_attempt_at_exact_file_byte_limit(self):
         """Catches an accidental inclusive rejection at the shared byte ceiling."""
-        hub, store, identity, metadata = self.make_real_store()
-        predictions = [
+        labels = [
             {
                 "instance_id": f"task-{index:04d}",
                 "answer": "a" * 4_096,
@@ -659,6 +670,15 @@ class OrganizerSnapshotTests(unittest.TestCase):
             }
             for index in range(3_800)
         ]
+        hub, store, identity, metadata = self.make_real_store(labels)
+        times = iter(
+            (
+                dt.datetime(2026, 9, 5, 12, 0, tzinfo=dt.timezone.utc),
+                dt.datetime(2026, 9, 5, 18, 0, tzinfo=dt.timezone.utc),
+            )
+        )
+        store.now_provider = lambda: next(times)
+        predictions = [dict(row) for row in labels]
         metrics = {
             "answer_accuracy": 1.0,
             "evidence_exact_match": 1.0,
@@ -736,7 +756,7 @@ class OrganizerSnapshotTests(unittest.TestCase):
         self.assertEqual(len(rows), 3)
         self.assertEqual(
             [(row["account_key"], row["attempt_number"]) for row in rows],
-            [(ACCOUNT_B, 1), (ACCOUNT_A, 1), (ACCOUNT_A, 2)],
+            [(ACCOUNT_A, 1), (ACCOUNT_A, 2), (ACCOUNT_B, 1)],
         )
         a_rows = [row for row in rows if row["account_key"] == ACCOUNT_A]
         b_row = [row for row in rows if row["account_key"] == ACCOUNT_B][0]
@@ -753,11 +773,11 @@ class OrganizerSnapshotTests(unittest.TestCase):
         self.assertEqual(b_row["joint_accuracy"], 1.0)
         self.assertEqual(a_rows[0]["identity_kind"], "huggingface")
         self.assertTrue(a_rows[0]["email_verified"])
-        self.assertEqual(b_row["identity_kind"], "email")
-        self.assertEqual(b_row["hf_username"], "Not signed in")
-        self.assertFalse(b_row["email_verified"])
+        self.assertEqual(b_row["identity_kind"], "huggingface")
+        self.assertEqual(b_row["hf_username"], "user-b")
+        self.assertTrue(b_row["email_verified"])
 
-    def test_requires_exact_optional_identity_envelope_and_account_key(self):
+    def test_requires_exact_huggingface_identity_envelope_and_account_key(self):
         """Catches legacy, contradictory, or non-normalized private identities."""
 
         cases = []
@@ -771,17 +791,25 @@ class OrganizerSnapshotTests(unittest.TestCase):
         legacy[a_path] = json_bytes(record)
         cases.append(legacy)
 
-        anonymous_verified = fixture_files()
-        record = json.loads(anonymous_verified[b_path])
-        record["email_verified"] = True
-        anonymous_verified[b_path] = json_bytes(record)
-        cases.append(anonymous_verified)
+        email_identity = fixture_files()
+        record = json.loads(email_identity[b_path])
+        record.update(
+            {
+                "identity_kind": "email",
+                "identity_subject": "user-b@example.org",
+                "hf_username": "Not signed in",
+                "contact_email": "user-b@example.org",
+                "email_verified": False,
+            }
+        )
+        email_identity[b_path] = json_bytes(record)
+        cases.append(email_identity)
 
-        anonymous_username = fixture_files()
-        record = json.loads(anonymous_username[b_path])
-        record["hf_username"] = "pretend-user"
-        anonymous_username[b_path] = json_bytes(record)
-        cases.append(anonymous_username)
+        unverified = fixture_files()
+        record = json.loads(unverified[b_path])
+        record["email_verified"] = False
+        unverified[b_path] = json_bytes(record)
+        cases.append(unverified)
 
         non_normalized_email = fixture_files()
         record = json.loads(non_normalized_email[b_path])
@@ -1084,6 +1112,42 @@ class OrganizerSnapshotTests(unittest.TestCase):
                 snapshot = self.load(FakeHub(files))
                 self.assertFalse(verify_snapshot(snapshot).valid)
 
+    def test_attempt_timestamps_require_the_exact_six_hour_interval(self):
+        """Catches a projected ledger bypassing the immutable cooldown."""
+
+        def with_second_timestamp(value):
+            files = fixture_files()
+            attempt_path = f"attempts/test/{ACCOUNT_A}/{ID_A2}.json"
+            record = json.loads(files[attempt_path])
+            record["submitted_at"] = value
+            files[attempt_path] = json_bytes(record)
+
+            account_path = f"projections/test/accounts/{ACCOUNT_A}.json"
+            account = json.loads(files[account_path])
+            account["attempts"][1]["record_sha256"] = hashlib.sha256(
+                files[attempt_path]
+            ).hexdigest()
+            files[account_path] = json_bytes(account)
+
+            organizer_path = "projections/test/organizer_leaderboard.json"
+            organizer = json.loads(files[organizer_path])
+            selected = next(
+                row for row in organizer["accounts"] if row["account_key"] == ACCOUNT_A
+            )
+            selected["submitted_at"] = value
+            files[organizer_path] = json_bytes(organizer)
+            return files
+
+        exact_boundary = self.load(
+            FakeHub(with_second_timestamp("2026-09-01T18:00:00Z"))
+        )
+        self.assertTrue(verify_snapshot(exact_boundary).valid)
+
+        too_soon = self.load(FakeHub(with_second_timestamp("2026-09-01T17:59:59Z")))
+        report = verify_snapshot(too_soon)
+        self.assertFalse(report.valid)
+        self.assertIn("attempt_cooldown_invalid", report.issue_codes)
+
     def test_release_scoring_and_projection_mismatches_fail_audit(self):
         """Catches mixed releases/evaluators and stale cached leaderboard projections."""
         mutations = []
@@ -1200,6 +1264,91 @@ class OrganizerSnapshotTests(unittest.TestCase):
             self.assertIn("attempt_invalid", report.issue_codes)
             with self.assertRaises(OrganizerDataError):
                 organizer_rows(snapshot)
+
+    def test_stored_predictions_and_metrics_preserve_expanded_order(self):
+        """Catches a reordered record that no longer reflects deterministic expansion."""
+
+        files = fixture_files()
+        attempt_path = f"attempts/test/{ACCOUNT_A}/{ID_A1}.json"
+        record = json.loads(files[attempt_path])
+        record["predictions"].reverse()
+        record["metrics"]["per_example"].reverse()
+        files[attempt_path] = json_bytes(record)
+
+        account_path = f"projections/test/accounts/{ACCOUNT_A}.json"
+        projection = json.loads(files[account_path])
+        projection["attempts"][0]["record_sha256"] = hashlib.sha256(
+            files[attempt_path]
+        ).hexdigest()
+        files[account_path] = json_bytes(projection)
+
+        report = verify_snapshot(self.load(FakeHub(files)))
+
+        self.assertFalse(report.valid)
+        self.assertIn("attempt_invalid", report.issue_codes)
+
+    def test_complete_null_and_empty_evidence_abstentions_are_reconstructible(self):
+        files = fixture_files()
+        attempt_path = f"attempts/test/{ACCOUNT_A}/{ID_A1}.json"
+        record = json.loads(files[attempt_path])
+        record["predictions"] = [
+            {"instance_id": "task-1", "answer": None, "evidence": []},
+            {"instance_id": "task-2", "answer": None, "evidence": []},
+        ]
+        record["metrics"] = {
+            "answer_accuracy": 0.0,
+            "evidence_exact_match": 0.0,
+            "evidence_f1": 0.0,
+            "joint_accuracy": 0.0,
+            "examples": 2,
+            "per_example": [
+                {
+                    "instance_id": instance_id,
+                    "answer_exact_match": 0.0,
+                    "evidence_exact_match": 0.0,
+                    "evidence_f1": 0.0,
+                    "joint_exact_match": 0.0,
+                }
+                for instance_id in ("task-1", "task-2")
+            ],
+        }
+        identity = TestIdentity(
+            record["identity_kind"],
+            record["identity_subject"],
+            record["hf_username"],
+            record["contact_email"],
+            record["email_verified"],
+        )
+        record["submission_hash"] = canonical_submission_hash(
+            record["predictions"],
+            record["split"],
+            record["release_id"],
+            identity,
+            record,
+        )
+        files[attempt_path] = json_bytes(record)
+
+        account_path = f"projections/test/accounts/{ACCOUNT_A}.json"
+        projection = json.loads(files[account_path])
+        projection["attempts"][0]["record_sha256"] = hashlib.sha256(
+            files[attempt_path]
+        ).hexdigest()
+        files[account_path] = json_bytes(projection)
+
+        snapshot = self.load(FakeHub(files))
+        report = verify_snapshot(snapshot)
+        rows = organizer_rows(snapshot)
+
+        self.assertTrue(report.valid)
+        reconstructed = next(row for row in rows if row["submission_id"] == ID_A1)
+        self.assertEqual(reconstructed["answer_accuracy"], 0.0)
+        self.assertEqual(reconstructed["evidence_f1"], 0.0)
+        self.assertTrue(
+            all(
+                item["joint_exact_match"] == 0.0
+                for item in reconstructed["per_example"]
+            )
+        )
 
     def test_submission_hash_is_recomputed_from_committed_predictions(self):
         """Catches altered hashes or metadata detached from retry identity."""

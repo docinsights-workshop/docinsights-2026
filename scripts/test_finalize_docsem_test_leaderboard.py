@@ -14,6 +14,7 @@ from finalize_docsem_test_leaderboard import (
     PUBLIC_FINAL_PATH,
     RELEASE_PATH,
     SCORING_PATH,
+    TEST_ATTEMPT_COOLDOWN_SECONDS,
     FinalizationError,
     FinalizationSnapshot,
     SnapshotRecord,
@@ -23,7 +24,12 @@ from finalize_docsem_test_leaderboard import (
     load_finalization_snapshot,
 )
 from scoring import score_predictions as fixture_score_predictions
-from test_policy import TestIdentity, account_key, canonical_submission_hash
+from test_policy import (
+    TEST_ATTEMPT_COOLDOWN_SECONDS as POLICY_COOLDOWN_SECONDS,
+    TestIdentity,
+    account_key,
+    canonical_submission_hash,
+)
 import app as participant_app
 
 
@@ -82,12 +88,12 @@ def predictions(*, first="yes", second="2", first_evidence=None, second_evidence
         {
             "instance_id": "task-1",
             "answer": first,
-            "evidence": first_evidence or ["b1", "b2"],
+            "evidence": ["b1", "b2"] if first_evidence is None else first_evidence,
         },
         {
             "instance_id": "task-2",
             "answer": second,
-            "evidence": second_evidence or ["b3"],
+            "evidence": ["b3"] if second_evidence is None else second_evidence,
         },
     ]
 
@@ -105,24 +111,15 @@ def attempt(
     submitted_at,
     rows,
     *,
-    identity_kind="huggingface",
     username=None,
     contact_email=None,
     team="Team",
     submission_name=None,
     overrides=None,
 ):
-    hf_username = (
-        username
-        if username is not None
-        else ("Not signed in" if identity_kind == "email" else subject)
-    )
-    email = contact_email or (
-        subject if identity_kind == "email" else f"{subject}@example.org"
-    )
-    identity = TestIdentity(
-        identity_kind, subject, hf_username, email, identity_kind == "huggingface"
-    )
+    hf_username = username or subject
+    email = contact_email or f"{subject}@example.org"
+    identity = TestIdentity("huggingface", subject, hf_username, email, True)
     participant_names = f"Participant {subject}"
     persisted_submission_name = submission_name or f"submission-{number}"
     metadata = {
@@ -187,6 +184,118 @@ def snapshot(records, *, release_value=None, exclusions=(), adjudications=()):
 
 
 class FinalizationPlanTests(unittest.TestCase):
+    def test_finalizer_refuses_attempts_inside_six_hours_but_allows_boundary(self):
+        self.assertEqual(TEST_ATTEMPT_COOLDOWN_SECONDS, POLICY_COOLDOWN_SECONDS)
+        self.assertEqual(TEST_ATTEMPT_COOLDOWN_SECONDS, 21_600)
+        first = attempt(
+            "account-a",
+            1,
+            "11111111-1111-4111-8111-111111111111",
+            "2026-09-02T12:00:00Z",
+            predictions(),
+        )
+        too_soon = attempt(
+            "account-a",
+            2,
+            "22222222-2222-4222-8222-222222222222",
+            "2026-09-02T17:59:59Z",
+            predictions(second="different"),
+        )
+        with self.assertRaisesRegex(FinalizationError, "cooldown"):
+            build_finalization(snapshot((first, too_soon)), NOW)
+
+        boundary = attempt(
+            "account-a",
+            2,
+            "22222222-2222-4222-8222-222222222222",
+            "2026-09-02T18:00:00Z",
+            predictions(second="different"),
+        )
+        plan = build_finalization(snapshot((first, boundary)), NOW)
+        self.assertEqual(plan.eligible_attempt_count, 2)
+
+    def test_finalizer_rejects_partial_persisted_predictions_even_if_scores_match(self):
+        full_rows = predictions(second="wrong", second_evidence=["wrong-block"])
+        base = attempt(
+            "account-a",
+            1,
+            "11111111-1111-4111-8111-111111111111",
+            "2026-09-02T12:00:00Z",
+            full_rows,
+        )
+        partial = copy.deepcopy(base.value)
+        partial["predictions"] = partial["predictions"][:1]
+        identity = TestIdentity(
+            partial["identity_kind"],
+            partial["identity_subject"],
+            partial["hf_username"],
+            partial["contact_email"],
+            partial["email_verified"],
+        )
+        partial["submission_hash"] = canonical_submission_hash(
+            partial["predictions"],
+            "test",
+            partial["release_id"],
+            identity,
+            partial,
+        )
+        record = SnapshotRecord.from_value(base.path, partial, committed=True)
+
+        plan = build_finalization(snapshot((record,)), NOW)
+
+        self.assertEqual(plan.eligible_attempt_count, 0)
+        self.assertEqual(plan.excluded_attempt_count, 1)
+        self.assertEqual(
+            plan.audit_manifest["excluded_attempts"][0]["reason_code"],
+            "malformed",
+        )
+
+    def test_finalizer_rejects_full_predictions_outside_pinned_label_order(self):
+        base = attempt(
+            "account-a",
+            1,
+            "11111111-1111-4111-8111-111111111111",
+            "2026-09-02T12:00:00Z",
+            predictions(),
+        )
+        reordered = copy.deepcopy(base.value)
+        reordered["predictions"].reverse()
+        record = SnapshotRecord.from_value(base.path, reordered, committed=True)
+
+        plan = build_finalization(snapshot((record,)), NOW)
+
+        self.assertEqual(plan.eligible_attempt_count, 0)
+        self.assertEqual(
+            plan.audit_manifest["excluded_attempts"][0]["reason_code"],
+            "malformed",
+        )
+
+    def test_finalizer_accepts_complete_null_and_empty_evidence_abstentions(self):
+        rows = predictions(
+            first=None,
+            second=None,
+            first_evidence=[],
+            second_evidence=[],
+        )
+        record = attempt(
+            "account-a",
+            1,
+            "11111111-1111-4111-8111-111111111111",
+            "2026-09-02T12:00:00Z",
+            rows,
+        )
+
+        plan = build_finalization(snapshot((record,)), NOW)
+
+        self.assertEqual(plan.eligible_attempt_count, 1)
+        self.assertEqual(
+            {
+                name: plan.public_projection["rows"][0][name]
+                for name in ("joint_accuracy", "answer_accuracy", "evidence_f1")
+            },
+            {"joint_accuracy": 0.0, "answer_accuracy": 0.0, "evidence_f1": 0.0},
+        )
+
     def test_joint_accuracy_is_primary_for_selection_and_public_ranking(self):
         answer_only = attempt(
             "account-a",
@@ -278,9 +387,9 @@ class FinalizationPlanTests(unittest.TestCase):
         self.assertEqual(plan.eligible_attempt_count, 4)
         self.assertEqual(plan.selected_account_count, 2)
 
-    def test_submission_id_breaks_an_exact_within_account_tie(self):
+    def test_submission_id_breaks_an_exact_cross_account_ranking_tie(self):
         later_id = attempt(
-            "account-a",
+            "account-b",
             1,
             "ffffffff-ffff-4fff-8fff-ffffffffffff",
             "2026-09-02T12:00:00Z",
@@ -289,7 +398,7 @@ class FinalizationPlanTests(unittest.TestCase):
         )
         earlier_id = attempt(
             "account-a",
-            2,
+            1,
             "00000000-0000-4000-8000-000000000001",
             "2026-09-02T12:00:00Z",
             predictions(second="wrong-b"),
@@ -301,7 +410,7 @@ class FinalizationPlanTests(unittest.TestCase):
         self.assertEqual(
             plan.public_projection["rows"][0]["submission_name"], "earlier-id"
         )
-        self.assertEqual(plan.public_projection["rows"][0]["selected_attempt"], 2)
+        self.assertEqual(plan.public_projection["rows"][0]["selected_attempt"], 1)
 
     def test_input_record_order_does_not_change_any_finalization_hash(self):
         first = attempt(
@@ -496,6 +605,50 @@ class FinalizationPlanTests(unittest.TestCase):
                 for item in plan.audit_manifest["applied_audit_records"]
             ],
             ["smoke", "reinstate", "exclude-b"],
+        )
+
+    def test_organizer_smoke_account_exclusion_preserves_audit_but_not_ranking(self):
+        smoke = attempt(
+            "organizer-smoke-subject",
+            1,
+            "11111111-1111-4111-8111-111111111111",
+            "2026-09-02T12:00:00Z",
+            predictions(
+                first="deliberately-wrong",
+                second="also-wrong",
+                first_evidence=[],
+                second_evidence=[],
+            ),
+            username="organizer-smoke",
+            contact_email="organizer-smoke@example.org",
+            team="Organizer Smoke Test",
+        )
+        exclusion = SnapshotRecord.from_value(
+            "exclusions/test/organizer-smoke.json",
+            {
+                "schema_version": 3,
+                "split": "test",
+                "release_id": "docsem-test-2026",
+                "task_manifest_sha256": TASK_SHA,
+                "gold_sha256": GOLD_SHA,
+                "record_id": "organizer-smoke",
+                "account_key": smoke.value["account_key"],
+                "created_at": "2026-10-01T01:00:00Z",
+                "reason_code": "organizer-smoke-test",
+            },
+        )
+
+        plan = build_finalization(
+            snapshot((smoke,), exclusions=(exclusion,)),
+            NOW,
+        )
+
+        self.assertEqual(plan.public_projection["rows"], [])
+        self.assertEqual(plan.eligible_attempt_count, 0)
+        self.assertEqual(plan.excluded_attempt_count, 1)
+        self.assertEqual(
+            plan.audit_manifest["applied_audit_records"][0]["record_id"],
+            "organizer-smoke",
         )
 
     def test_note_adjudication_may_reference_one_attempt_without_changing_eligibility(
@@ -766,22 +919,24 @@ class FinalizationPlanTests(unittest.TestCase):
                 with self.assertRaises(participant_app.FinalLeaderboardError):
                     participant_app.final_test_leaderboard_html(mutated)
 
-    def test_anonymous_final_row_uses_only_public_not_signed_in_identity(self):
+    def test_public_final_row_excludes_private_authenticated_identity(self):
         record = attempt(
-            "anonymous@example.org",
+            "private-hf-subject",
             1,
             "11111111-1111-4111-8111-111111111111",
             "2026-09-02T12:00:00Z",
             predictions(),
-            identity_kind="email",
-            team="Anonymous Team",
+            username="public-hf-user",
+            contact_email="private-contact@example.org",
+            team="Public Team",
         )
 
         projection = build_finalization(snapshot((record,)), NOW).public_projection
 
-        self.assertEqual(projection["rows"][0]["hf_username"], "Not signed in")
+        self.assertEqual(projection["rows"][0]["hf_username"], "public-hf-user")
         rendered = json.dumps(projection, sort_keys=True)
-        self.assertNotIn("anonymous@example.org", rendered)
+        self.assertNotIn("private-hf-subject", rendered)
+        self.assertNotIn("private-contact@example.org", rendered)
         self.assertNotIn("identity_subject", rendered)
         self.assertNotIn("contact_email", rendered)
 
@@ -803,6 +958,18 @@ class FinalizationPlanTests(unittest.TestCase):
         contradictory = copy.deepcopy(base.value)
         contradictory["email_verified"] = False
         invalid_values.append(contradictory)
+
+        email_identity = copy.deepcopy(base.value)
+        email_identity.update(
+            {
+                "identity_kind": "email",
+                "identity_subject": "private@example.org",
+                "hf_username": "Not signed in",
+                "contact_email": "private@example.org",
+                "email_verified": False,
+            }
+        )
+        invalid_values.append(email_identity)
 
         wrong_account = copy.deepcopy(base.value)
         wrong_account["account_key"] = hashlib.sha256(b"account-a").hexdigest()
