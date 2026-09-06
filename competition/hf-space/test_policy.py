@@ -19,7 +19,7 @@ class TestPolicyError(ValueError):
 
 
 OFFICIAL_TEST_CLOSE_AT = dt.datetime(2026, 9, 11, 12, 0, tzinfo=dt.timezone.utc)
-ANONYMOUS_HF_USERNAME = "Not signed in"
+TEST_ATTEMPT_COOLDOWN_SECONDS = 21_600
 _EMAIL_LOCAL = re.compile(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}\Z")
 _EMAIL_DOMAIN_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z")
 
@@ -72,21 +72,13 @@ class TestIdentity:
             contact = normalize_contact_email(self.contact_email)
         except (ValueError, TestPolicyError):
             raise TestPolicyError("Test submission identity is invalid.") from None
-        if self.identity_kind == "huggingface":
-            valid = (
-                self.email_verified is True
-                and subject == self.identity_subject
-                and username == self.hf_username
-                and contact == self.contact_email
-            )
-        elif self.identity_kind == "email":
-            valid = (
-                self.email_verified is False
-                and subject == contact == self.identity_subject
-                and self.hf_username == ANONYMOUS_HF_USERNAME
-            )
-        else:
-            valid = False
+        valid = (
+            self.identity_kind == "huggingface"
+            and self.email_verified is True
+            and subject == self.identity_subject
+            and username == self.hf_username
+            and contact == self.contact_email
+        )
         if not valid:
             raise TestPolicyError("Test submission identity is invalid.")
 
@@ -114,17 +106,6 @@ class TestIdentity:
             hf_username=username,
             contact_email=email,
             email_verified=True,
-        )
-
-    @classmethod
-    def from_email(cls, value):
-        email = normalize_contact_email(value)
-        return cls(
-            identity_kind="email",
-            identity_subject=email,
-            hf_username=ANONYMOUS_HF_USERNAME,
-            contact_email=email,
-            email_verified=False,
         )
 
 
@@ -231,7 +212,7 @@ def _canonical_predictions(predictions):
         normalized = _canonical_value(row)
         if "instance_id" in normalized:
             normalized["instance_id"] = str(normalized["instance_id"]).strip()
-        if "answer" in normalized:
+        if "answer" in normalized and normalized["answer"] is not None:
             normalized["answer"] = normalize_answer(normalized["answer"])
         if isinstance(normalized.get("evidence"), list):
             normalized["evidence"] = sorted(
@@ -319,6 +300,20 @@ def _accepted_timestamp(attempt: Mapping) -> dt.datetime:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise TestPolicyError("Accepted attempt timestamp must include a UTC offset.")
     return parsed.astimezone(dt.timezone.utc)
+
+
+def next_eligible_at(attempts) -> str | None:
+    """Return the next distinct-attempt UTC instant for an account history."""
+
+    if not attempts:
+        return None
+    if not isinstance(attempts, (list, tuple)) or any(
+        not isinstance(attempt, Mapping) for attempt in attempts
+    ):
+        raise TestPolicyError("Accepted attempts must be objects.")
+    latest = max(_accepted_timestamp(attempt) for attempt in attempts)
+    eligible = latest + dt.timedelta(seconds=TEST_ATTEMPT_COOLDOWN_SECONDS)
+    return eligible.isoformat().replace("+00:00", "Z")
 
 
 def rank_attempts(attempts):

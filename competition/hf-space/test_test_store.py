@@ -12,7 +12,7 @@ from huggingface_hub.errors import EntryNotFoundError, HfHubHTTPError
 from requests import Response
 
 from test_policy import TestIdentity, account_key
-from test_store import HubTestStore, TestStoreError
+from test_store import HubTestStore, TestCooldownError, TestReceipt, TestStoreError
 
 
 NOW = dt.datetime(2026, 9, 5, 12, 0, tzinfo=dt.timezone.utc)
@@ -307,7 +307,6 @@ class HubTestStoreTests(unittest.TestCase):
             "long instance id": [{**PREDICTIONS[0], "instance_id": "i" * 257}],
             "duplicate instance id": [PREDICTIONS[0], dict(PREDICTIONS[0])],
             "long answer": [{**PREDICTIONS[0], "answer": "a" * 4_097}],
-            "empty evidence": [{**PREDICTIONS[0], "evidence": []}],
             "too many evidence ids": [
                 {**PREDICTIONS[0], "evidence": [f"b{index}" for index in range(129)]}
             ],
@@ -331,6 +330,36 @@ class HubTestStoreTests(unittest.TestCase):
 
                 self.assertEqual(hub.repo_info_calls, 0)
                 self.assertEqual(hub.create_calls, [])
+
+    def test_direct_store_rejects_predictions_not_expanded_to_all_gold_ids(self):
+        gold = (
+            b'{"instance_id":"test-1","answer":"one","evidence":["b1"]}\n'
+            b'{"instance_id":"test-2","answer":"two","evidence":["b2"]}\n'
+        )
+        digest = hashlib.sha256(gold).hexdigest()
+        hub = InMemoryHub(
+            files={
+                "sealed/release.json": release_bytes(gold_digest=digest),
+                "sealed/gold.jsonl": gold,
+            }
+        )
+        store = HubTestStore(
+            hub,
+            repo_id="private/repo",
+            release_config_path="sealed/release.json",
+            gold_config_path="sealed/gold.jsonl",
+            now_provider=lambda: NOW,
+        )
+
+        with self.assertRaisesRegex(TestStoreError, "could not be accepted"):
+            store.submit(
+                IDENTITY,
+                {**META, "scoring_gold_sha256": digest},
+                PREDICTIONS,
+                METRICS,
+            )
+
+        self.assertEqual(hub.create_calls, [])
 
     def test_direct_store_bounds_identity_and_private_metadata_before_io(self):
         """Catches unbounded OAuth or participant metadata reaching JSON persistence."""
@@ -433,7 +462,7 @@ class HubTestStoreTests(unittest.TestCase):
                 self.assertEqual(hub.repo_info_calls, 0)
                 self.assertEqual(hub.create_calls, [])
 
-    def test_three_concurrent_attempts_commit_and_fourth_is_rejected(self):
+    def test_concurrent_first_attempts_admit_only_one_under_cooldown(self):
         hub = InMemoryHub(create_barrier=threading.Barrier(4))
         store = HubTestStore(
             hub,
@@ -454,11 +483,19 @@ class HubTestStoreTests(unittest.TestCase):
             return store.submit(IDENTITY, META, predictions, METRICS)
 
         with ThreadPoolExecutor(max_workers=4) as pool:
-            receipts = list(pool.map(submit, range(4)))
+            futures = [pool.submit(submit, index) for index in range(4)]
+            outcomes = []
+            for future in futures:
+                try:
+                    outcomes.append(future.result())
+                except TestCooldownError as exc:
+                    outcomes.append(exc)
 
-        self.assertEqual(sorted(r.attempt for r in receipts if r.accepted), [1, 2, 3])
-        self.assertEqual(sum(not r.accepted for r in receipts), 1)
-        self.assertEqual(len(store.account_history(IDENTITY)), 3)
+        self.assertEqual(sum(isinstance(item, TestReceipt) for item in outcomes), 1)
+        self.assertEqual(
+            sum(isinstance(item, TestCooldownError) for item in outcomes), 3
+        )
+        self.assertEqual(len(store.account_history(IDENTITY)), 1)
 
     def test_exact_retry_returns_existing_receipt(self):
         hub = InMemoryHub()
@@ -478,6 +515,152 @@ class HubTestStoreTests(unittest.TestCase):
         self.assertEqual(len(store.account_history(IDENTITY)), 1)
         self.assertEqual(len(hub.create_calls), 1)
 
+    def test_distinct_attempt_cooldown_rejects_until_exact_six_hour_boundary(self):
+        clock = [NOW]
+        hub = InMemoryHub()
+        store = HubTestStore(
+            hub,
+            repo_id="private/repo",
+            release_config_path="sealed/release.json",
+            gold_config_path="sealed/gold.jsonl",
+            now_provider=lambda: clock[0],
+        )
+        store.submit(IDENTITY, META, PREDICTIONS, METRICS)
+        clock[0] = NOW + dt.timedelta(seconds=21_599)
+
+        with self.assertRaises(TestCooldownError) as caught:
+            store.submit(
+                IDENTITY,
+                {**META, "submission_name": "second"},
+                [{"instance_id": "test-1", "answer": "second", "evidence": ["b1"]}],
+                METRICS,
+            )
+
+        self.assertEqual(caught.exception.next_eligible_at, "2026-09-05T18:00:00Z")
+        self.assertIn("2026-09-05T18:00:00Z", str(caught.exception))
+        self.assertEqual(len(hub.create_calls), 1)
+
+        clock[0] = NOW + dt.timedelta(seconds=21_600)
+        accepted = store.submit(
+            IDENTITY,
+            {**META, "submission_name": "second"},
+            [{"instance_id": "test-1", "answer": "second", "evidence": ["b1"]}],
+            METRICS,
+        )
+        self.assertEqual(accepted.attempt, 2)
+
+    def test_exact_retry_during_cooldown_returns_same_receipt_without_commit(self):
+        clock = [NOW]
+        hub = InMemoryHub()
+        store = HubTestStore(
+            hub,
+            repo_id="private/repo",
+            release_config_path="sealed/release.json",
+            gold_config_path="sealed/gold.jsonl",
+            now_provider=lambda: clock[0],
+        )
+        first = store.submit(IDENTITY, META, PREDICTIONS, METRICS)
+        clock[0] = NOW + dt.timedelta(seconds=1)
+
+        retry = store.submit(IDENTITY, META, PREDICTIONS, METRICS)
+
+        self.assertEqual(retry, first)
+        self.assertEqual(len(hub.create_calls), 1)
+
+    def test_concurrent_distinct_attempts_admit_at_most_one_after_cas_reload(self):
+        clock = [NOW]
+        hub = InMemoryHub()
+        store = HubTestStore(
+            hub,
+            repo_id="private/repo",
+            release_config_path="sealed/release.json",
+            gold_config_path="sealed/gold.jsonl",
+            now_provider=lambda: clock[0],
+        )
+        store.submit(IDENTITY, META, PREDICTIONS, METRICS)
+        clock[0] = NOW + dt.timedelta(seconds=21_600)
+        hub.create_barrier = threading.Barrier(2)
+        hub._barrier_waits_remaining = 2
+
+        def submit(index):
+            return store.submit(
+                IDENTITY,
+                {**META, "submission_name": f"concurrent-{index}"},
+                [
+                    {
+                        "instance_id": "test-1",
+                        "answer": f"concurrent-{index}",
+                        "evidence": ["b1"],
+                    }
+                ],
+                METRICS,
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(submit, index) for index in range(2)]
+            outcomes = []
+            for future in futures:
+                try:
+                    outcomes.append(future.result())
+                except TestCooldownError as exc:
+                    outcomes.append(exc)
+
+        self.assertEqual(sum(isinstance(item, TestReceipt) for item in outcomes), 1)
+        self.assertEqual(
+            sum(isinstance(item, TestCooldownError) for item in outcomes), 1
+        )
+        self.assertEqual(len(store.account_history(IDENTITY)), 2)
+
+    def test_tampered_sub_six_hour_history_is_rejected_before_next_commit(self):
+        clock = [NOW]
+        hub = InMemoryHub()
+        store = HubTestStore(
+            hub,
+            repo_id="private/repo",
+            release_config_path="sealed/release.json",
+            gold_config_path="sealed/gold.jsonl",
+            now_provider=lambda: clock[0],
+        )
+        first = store.submit(IDENTITY, META, PREDICTIONS, METRICS)
+        clock[0] = NOW + dt.timedelta(seconds=21_600)
+        second = store.submit(
+            IDENTITY,
+            {**META, "submission_name": "second"},
+            [{"instance_id": "test-1", "answer": "second", "evidence": ["b1"]}],
+            METRICS,
+        )
+        key = account_key(IDENTITY)
+        second_path = f"attempts/test/{key}/{second.submission_id}.json"
+        account_path = f"projections/test/accounts/{key}.json"
+        with hub._lock:
+            updated = dict(hub._snapshots[hub._sha])
+            record = json.loads(updated[second_path])
+            record["submitted_at"] = "2026-09-05T12:00:01Z"
+            updated[second_path] = (
+                json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+            ).encode("utf-8")
+            account = json.loads(updated[account_path])
+            account["attempts"][1]["record_sha256"] = hashlib.sha256(
+                updated[second_path]
+            ).hexdigest()
+            updated[account_path] = (
+                json.dumps(account, sort_keys=True, separators=(",", ":")) + "\n"
+            ).encode("utf-8")
+            hub._advance(updated)
+        clock[0] = NOW + dt.timedelta(seconds=43_200)
+        commits_before = len(hub.create_calls)
+
+        with self.assertRaisesRegex(TestStoreError, "temporarily unavailable"):
+            store.submit(
+                IDENTITY,
+                {**META, "submission_name": "third"},
+                [{"instance_id": "test-1", "answer": "third", "evidence": ["b1"]}],
+                METRICS,
+            )
+
+        self.assertEqual(len(hub.create_calls), commits_before)
+        self.assertEqual(first.attempt, 1)
+
     def test_changed_participant_metadata_is_a_new_attempt_not_an_exact_retry(self):
         for field, value in (
             ("team", "Changed Team"),
@@ -485,15 +668,17 @@ class HubTestStoreTests(unittest.TestCase):
             ("submission_name", "changed run"),
         ):
             with self.subTest(field=field):
+                clock = [NOW]
                 hub = InMemoryHub()
                 store = HubTestStore(
                     hub,
                     repo_id="private/repo",
                     release_config_path="sealed/release.json",
                     gold_config_path="sealed/gold.jsonl",
-                    now_provider=lambda: NOW,
+                    now_provider=lambda: clock[0],
                 )
                 first = store.submit(IDENTITY, META, PREDICTIONS, METRICS)
+                clock[0] = NOW + dt.timedelta(seconds=21_600)
 
                 changed = store.submit(
                     IDENTITY,
@@ -538,7 +723,7 @@ class HubTestStoreTests(unittest.TestCase):
             {
                 "evidence": ["B1", "b1"],
                 "answer": "  PRIVATE   prediction ",
-                "instance_id": " test-1 ",
+                "instance_id": "test-1",
             }
         ]
 
@@ -634,9 +819,15 @@ class HubTestStoreTests(unittest.TestCase):
             self.assertNotIn("hf_subject", record)
             self.assertNotIn("verified_email", record)
 
-    def test_email_identity_public_projection_never_contains_contact_email(self):
+    def test_store_rejects_forged_email_identity_before_private_io(self):
         hub = InMemoryHub()
-        identity = TestIdentity.from_email(" Anonymous@Example.ORG ")
+        identity = unsafe_identity(
+            identity_kind="email",
+            identity_subject="anonymous@example.org",
+            hf_username="Not signed in",
+            contact_email="anonymous@example.org",
+            email_verified=False,
+        )
         store = HubTestStore(
             hub,
             repo_id="private/repo",
@@ -645,26 +836,24 @@ class HubTestStoreTests(unittest.TestCase):
             now_provider=lambda: NOW,
         )
 
-        store.submit(identity, META, PREDICTIONS, METRICS)
+        with self.assertRaisesRegex(TestStoreError, "could not be accepted"):
+            store.submit(identity, META, PREDICTIONS, METRICS)
 
-        projection = json.loads(hub.files["projections/test/public_provisional.json"])
-        self.assertEqual(
-            projection["rows"],
-            [{"rank": 1, "hf_username": "Not signed in", "team": "Private Team"}],
-        )
-        self.assertNotIn("anonymous@example.org", json.dumps(projection))
+        self.assertEqual(hub.repo_info_calls, 0)
 
     def test_later_attempt_never_writes_or_changes_provisional_ranks(self):
+        clock = [NOW]
         hub = InMemoryHub()
         store = HubTestStore(
             hub,
             repo_id="private/repo",
             release_config_path="sealed/release.json",
             gold_config_path="sealed/gold.jsonl",
-            now_provider=lambda: NOW,
+            now_provider=lambda: clock[0],
         )
         store.submit(IDENTITY, META, PREDICTIONS, METRICS)
         before = hub.files["projections/test/public_provisional.json"]
+        clock[0] = NOW + dt.timedelta(seconds=21_600)
 
         receipt = store.submit(
             IDENTITY,
@@ -1203,13 +1392,14 @@ class HubTestStoreTests(unittest.TestCase):
         self.assertEqual(hub.create_calls, [])
 
     def test_fourth_distinct_attempt_is_rejected_without_persistence(self):
+        clock = [NOW]
         hub = InMemoryHub()
         store = HubTestStore(
             hub,
             repo_id="private/repo",
             release_config_path="sealed/release.json",
             gold_config_path="sealed/gold.jsonl",
-            now_provider=lambda: NOW,
+            now_provider=lambda: clock[0],
         )
         receipts = []
         for index in range(4):
@@ -1221,6 +1411,7 @@ class HubTestStoreTests(unittest.TestCase):
                 }
             ]
             receipts.append(store.submit(IDENTITY, META, predictions, METRICS))
+            clock[0] += dt.timedelta(seconds=21_600)
 
         self.assertEqual([r.accepted for r in receipts], [True, True, True, False])
         self.assertIsNone(receipts[-1].attempt)
@@ -1231,38 +1422,6 @@ class HubTestStoreTests(unittest.TestCase):
         )
         self.assertEqual(len(hub.create_calls), 3)
         self.assertEqual(len(store.account_history(IDENTITY)), 3)
-
-    def test_email_identity_receives_exactly_three_unique_attempts(self):
-        hub = InMemoryHub()
-        identity = TestIdentity.from_email("quota@example.org")
-        store = HubTestStore(
-            hub,
-            repo_id="private/repo",
-            release_config_path="sealed/release.json",
-            gold_config_path="sealed/gold.jsonl",
-            now_provider=lambda: NOW,
-        )
-
-        receipts = [
-            store.submit(
-                identity,
-                META,
-                [
-                    {
-                        "instance_id": "test-1",
-                        "answer": f"answer-{index}",
-                        "evidence": ["b1"],
-                    }
-                ],
-                METRICS,
-            )
-            for index in range(4)
-        ]
-
-        self.assertEqual(
-            [receipt.accepted for receipt in receipts], [True, True, True, False]
-        )
-        self.assertEqual([receipt.attempt for receipt in receipts], [1, 2, 3, None])
 
     def test_uncertain_postcommit_error_deduplicates_by_canonical_hash(self):
         hub = InMemoryHub()
@@ -1327,13 +1486,14 @@ class HubTestStoreTests(unittest.TestCase):
         self.assertEqual(len(hub.create_calls), 1)
 
     def test_postcommit_reload_rejects_invalid_unchanged_provisional_state(self):
+        clock = [NOW]
         hub = InMemoryHub()
         store = HubTestStore(
             hub,
             repo_id="private/repo",
             release_config_path="sealed/release.json",
             gold_config_path="sealed/gold.jsonl",
-            now_provider=lambda: NOW,
+            now_provider=lambda: clock[0],
         )
         store.submit(IDENTITY, META, PREDICTIONS, METRICS)
 
@@ -1346,6 +1506,7 @@ class HubTestStoreTests(unittest.TestCase):
 
         hub.mutate_after_apply = tamper_inherited_provisional
         committed_before = len(hub.create_calls)
+        clock[0] = NOW + dt.timedelta(seconds=21_600)
 
         with self.assertRaisesRegex(TestStoreError, "temporarily unavailable"):
             store.submit(

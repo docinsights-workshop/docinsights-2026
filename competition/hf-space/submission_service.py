@@ -16,6 +16,7 @@ from huggingface_hub.errors import EntryNotFoundError
 
 from scoring import (
     SubmissionError,
+    expand_predictions,
     load_jsonl_text,
     normalize_participant_names,
     parse_submission_text,
@@ -32,8 +33,10 @@ from test_policy import (
     TestIdentity,
     TestPolicyError,
     TestReleasePolicy,
+    next_eligible_at,
     participant_test_response,
 )
+from test_store import TestCooldownError
 
 
 TEST_UNAVAILABLE = "Test submission is temporarily unavailable."
@@ -225,6 +228,7 @@ class SubmissionService:
             text = upload_path.read_text(encoding="utf-8")
             predictions = parse_submission_text(text)
             validate_test_predictions(predictions)
+            predictions = expand_predictions(predictions, config.labels)
         except Exception:
             raise SubmissionError("Test submission could not be accepted.") from None
 
@@ -234,6 +238,8 @@ class SubmissionService:
                 server_metadata,
                 predictions,
             )
+        except TestCooldownError as exc:
+            raise SubmissionError(str(exc)) from None
         except Exception:
             raise SubmissionError(TEST_UNAVAILABLE) from None
         if existing is not None:
@@ -246,6 +252,8 @@ class SubmissionService:
             raise SubmissionError("Test submission could not be accepted.")
         try:
             metrics = score_predictions(predictions, config.labels)
+        except TestCooldownError as exc:
+            raise SubmissionError(str(exc)) from None
         except Exception:
             raise SubmissionError("Test submission could not be accepted.") from None
         finally:
@@ -284,7 +292,10 @@ class SubmissionService:
         identity = _test_identity(oauth_profile, contact_email)
         try:
             attempts = self.test_store.account_history(identity)
-            return [_history_response(attempt) for attempt in attempts]
+            responses = [_history_response(attempt) for attempt in attempts]
+            if responses:
+                responses[-1]["next_eligible_at"] = next_eligible_at(attempts)
+            return responses
         except Exception:
             raise SubmissionError(
                 "Test submission history is temporarily unavailable."
@@ -304,11 +315,9 @@ def _split(value) -> SubmissionSplit:
 
 
 def _test_identity(profile, contact_email) -> TestIdentity:
+    del contact_email
     if profile is None:
-        try:
-            return TestIdentity.from_email(contact_email)
-        except (TestPolicyError, TypeError, ValueError) as exc:
-            raise SubmissionError(str(exc)) from None
+        raise SubmissionError("Sign in with Hugging Face to use test submissions.")
     try:
         data = dict(profile)
     except (TestPolicyError, TypeError, ValueError):
@@ -316,10 +325,7 @@ def _test_identity(profile, contact_email) -> TestIdentity:
             "A complete verified Hugging Face profile is required when sign-in data is present."
         ) from None
     if not data:
-        try:
-            return TestIdentity.from_email(contact_email)
-        except (TestPolicyError, TypeError, ValueError) as exc:
-            raise SubmissionError(str(exc)) from None
+        raise SubmissionError("Sign in with Hugging Face to use test submissions.")
     try:
         return TestIdentity.from_profile(data)
     except (TestPolicyError, TypeError, ValueError):

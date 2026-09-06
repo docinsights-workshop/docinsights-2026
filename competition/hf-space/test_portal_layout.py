@@ -60,7 +60,7 @@ class PortalLayoutTests(unittest.TestCase):
 
         self.assertIn("Validation (development)", serialized)
         self.assertIn("Test (final)", serialized)
-        self.assertIn("Sign in with Hugging Face (recommended)", serialized)
+        self.assertIn("Sign in with Hugging Face (required)", serialized)
         self.assertIn("My test submissions", serialized)
 
         split_selectors = [
@@ -243,13 +243,17 @@ class PortalLayoutTests(unittest.TestCase):
         readme = (Path(__file__).parent / "README.md").read_text(encoding="utf-8")
 
         self.assertIn("The held-out test inputs have been released", readme)
-        self.assertIn("3 accepted test submissions per identity", readme)
+        self.assertIn("3 accepted test submissions per Hugging Face account", readme)
+        self.assertIn("at least six hours", readme)
         self.assertIn(
             "Joint Exact Accuracy, Answer Exact Accuracy, and Evidence F1 (macro)",
             readme,
         )
-        self.assertIn("private to that submitting identity", readme)
-        self.assertIn("alternate anonymous emails", readme)
+        self.assertIn("private to that signed-in account", readme)
+        self.assertIn("Partial submissions are allowed", readme)
+        self.assertIn("missing tasks count wrong", readme)
+        self.assertIn("`answer: null`", readme)
+        self.assertIn("`evidence: []`", readme)
         self.assertIn("provisional public ranks use only attempt 1", readme)
         self.assertIn("display no metrics", readme)
         self.assertIn("best of all 3 eligible attempts", readme)

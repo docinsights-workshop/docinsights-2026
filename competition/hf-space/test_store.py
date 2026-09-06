@@ -25,11 +25,13 @@ from test_contract import (
 )
 from test_policy import (
     OFFICIAL_TEST_CLOSE_AT,
+    TEST_ATTEMPT_COOLDOWN_SECONDS,
     TestIdentity,
     TestPolicyError,
     TestReleasePolicy,
     account_key,
     canonical_submission_hash,
+    next_eligible_at,
     rank_attempts,
     select_best_attempt,
 )
@@ -102,6 +104,17 @@ class TestStoreError(RuntimeError):
     """Value-free public failure raised by private test persistence."""
 
 
+class TestCooldownError(TestStoreError):
+    """Safe participant refusal for a distinct attempt inside the cooldown."""
+
+    def __init__(self, next_eligible_at_value: str):
+        self.next_eligible_at = next_eligible_at_value
+        super().__init__(
+            "A distinct test attempt may be submitted at or after "
+            f"{next_eligible_at_value}. Exact retries remain available."
+        )
+
+
 @dataclass(frozen=True)
 class TestReceipt:
     accepted: bool
@@ -170,6 +183,7 @@ class HubTestStore:
             try:
                 snapshot = self._load_snapshot(key)
                 _verify_release(snapshot, normalized_metadata)
+                _require_complete_prediction_ids(normalized_predictions, snapshot.gold)
                 submission_hash = canonical_submission_hash(
                     normalized_predictions,
                     "test",
@@ -209,6 +223,7 @@ class HubTestStore:
                 # therefore cannot carry a stale decision across the hard close.
                 commit_now = self.now_provider()
                 _require_open(snapshot.policy, commit_now)
+                _require_cooldown(snapshot.attempts, commit_now)
                 accepted_at = _accepted_at(commit_now)
                 record = _attempt_record(
                     identity=identity,
@@ -306,6 +321,8 @@ class HubTestStore:
                 raise TestStoreError("Test submissions are not open.") from None
             except _InvalidSubmission:
                 raise TestStoreError("Test submission could not be accepted.") from None
+            except TestCooldownError:
+                raise
             except Exception:
                 raise TestStoreError(
                     "Test submission is temporarily unavailable."
@@ -346,6 +363,10 @@ class HubTestStore:
                 )
             if not attempts:
                 raise _Unavailable()
+            for attempt in attempts:
+                _require_complete_prediction_ids(
+                    attempt.get("predictions"), snapshot.gold
+                )
             best = select_best_attempt(attempts)
             expected_accounts.append(
                 _organizer_account(key, snapshot.policy, attempts, best)
@@ -423,9 +444,13 @@ class HubTestStore:
             if existing is not None:
                 _require_retry_metadata(existing, normalized_metadata)
                 self._validate_complete_snapshot(snapshot, key)
+            else:
+                _require_cooldown(snapshot.attempts, self.now_provider())
             return _json_copy(existing) if existing is not None else None
         except _InvalidSubmission:
             raise TestStoreError("Test submission could not be accepted.") from None
+        except TestCooldownError:
+            raise
         except Exception:
             raise TestStoreError(
                 "Test submission is temporarily unavailable."
@@ -500,6 +525,7 @@ class HubTestStore:
             raise _Unavailable()
         attempts = []
         attempt_record_sha256 = {}
+        previous_submitted = None
         for expected_number, reference in enumerate(references, start=1):
             if not isinstance(reference, Mapping):
                 raise _Unavailable()
@@ -525,6 +551,14 @@ class HubTestStore:
                 or reference.get("record_sha256") != record_sha256
             ):
                 raise _Unavailable()
+            submitted = _accepted_datetime(record.get("submitted_at"))
+            if (
+                previous_submitted is not None
+                and (submitted - previous_submitted).total_seconds()
+                < TEST_ATTEMPT_COOLDOWN_SECONDS
+            ):
+                raise _Unavailable()
+            previous_submitted = submitted
             attempts.append(record)
             attempt_record_sha256[submission_id] = record_sha256
         if (
@@ -746,6 +780,13 @@ def _parse_datetime(value):
         raise _Unavailable() from None
 
 
+def _accepted_datetime(value) -> dt.datetime:
+    parsed = _parse_datetime(value)
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise _Unavailable()
+    return parsed.astimezone(dt.timezone.utc)
+
+
 def _release_policy(raw: bytes) -> TestReleasePolicy:
     value = _decode_json(raw)
     if not isinstance(value, dict):
@@ -785,6 +826,21 @@ def _validate_gold(raw: bytes):
         raise _Unavailable()
 
 
+def _require_complete_prediction_ids(predictions, gold_raw: bytes):
+    try:
+        gold_rows = [
+            json.loads(line)
+            for line in gold_raw.decode("utf-8").splitlines()
+            if line.strip()
+        ]
+        gold_ids = [row["instance_id"] for row in gold_rows]
+        prediction_ids = [row["instance_id"] for row in predictions]
+    except (KeyError, TypeError, UnicodeDecodeError, json.JSONDecodeError):
+        raise _Unavailable() from None
+    if len(gold_ids) != len(set(gold_ids)) or prediction_ids != gold_ids:
+        raise _InvalidSubmission()
+
+
 def _require_open(policy: TestReleasePolicy, now):
     try:
         policy.require_open(now)
@@ -794,6 +850,21 @@ def _require_open(policy: TestReleasePolicy, now):
         raise _Unavailable() from None
     if now >= OFFICIAL_TEST_CLOSE_AT:
         raise _ReleaseClosed()
+
+
+def _require_cooldown(attempts, now):
+    if not attempts:
+        return
+    eligible_text = next_eligible_at(attempts)
+    eligible = _parse_datetime(eligible_text)
+    if (
+        not isinstance(now, dt.datetime)
+        or now.tzinfo is None
+        or now.utcoffset() is None
+    ):
+        raise _InvalidSubmission()
+    if now.astimezone(dt.timezone.utc) < eligible:
+        raise TestCooldownError(eligible_text)
 
 
 def _verify_release(snapshot: _Snapshot, metadata: Mapping):

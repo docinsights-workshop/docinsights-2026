@@ -4,6 +4,8 @@ import json
 import re
 from pathlib import Path
 
+from test_contract import TestContractError, validate_test_predictions
+
 
 class SubmissionError(ValueError):
     pass
@@ -41,6 +43,8 @@ def _decimal(value):
 
 
 def answers_match(prediction, reference):
+    if prediction is None:
+        return False
     pred_decimal = _decimal(prediction)
     ref_decimal = _decimal(reference)
     if pred_decimal is not None and ref_decimal is not None:
@@ -48,8 +52,8 @@ def answers_match(prediction, reference):
     return normalize_answer(prediction) == normalize_answer(reference)
 
 
-def evidence_set(values):
-    if not isinstance(values, list) or not values:
+def evidence_set(values, *, allow_empty=False):
+    if not isinstance(values, list) or (not values and not allow_empty):
         raise SubmissionError("evidence must be a non-empty list of block ids")
     normalized = []
     for value in values:
@@ -60,7 +64,7 @@ def evidence_set(values):
 
 
 def evidence_f1(predicted, reference):
-    pred = evidence_set(predicted)
+    pred = evidence_set(predicted, allow_empty=True)
     gold = evidence_set(reference)
     if not pred and not gold:
         return 1.0
@@ -108,42 +112,52 @@ def parse_submission_text(text):
 
 
 def validate_predictions(rows, expected_ids=None):
-    if not rows:
-        raise SubmissionError("Submission has no predictions.")
-    seen = set()
-    for index, row in enumerate(rows):
-        if not isinstance(row, dict):
-            raise SubmissionError(f"Prediction at index {index} must be a JSON object.")
-        for key in ["instance_id", "answer", "evidence"]:
-            if key not in row:
-                raise SubmissionError(f"Prediction at index {index} is missing {key}.")
-        instance_id = row["instance_id"]
-        if not isinstance(instance_id, str) or not instance_id.strip():
-            raise SubmissionError(
-                f"Prediction at index {index} has an invalid instance_id."
-            )
-        if instance_id in seen:
-            raise SubmissionError(f"Duplicate instance_id: {instance_id}")
-        seen.add(instance_id)
-        if not isinstance(row["answer"], str):
-            raise SubmissionError(
-                f"Prediction for {instance_id} must have a string answer."
-            )
-        evidence_set(row["evidence"])
+    try:
+        validate_test_predictions(rows)
+    except TestContractError:
+        raise SubmissionError("Submission predictions are invalid.") from None
+    seen = {row["instance_id"] for row in rows}
 
     if expected_ids is not None:
         expected = set(expected_ids)
-        missing = sorted(expected - seen)
         extra = sorted(seen - expected)
-        if missing:
-            raise SubmissionError(
-                f"Missing predictions for {len(missing)} ids: {', '.join(missing[:5])}"
-            )
         if extra:
             raise SubmissionError(
                 f"Unexpected prediction ids ({len(extra)}): {', '.join(extra[:5])}"
             )
     return True
+
+
+def expand_predictions(rows, labels):
+    """Expand a nonempty prediction subset to the complete deterministic gold order."""
+
+    validate_predictions(rows)
+    if not isinstance(labels, list) or not labels:
+        raise SubmissionError("Gold labels are invalid.")
+    gold_ids = []
+    seen_gold = set()
+    for label in labels:
+        if (
+            not isinstance(label, dict)
+            or set(label) != {"instance_id", "answer", "evidence"}
+            or not isinstance(label.get("instance_id"), str)
+            or not label["instance_id"].strip()
+            or label["instance_id"] in seen_gold
+            or not isinstance(label.get("answer"), str)
+        ):
+            raise SubmissionError("Gold labels are invalid.")
+        evidence_set(label.get("evidence"))
+        seen_gold.add(label["instance_id"])
+        gold_ids.append(label["instance_id"])
+    validate_predictions(rows, expected_ids=seen_gold)
+    supplied = {row["instance_id"]: row for row in rows}
+    return [
+        supplied.get(
+            instance_id,
+            {"instance_id": instance_id, "answer": None, "evidence": []},
+        )
+        for instance_id in gold_ids
+    ]
 
 
 def load_jsonl_text(text):
@@ -168,8 +182,8 @@ def load_jsonl_file(path):
 
 def score_predictions(rows, labels):
     gold_by_id = {row["instance_id"]: row for row in labels}
-    validate_predictions(rows, expected_ids=gold_by_id.keys())
-    predictions = {row["instance_id"]: row for row in rows}
+    expanded = expand_predictions(rows, labels)
+    predictions = {row["instance_id"]: row for row in expanded}
 
     answer_scores = []
     evidence_exact_scores = []
@@ -180,7 +194,7 @@ def score_predictions(rows, labels):
     for instance_id, gold in gold_by_id.items():
         pred = predictions[instance_id]
         answer_score = float(answers_match(pred["answer"], gold["answer"]))
-        pred_evidence = evidence_set(pred["evidence"])
+        pred_evidence = evidence_set(pred["evidence"], allow_empty=True)
         gold_evidence = evidence_set(gold["evidence"])
         evidence_exact = float(pred_evidence == gold_evidence)
         ev_f1 = evidence_f1(pred["evidence"], gold["evidence"])

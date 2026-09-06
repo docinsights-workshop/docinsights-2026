@@ -2,12 +2,14 @@ import datetime as dt
 import unittest
 
 from test_policy import (
+    TEST_ATTEMPT_COOLDOWN_SECONDS,
     TestIdentity,
     TestPolicyError,
     TestReleasePolicy,
     account_key,
     canonical_submission_hash,
     normalize_contact_email,
+    next_eligible_at,
     participant_test_response,
     select_best_attempt,
 )
@@ -46,6 +48,25 @@ FIXTURE_ATTEMPTS = [
 
 
 class TestPolicyTests(unittest.TestCase):
+    def test_six_hour_cooldown_constant_and_next_eligible_timestamp_are_exact(self):
+        self.assertEqual(TEST_ATTEMPT_COOLDOWN_SECONDS, 21_600)
+        self.assertEqual(
+            next_eligible_at(
+                [
+                    {
+                        "submitted_at": "2026-09-05T10:00:00Z",
+                        "submission_id": "first",
+                    },
+                    {
+                        "submitted_at": "2026-09-05T18:30:00+01:00",
+                        "submission_id": "second",
+                    },
+                ]
+            ),
+            "2026-09-05T23:30:00Z",
+        )
+        self.assertIsNone(next_eligible_at([]))
+
     def test_huggingface_identity_uses_stable_subject_and_verified_profile_email(self):
         first = TestIdentity.from_profile(
             {
@@ -80,37 +101,18 @@ class TestPolicyTests(unittest.TestCase):
             ),
         )
 
-    def test_email_identity_normalizes_contact_and_uses_kind_scoped_quota_key(self):
-        identity = TestIdentity.from_email("  Person+Paper@Example.ORG ")
-
-        self.assertEqual(
-            identity,
+    def test_email_identity_kind_is_rejected(self):
+        with self.assertRaisesRegex(TestPolicyError, "identity is invalid"):
             TestIdentity(
                 identity_kind="email",
                 identity_subject="person+paper@example.org",
                 hf_username="Not signed in",
                 contact_email="person+paper@example.org",
                 email_verified=False,
-            ),
-        )
-        self.assertEqual(normalize_contact_email(" A@Example.org "), "a@example.org")
-        self.assertEqual(
-            account_key(TestIdentity.from_email("a@example.org")),
-            "c8f9c32bd6374841a1a46c5b33048abd26ec1d020549207ad0eab95562f487c4",
-        )
-        signed_in_same_subject = TestIdentity(
-            identity_kind="huggingface",
-            identity_subject="a@example.org",
-            hf_username="account-a",
-            contact_email="a@example.org",
-            email_verified=True,
-        )
-        self.assertNotEqual(
-            account_key(signed_in_same_subject),
-            account_key(TestIdentity.from_email("a@example.org")),
-        )
+            )
 
-    def test_email_syntax_rejects_ambiguous_or_non_normalized_identity_values(self):
+    def test_verified_profile_email_normalization_uses_conservative_syntax(self):
+        self.assertEqual(normalize_contact_email(" A@Example.org "), "a@example.org")
         for value in (
             "missing-at.example.org",
             "two@@example.org",
@@ -124,7 +126,7 @@ class TestPolicyTests(unittest.TestCase):
         ):
             with self.subTest(value=value):
                 with self.assertRaisesRegex(TestPolicyError, "valid contact email"):
-                    TestIdentity.from_email(value)
+                    normalize_contact_email(value)
 
     def test_missing_verified_email_is_rejected(self):
         with self.assertRaisesRegex(TestPolicyError, "verified email"):
@@ -270,6 +272,28 @@ class TestPolicyTests(unittest.TestCase):
             },
         )
         self.assertNotIn("per_example", response)
+
+    def test_canonical_hash_keeps_null_abstention_distinct_from_string_none(self):
+        identity = TestIdentity.from_profile(
+            {
+                "sub": "stable-1",
+                "preferred_username": "user",
+                "email": "user@example.org",
+                "email_verified": True,
+            }
+        )
+        metadata = {
+            "team": "Team",
+            "participant_names": "Alice",
+            "submission_name": "Run",
+        }
+        null_rows = [{"instance_id": "one", "answer": None, "evidence": []}]
+        text_rows = [{"instance_id": "one", "answer": "none", "evidence": []}]
+
+        self.assertNotEqual(
+            canonical_submission_hash(null_rows, "test", "release", identity, metadata),
+            canonical_submission_hash(text_rows, "test", "release", identity, metadata),
+        )
 
     def test_attempt_two_feedback_withholds_every_metric(self):
         response = participant_test_response(2, METRICS, "receipt-2")

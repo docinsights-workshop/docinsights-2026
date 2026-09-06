@@ -2,6 +2,7 @@ import unittest
 
 from scoring import (
     SubmissionError,
+    expand_predictions,
     leaderboard_row,
     normalize_participant_names,
     rank_leaderboard,
@@ -351,6 +352,86 @@ class LeaderboardRankingTests(unittest.TestCase):
 
 
 class JointMetricScoringTests(unittest.TestCase):
+    def test_partial_predictions_expand_in_gold_order_and_score_full_denominator(self):
+        labels = [
+            {"instance_id": "one", "answer": "1", "evidence": ["b1"]},
+            {"instance_id": "two", "answer": "2", "evidence": ["b2"]},
+            {"instance_id": "three", "answer": "3", "evidence": ["b3"]},
+        ]
+        partial = [{"instance_id": "two", "answer": "2", "evidence": ["b2"]}]
+
+        expanded = expand_predictions(partial, labels)
+        metrics = score_predictions(partial, labels)
+
+        self.assertEqual(
+            expanded,
+            [
+                {"instance_id": "one", "answer": None, "evidence": []},
+                {"instance_id": "two", "answer": "2", "evidence": ["b2"]},
+                {"instance_id": "three", "answer": None, "evidence": []},
+            ],
+        )
+        self.assertEqual(metrics["examples"], 3)
+        self.assertEqual(metrics["joint_accuracy"], 0.333333)
+        self.assertEqual(metrics["answer_accuracy"], 0.333333)
+        self.assertEqual(metrics["evidence_exact_match"], 0.333333)
+        self.assertEqual(metrics["evidence_f1"], 0.333333)
+
+    def test_null_answer_and_empty_evidence_are_zero_scoring_abstentions(self):
+        labels = [{"instance_id": "one", "answer": "none", "evidence": ["b1"]}]
+        abstention = [{"instance_id": "one", "answer": None, "evidence": []}]
+
+        metrics = score_predictions(abstention, labels)
+
+        self.assertEqual(
+            {
+                name: metrics[name]
+                for name in (
+                    "joint_accuracy",
+                    "answer_accuracy",
+                    "evidence_exact_match",
+                    "evidence_f1",
+                )
+            },
+            {
+                "joint_accuracy": 0.0,
+                "answer_accuracy": 0.0,
+                "evidence_exact_match": 0.0,
+                "evidence_f1": 0.0,
+            },
+        )
+
+    def test_partial_and_explicit_abstentions_expand_identically(self):
+        labels = [
+            {"instance_id": "one", "answer": "1", "evidence": ["b1"]},
+            {"instance_id": "two", "answer": "2", "evidence": ["b2"]},
+        ]
+        partial = [{"instance_id": "one", "answer": "1", "evidence": ["b1"]}]
+        explicit = [
+            {"instance_id": "one", "answer": "1", "evidence": ["b1"]},
+            {"instance_id": "two", "answer": None, "evidence": []},
+        ]
+
+        self.assertEqual(
+            expand_predictions(partial, labels),
+            expand_predictions(explicit, labels),
+        )
+
+    def test_partial_contract_rejects_unknown_and_duplicate_ids(self):
+        labels = [{"instance_id": "one", "answer": "1", "evidence": ["b1"]}]
+        cases = (
+            [{"instance_id": "unknown", "answer": None, "evidence": []}],
+            [
+                {"instance_id": "one", "answer": None, "evidence": []},
+                {"instance_id": "one", "answer": "1", "evidence": ["b1"]},
+            ],
+        )
+
+        for rows in cases:
+            with self.subTest(rows=rows):
+                with self.assertRaises(SubmissionError):
+                    expand_predictions(rows, labels)
+
     def test_official_shared_scorer_emits_joint_aggregate_and_per_example_metric(self):
         metrics = score_predictions(
             [{"instance_id": "one", "answer": "10", "evidence": ["b01"]}],

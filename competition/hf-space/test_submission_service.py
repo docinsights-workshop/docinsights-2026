@@ -14,7 +14,7 @@ import app
 from scoring import SubmissionError
 from submission_service import HubTestConfigLoader, SubmissionService, TrustedTestConfig
 from test_policy import TestIdentity, TestReleasePolicy
-from test_store import TestReceipt, TestStoreError
+from test_store import TestCooldownError, TestReceipt, TestStoreError
 
 
 VALIDATION_LABELS = [
@@ -25,7 +25,6 @@ VALIDATION_ROWS = [
         "instance_id": "val-1",
         "answer": "42",
         "evidence": ["b1"],
-        "legacy_extension": "preserved",
     },
 ]
 NOW = dt.datetime(2026, 9, 5, 12, 0, tzinfo=dt.timezone.utc)
@@ -181,6 +180,47 @@ def configured_service(store=None, loader=None):
 
 
 class LegacyValidationCharacterizationTests(unittest.TestCase):
+    def test_validation_partial_submission_uses_full_denominator_and_persists_expansion(
+        self,
+    ):
+        labels = [
+            {"instance_id": "val-1", "answer": "42", "evidence": ["b1"]},
+            {"instance_id": "val-2", "answer": "7", "evidence": ["b2"]},
+        ]
+        upload = test_file(
+            [{"instance_id": "val-1", "answer": "42", "evidence": ["b1"]}]
+        )
+        self.addCleanup(Path(upload.name).unlink, missing_ok=True)
+        persisted = []
+
+        def persist(rows, *args, **kwargs):
+            persisted.append(rows)
+            return "saved"
+
+        with (
+            patch.object(app, "_load_gold_rows", return_value=labels),
+            patch.object(app, "_persist_submission", side_effect=persist),
+        ):
+            result = app.evaluate_submission(
+                upload,
+                "Team",
+                "lead@example.org",
+                "partial",
+                "Alice",
+            )
+
+        self.assertEqual(result["value"]["joint_accuracy"], 0.5)
+        self.assertEqual(result["value"]["examples"], 2)
+        self.assertEqual(
+            persisted,
+            [
+                [
+                    {"instance_id": "val-1", "answer": "42", "evidence": ["b1"]},
+                    {"instance_id": "val-2", "answer": None, "evidence": []},
+                ]
+            ],
+        )
+
     def test_validation_leaderboard_defines_metrics_and_joint_first_ranking(self):
         with patch.object(app, "_load_leaderboard_rows", return_value=[]):
             rendered = app.leaderboard_html()
@@ -364,6 +404,25 @@ class LegacyValidationCharacterizationTests(unittest.TestCase):
 
 
 class SplitAwareServiceTests(unittest.TestCase):
+    def test_cooldown_refusal_happens_before_scoring_or_commit(self):
+        class CooldownStore(RecordingStore):
+            def find_exact_attempt(self, identity, metadata, predictions):
+                raise TestCooldownError("2026-09-05T18:00:00Z")
+
+        upload = test_file()
+        self.addCleanup(Path(upload.name).unlink, missing_ok=True)
+        store = CooldownStore()
+        service = configured_service(store=store)
+
+        with (
+            patch("submission_service.score_predictions") as scorer,
+            self.assertRaisesRegex(SubmissionError, "2026-09-05T18:00:00Z"),
+        ):
+            service.submit_for_split("test", upload, TEST_META, PROFILE)
+
+        scorer.assert_not_called()
+        self.assertEqual(store.submissions, [])
+
     def test_validation_maintenance_gate_rejects_before_file_or_submitter_access(self):
         unreadable = FileProbe()
         submitter_calls = []
@@ -438,35 +497,18 @@ class SplitAwareServiceTests(unittest.TestCase):
         self.assertEqual(result["value"]["answer_accuracy"], 1.0)
         self.assertEqual(result["value"]["message"], "legacy persistence")
 
-    def test_signed_out_test_requires_valid_contact_before_reading_file(self):
+    def test_signed_out_test_requires_hugging_face_before_reading_file(self):
         unreadable = FileProbe()
 
-        for contact in ("", "not-an-email"):
-            with self.subTest(contact=contact):
-                with self.assertRaisesRegex(SubmissionError, "valid contact email"):
-                    configured_service().submit_for_split(
-                        "test", unreadable, {**TEST_META, "contact": contact}, None
-                    )
+        with self.assertRaisesRegex(SubmissionError, "Sign in with Hugging Face"):
+            configured_service().submit_for_split(
+                "test",
+                unreadable,
+                {**TEST_META, "contact": "valid@example.org"},
+                None,
+            )
 
         self.assertFalse(unreadable.was_read)
-
-    def test_signed_out_test_uses_normalized_email_identity(self):
-        upload = test_file()
-        self.addCleanup(Path(upload.name).unlink, missing_ok=True)
-        store = RecordingStore()
-
-        result = configured_service(store=store).submit_for_split(
-            "test",
-            upload,
-            {**TEST_META, "contact": "  Anonymous+Team@Example.ORG "},
-            None,
-        )
-
-        self.assertTrue(result["accepted"])
-        self.assertEqual(
-            store.submissions[0]["identity"],
-            TestIdentity.from_email("anonymous+team@example.org"),
-        )
 
     def test_nonempty_partial_oauth_never_falls_back_to_typed_email(self):
         unreadable = FileProbe()
@@ -616,6 +658,42 @@ class SplitAwareServiceTests(unittest.TestCase):
         self.assertEqual(recorded["metrics"]["evidence_f1"], 1.0)
         self.assertEqual(recorded["predictions"], TEST_ROWS)
         self.assertNotIn("now", recorded)
+
+    def test_test_partial_submission_is_expanded_before_hash_score_and_store(self):
+        labels = [
+            {"instance_id": "test-1", "answer": "42", "evidence": ["b1"]},
+            {"instance_id": "test-2", "answer": "7", "evidence": ["b2"]},
+        ]
+        upload = test_file(
+            [{"instance_id": "test-1", "answer": "wrong", "evidence": []}]
+        )
+        self.addCleanup(Path(upload.name).unlink, missing_ok=True)
+        store = RecordingStore()
+        service = configured_service(
+            store=store,
+            loader=lambda now: TrustedTestConfig(
+                policy=TRUSTED_POLICY,
+                labels=labels,
+                scoring_gold_sha256=TRUSTED_POLICY.gold_sha256,
+                private_revision="e" * 40,
+                public_revision="f" * 40,
+                public_repo_id="public/repo",
+                task_manifest_path="test/tasks.jsonl",
+            ),
+        )
+
+        result = service.submit_for_split("test", upload, TEST_META, PROFILE)
+
+        self.assertEqual(
+            store.submissions[0]["predictions"],
+            [
+                {"instance_id": "test-1", "answer": "wrong", "evidence": []},
+                {"instance_id": "test-2", "answer": None, "evidence": []},
+            ],
+        )
+        self.assertEqual(result["joint_accuracy"], 0.0)
+        self.assertEqual(result["answer_accuracy"], 0.0)
+        self.assertEqual(result["evidence_f1"], 0.0)
 
     def test_attempt_two_direct_response_withholds_all_metrics(self):
         upload = test_file()
@@ -1041,23 +1119,21 @@ class SplitAwareServiceTests(unittest.TestCase):
                     "score": "withheld",
                     "submission_name": "second",
                     "accepted_at": "2026-09-05T12:00:02Z",
+                    "next_eligible_at": "2026-09-05T18:00:02Z",
                 },
             ],
         )
         self.assertNotIn("secret-test-id", json.dumps(result))
         self.assertNotIn("private prediction", json.dumps(result))
 
-    def test_anonymous_history_uses_normalized_contact_email(self):
+    def test_anonymous_history_requires_hugging_face_before_private_state(self):
         store = RecordingStore()
         service = configured_service(store=store)
 
-        result = service.history_for_identity(" Anonymous@Example.ORG ", None)
+        with self.assertRaisesRegex(SubmissionError, "Sign in with Hugging Face"):
+            service.history_for_identity("anonymous@example.org", None)
 
-        self.assertEqual(
-            store.history_identity,
-            TestIdentity.from_email("anonymous@example.org"),
-        )
-        self.assertEqual(result[0]["receipt"], "receipt-1")
+        self.assertIsNone(store.history_identity)
 
     def test_service_genericizes_private_loader_and_store_failures(self):
         secrets = "secret@example.org private-answer score=0.25"

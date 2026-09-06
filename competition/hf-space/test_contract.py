@@ -237,10 +237,10 @@ def validate_test_predictions(rows) -> None:
             or not identifier.strip()
             or len(identifier) > MAX_INSTANCE_ID_CHARACTERS
             or identifier in identifiers
-            or not isinstance(answer, str)
-            or len(answer) > MAX_ANSWER_CHARACTERS
+            or (answer is not None and not isinstance(answer, str))
+            or (isinstance(answer, str) and len(answer) > MAX_ANSWER_CHARACTERS)
             or not isinstance(evidence, list)
-            or not 1 <= len(evidence) <= MAX_EVIDENCE_IDS
+            or len(evidence) > MAX_EVIDENCE_IDS
             or any(
                 not isinstance(item, str)
                 or not item.strip()

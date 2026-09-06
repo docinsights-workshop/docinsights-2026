@@ -17,6 +17,7 @@ from huggingface_hub.utils import EntryNotFoundError, RepositoryNotFoundError
 
 from scoring import (
     SubmissionError,
+    expand_predictions,
     leaderboard_identity,
     leaderboard_row,
     load_jsonl_text,
@@ -1746,6 +1747,7 @@ def evaluate_submission(
         text = Path(file_obj.name).read_text(encoding="utf-8")
         rows = parse_submission_text(text)
         labels = _load_gold_rows()
+        rows = expand_predictions(rows, labels)
         metrics = score_validation_predictions(rows, labels)
         message = _persist_submission(
             rows,
@@ -1857,12 +1859,13 @@ def submit_predictions(
 
 
 def _masked_email(profile, contact_email):
+    del contact_email
     try:
         data = dict(profile) if profile is not None else {}
     except (TypeError, ValueError):
         data = {}
     try:
-        email = normalize_contact_email(data.get("email") if data else contact_email)
+        email = normalize_contact_email(data.get("email"))
     except TestPolicyError as exc:
         raise gr.Error(str(exc)) from None
     local, domain = email.rsplit("@", maxsplit=1)
@@ -1873,7 +1876,10 @@ def _masked_email(profile, contact_email):
 
 def _test_history_html(attempts, masked_email):
     rows = []
+    next_eligible = None
     for attempt in attempts:
+        if attempt.get("next_eligible_at"):
+            next_eligible = str(attempt["next_eligible_at"])
         number = int(attempt.get("attempt", 0))
         if number == 1:
             feedback = (
@@ -1898,8 +1904,16 @@ def _test_history_html(attempts, masked_email):
     if not rows:
         rows.append('<tr><td colspan="5">No accepted test submissions yet.</td></tr>')
     remaining = max(0, 3 - len(attempts))
+    cooldown = (
+        "<p>Next distinct attempt eligible at "
+        f"{html.escape(next_eligible)} UTC. Exact retries remain "
+        "available.</p>"
+        if next_eligible
+        else ""
+    )
     return f"""
     <p>Signed in as <strong>{html.escape(masked_email)}</strong>. {remaining} accepted attempts remaining.</p>
+    {cooldown}
     <div class="leaderboard-table-wrap">
         <table aria-label="My test submissions">
             <thead>
@@ -2110,11 +2124,12 @@ def _test_release_notice_html(
         'target="_blank" rel="noopener">participant guide</a> before uploading.</p>'
         f"{countdown}"
         '<p class="test-policy"><strong>Test policy:</strong> Up to '
-        "3 accepted test submissions per identity: Hugging Face account or normalized "
-        "contact email. Sign-in is recommended; alternate anonymous emails cannot be "
-        "prevented from obtaining separate quotas. Attempt 1 metrics—Joint Exact "
+        "3 accepted test submissions per Hugging Face account, with at least six hours "
+        "between distinct accepted attempts. Exact retries do not consume an attempt or "
+        "reset the interval. Partial submissions are allowed; missing tasks count wrong "
+        "against the full split. Use answer: null and evidence: [] to abstain. Attempt 1 metrics—Joint Exact "
         "Accuracy, Answer Exact Accuracy, and Evidence F1 (macro)—are private to that "
-        "submitting identity. Attempts 2–3 are accepted with their metrics withheld. During the "
+        "signed-in account. Attempts 2–3 are accepted with their metrics withheld. During the "
         "open window, provisional public ranks use only attempt 1 and display no metrics. "
         "After the window closes, the final ranking uses the best of all 3 eligible "
         "attempts.</p></div>"
@@ -2128,11 +2143,13 @@ def split_ui(split_label):
             gr.update(
                 value=(
                     "### Submit final test predictions\n"
-                    "Sign in with Hugging Face (recommended) to key attempts to your "
-                    "HF account; your verified profile email is used privately and any "
-                    "typed contact is ignored for identity. Signed-out users must enter "
-                    "a valid contact email and are keyed to that email. Alternate "
-                    "anonymous emails cannot be prevented from receiving separate quotas.\n\n"
+                    "Sign in with Hugging Face (required). Attempts are keyed to your "
+                    "immutable HF account subject; the typed contact remains available "
+                    "for team communication but does not control identity or quota. Up to "
+                    "three unique attempts are accepted, with at least six hours between "
+                    "distinct attempts. Partial submissions are allowed: missing tasks "
+                    "count wrong against the full denominator; use `answer: null` and "
+                    "`evidence: []` to abstain.\n\n"
                     f"{_test_release_notice_html()}"
                 )
             ),
@@ -2232,7 +2249,7 @@ with PortalBlocks(**blocks_options) as demo:
             label="Evaluation split",
             interactive=True,
         )
-        gr.LoginButton("Sign in with Hugging Face (recommended)")
+        gr.LoginButton("Sign in with Hugging Face (required)")
         with warnings.catch_warnings():
             warnings.filterwarnings(
                 "ignore",
@@ -2260,7 +2277,7 @@ with PortalBlocks(**blocks_options) as demo:
                 placeholder="A. Researcher, B. Researcher",
             )
             contact = gr.Textbox(
-                label="Contact email (required if signed out)",
+                label="Contact email",
                 placeholder="lead@example.org",
             )
             submission_name = gr.Textbox(
@@ -2324,14 +2341,14 @@ with PortalBlocks(**blocks_options) as demo:
     with gr.Group(visible=False, elem_id="test-history-section") as test_history_group:
         gr.Markdown(
             "### My test submissions\n"
-            "Signed-in history uses your Hugging Face account. Signed-out history uses "
-            "the normalized contact email entered above."
+            "Sign in with Hugging Face to retrieve receipts for your immutable account. "
+            "The next eligible UTC time is shown after an accepted attempt."
         )
         refresh_history = gr.Button("Refresh my submissions", variant="secondary")
         test_history = gr.HTML(
             value=(
-                "<p>Sign in with Hugging Face (recommended) or enter your contact "
-                "email to retrieve test receipts.</p>"
+                "<p>Sign in with Hugging Face (required) to retrieve your test "
+                "receipts.</p>"
             )
         )
 
