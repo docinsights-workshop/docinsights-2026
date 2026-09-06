@@ -128,6 +128,7 @@ class InMemoryHub:
         self._counter = 0
         self._sha = "sha-0"
         self._snapshots = {self._sha: dict(initial)}
+        self._parents = {self._sha: None}
         self.create_barrier = create_barrier
         self._barrier_waits_remaining = create_barrier.parties if create_barrier else 0
         self.conflicts = conflicts
@@ -140,6 +141,8 @@ class InMemoryHub:
         self.create_error = None
         self.create_error_after_apply = None
         self.mutate_after_apply = None
+        self.return_descendant = False
+        self.commit_history_calls = []
 
     @property
     def files(self):
@@ -187,6 +190,18 @@ class InMemoryHub:
             target.write_bytes(snapshot[filename])
             return str(target)
 
+    def list_repo_commits(self, repo_id, *, repo_type, revision):
+        with self._lock:
+            self.commit_history_calls.append((repo_id, repo_type, revision))
+            if revision not in self._snapshots:
+                raise EntryNotFoundError("not found")
+            commit_ids = []
+            current = revision
+            while current is not None:
+                commit_ids.append(SimpleNamespace(commit_id=current))
+                current = self._parents[current]
+            return commit_ids
+
     def create_commit(
         self,
         *,
@@ -233,6 +248,8 @@ class InMemoryHub:
             if self.mutate_after_apply is not None:
                 self.mutate_after_apply(updated, operations)
             self._advance(updated)
+            if self.return_descendant:
+                self._advance(dict(self._snapshots[self._sha]))
             if self.create_error_after_apply is not None:
                 error = self.create_error_after_apply
                 self.create_error_after_apply = None
@@ -240,9 +257,11 @@ class InMemoryHub:
             return SimpleNamespace(oid=self._sha)
 
     def _advance(self, files):
+        parent = self._sha
         next_number = int(self._sha.split("-")[-1]) + 1
         self._sha = f"sha-{next_number}"
         self._snapshots[self._sha] = files
+        self._parents[self._sha] = parent
 
 
 class HubTestStoreTests(unittest.TestCase):
@@ -441,6 +460,36 @@ class HubTestStoreTests(unittest.TestCase):
         self.assertEqual(first.submission_id, replay.submission_id)
         self.assertEqual(len(store.account_history(IDENTITY)), 1)
         self.assertEqual(len(hub.create_calls), 1)
+
+    def test_exact_retry_refuses_participant_metadata_drift(self):
+        hub = InMemoryHub()
+        store = HubTestStore(
+            hub,
+            repo_id="private/repo",
+            release_config_path="sealed/release.json",
+            gold_config_path="sealed/gold.jsonl",
+            now_provider=lambda: NOW,
+        )
+        first = store.submit(IDENTITY, META, PREDICTIONS, METRICS)
+
+        for field, value in (
+            ("team", "Changed Team"),
+            ("participant_names", "Changed Participant"),
+            ("submission_name", "changed run"),
+        ):
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(TestStoreError, "could not be accepted"):
+                    store.submit(
+                        IDENTITY,
+                        {**META, field: value},
+                        PREDICTIONS,
+                        METRICS,
+                    )
+
+        self.assertEqual(len(hub.create_calls), 1)
+        self.assertEqual(
+            store.account_history(IDENTITY)[0]["submission_id"], first.submission_id
+        )
 
     def test_exact_retry_lookup_returns_immutable_record_without_commit(self):
         hub = InMemoryHub()
@@ -650,6 +699,8 @@ class HubTestStoreTests(unittest.TestCase):
         self.assertEqual(
             readback_paths,
             {
+                "sealed/release.json",
+                "sealed/gold.jsonl",
                 next(
                     operation.path_in_repo
                     for operation in hub.create_calls[0]["operations"]
@@ -1156,6 +1207,53 @@ class HubTestStoreTests(unittest.TestCase):
             store.submit(IDENTITY, META, PREDICTIONS, METRICS)
 
         self.assertEqual(len(hub.create_calls), 1)
+
+    def test_returned_revision_must_be_direct_child_even_when_bytes_match(self):
+        hub = InMemoryHub()
+        hub.return_descendant = True
+        store = HubTestStore(
+            hub,
+            repo_id="private/repo",
+            release_config_path="sealed/release.json",
+            gold_config_path="sealed/gold.jsonl",
+            now_provider=lambda: NOW,
+        )
+
+        with self.assertRaisesRegex(TestStoreError, "temporarily unavailable"):
+            store.submit(IDENTITY, META, PREDICTIONS, METRICS)
+
+        self.assertEqual(len(hub.create_calls), 1)
+
+    def test_postcommit_reload_rejects_invalid_unchanged_provisional_state(self):
+        hub = InMemoryHub()
+        store = HubTestStore(
+            hub,
+            repo_id="private/repo",
+            release_config_path="sealed/release.json",
+            gold_config_path="sealed/gold.jsonl",
+            now_provider=lambda: NOW,
+        )
+        store.submit(IDENTITY, META, PREDICTIONS, METRICS)
+
+        def tamper_inherited_provisional(updated, operations):
+            projection = json.loads(updated["projections/test/public_provisional.json"])
+            projection["rows"][0]["joint_accuracy"] = 1.0
+            updated["projections/test/public_provisional.json"] = json.dumps(
+                projection
+            ).encode("utf-8")
+
+        hub.mutate_after_apply = tamper_inherited_provisional
+        committed_before = len(hub.create_calls)
+
+        with self.assertRaisesRegex(TestStoreError, "temporarily unavailable"):
+            store.submit(
+                IDENTITY,
+                {**META, "submission_name": "private run 2"},
+                [{"instance_id": "test-1", "answer": "second", "evidence": ["b1"]}],
+                METRICS,
+            )
+
+        self.assertEqual(len(hub.create_calls), committed_before + 1)
 
     def test_read_side_http_409_is_not_treated_as_a_cas_conflict(self):
         hub = InMemoryHub()
