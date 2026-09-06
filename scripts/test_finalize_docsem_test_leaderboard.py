@@ -95,24 +95,7 @@ def predictions(*, first="yes", second="2", first_evidence=None, second_evidence
 def score(rows, labels=None):
     # Fixtures call the frozen scorer directly, independently of the
     # finalizer's injected scorer dispatch.
-    metrics = fixture_score_predictions(
-        rows, list(LABELS if labels is None else labels)
-    )
-    if "joint_accuracy" in metrics:
-        return metrics
-    joint = []
-    per_example = []
-    for item in metrics["per_example"]:
-        exact = float(
-            item["answer_exact_match"] == 1.0 and item["evidence_exact_match"] == 1.0
-        )
-        joint.append(exact)
-        per_example.append({**item, "joint_exact_match": exact})
-    return {
-        **metrics,
-        "joint_accuracy": round(sum(joint) / metrics["examples"], 6),
-        "per_example": per_example,
-    }
+    return fixture_score_predictions(rows, list(LABELS if labels is None else labels))
 
 
 def attempt(
