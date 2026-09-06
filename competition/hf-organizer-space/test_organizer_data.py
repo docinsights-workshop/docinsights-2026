@@ -314,20 +314,38 @@ class ProducerHub:
 
     def __init__(self, root, files):
         self.root = Path(root)
-        self.files = dict(files)
         self.sha = "producer-sha-0"
+        self._snapshots = {self.sha: dict(files)}
+        self._parents = {self.sha: None}
         self.create_calls = []
 
+    @property
+    def files(self):
+        return dict(self._snapshots[self.sha])
+
     def repo_info(self, repo_id, *, repo_type, revision):
+        if revision != "main":
+            raise EntryNotFoundError("not found")
         return SimpleNamespace(sha=self.sha)
 
     def hf_hub_download(self, repo_id, filename, *, repo_type, revision):
-        if revision != self.sha or filename not in self.files:
+        snapshot = self._snapshots.get(revision)
+        if snapshot is None or filename not in snapshot:
             raise EntryNotFoundError("not found")
         destination = self.root / filename
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(self.files[filename])
+        destination.write_bytes(snapshot[filename])
         return str(destination)
+
+    def list_repo_commits(self, repo_id, *, repo_type, revision):
+        if revision not in self._snapshots:
+            raise EntryNotFoundError("not found")
+        commits = []
+        current = revision
+        while current is not None:
+            commits.append(SimpleNamespace(commit_id=current))
+            current = self._parents[current]
+        return commits
 
     def create_commit(
         self,
@@ -341,12 +359,16 @@ class ProducerHub:
     ):
         if parent_commit != self.sha:
             raise AssertionError("producer fixture requires the exact parent")
+        updated = dict(self._snapshots[self.sha])
         for operation in operations:
-            self.files[operation.path_in_repo] = operation.path_or_fileobj
+            updated[operation.path_in_repo] = operation.path_or_fileobj
         self.create_calls.append(
             tuple(operation.path_in_repo for operation in operations)
         )
-        self.sha = "producer-sha-1"
+        parent = self.sha
+        self.sha = f"producer-sha-{len(self._snapshots)}"
+        self._snapshots[self.sha] = updated
+        self._parents[self.sha] = parent
         return SimpleNamespace(oid=self.sha)
 
 
