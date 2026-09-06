@@ -45,7 +45,7 @@ ID_A1 = "11111111-1111-4111-8111-111111111111"
 ID_A2 = "22222222-2222-4222-8222-222222222222"
 ID_B1 = "33333333-3333-4333-8333-333333333333"
 RELEASE_STATE = {
-    "schema_version": 2,
+    "schema_version": 3,
     "split": "test",
     "release_id": "docsem-test-2026",
     "task_manifest_sha256": TASK_DIGEST,
@@ -55,6 +55,18 @@ RELEASE_STATE = {
 
 def json_bytes(value):
     return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+
+def provisional_bytes(release_id, task_manifest_sha256):
+    return json_bytes(
+        {
+            "schema_version": 3,
+            "split": "test",
+            "release_id": release_id,
+            "task_manifest_sha256": task_manifest_sha256,
+            "rows": [],
+        }
+    )
 
 
 def attempt(
@@ -68,6 +80,8 @@ def attempt(
     team="Shared Team",
 ):
     label = f"a-{number}" if account == ACCOUNT_A else f"b-{number}"
+    evidence_exact = 1.0 if evidence > 0.0 else 0.0
+    joint_exact = float(answer == 1.0 and evidence_exact == 1.0)
     return {
         **RELEASE_STATE,
         "submission_id": submission_id,
@@ -93,20 +107,23 @@ def attempt(
         "metrics": {
             "answer_accuracy": answer,
             "evidence_f1": evidence,
-            "evidence_exact_match": 1.0 if evidence > 0.0 else 0.0,
+            "evidence_exact_match": evidence_exact,
+            "joint_accuracy": joint_exact,
             "examples": 2,
             "per_example": [
                 {
                     "instance_id": "task-1",
                     "answer_exact_match": answer,
-                    "evidence_exact_match": 1.0 if evidence > 0.0 else 0.0,
+                    "evidence_exact_match": evidence_exact,
                     "evidence_f1": evidence,
+                    "joint_exact_match": joint_exact,
                 },
                 {
                     "instance_id": "task-2",
                     "answer_exact_match": answer,
-                    "evidence_exact_match": 1.0 if evidence > 0.0 else 0.0,
+                    "evidence_exact_match": evidence_exact,
                     "evidence_f1": evidence,
+                    "joint_exact_match": joint_exact,
                 },
             ],
         },
@@ -129,6 +146,7 @@ def account_projection(account, attempts):
     best = min(
         attempts,
         key=lambda item: (
+            -item["metrics"]["joint_accuracy"],
             -item["metrics"]["answer_accuracy"],
             -item["metrics"]["evidence_f1"],
             item["submitted_at"],
@@ -157,6 +175,7 @@ def organizer_projection(grouped):
         best = min(
             attempts,
             key=lambda item: (
+                -item["metrics"]["joint_accuracy"],
                 -item["metrics"]["answer_accuracy"],
                 -item["metrics"]["evidence_f1"],
                 item["submitted_at"],
@@ -374,6 +393,9 @@ class OrganizerSnapshotTests(unittest.TestCase):
             {
                 "private/test_release.json": json_bytes(release),
                 "private/test_labels.jsonl": gold,
+                "projections/test/public_provisional.json": provisional_bytes(
+                    release_id, TASK_DIGEST
+                ),
             },
         )
         identity = OAuthIdentity(
@@ -430,6 +452,9 @@ class OrganizerSnapshotTests(unittest.TestCase):
             {
                 "private/test_release.json": json_bytes(release),
                 "private/test_labels.jsonl": gold,
+                "projections/test/public_provisional.json": provisional_bytes(
+                    release["release_id"], TASK_DIGEST
+                ),
             },
         )
         identity = OAuthIdentity("subject-a", "user-a", "user-a@example.org")
@@ -604,6 +629,7 @@ class OrganizerSnapshotTests(unittest.TestCase):
             "answer_accuracy": 1.0,
             "evidence_exact_match": 1.0,
             "evidence_f1": 1.0,
+            "joint_accuracy": 1.0,
             "examples": len(predictions),
             "per_example": [
                 {
@@ -611,6 +637,7 @@ class OrganizerSnapshotTests(unittest.TestCase):
                     "answer_exact_match": 1.0,
                     "evidence_exact_match": 1.0,
                     "evidence_f1": 1.0,
+                    "joint_exact_match": 1.0,
                 }
                 for row in predictions
             ],
@@ -688,6 +715,39 @@ class OrganizerSnapshotTests(unittest.TestCase):
         )
         self.assertFalse(rows[-1]["excluded"])
         self.assertNotIn("predictions", rows[0])
+        self.assertEqual(rows[-1]["joint_accuracy"], 1.0)
+
+    def test_requires_v3_and_exact_joint_metric_derivation(self):
+        """Catches accepting legacy ledgers or independently inconsistent joint scores."""
+
+        baseline = fixture_files()
+        self.assertTrue(verify_snapshot(self.load(FakeHub(baseline))).valid)
+
+        attempt_path = f"attempts/test/{ACCOUNT_A}/{ID_A1}.json"
+        cases = []
+
+        legacy = fixture_files()
+        record = json.loads(legacy[attempt_path])
+        record["schema_version"] = 2
+        legacy[attempt_path] = json_bytes(record)
+        cases.append(legacy)
+
+        bad_detail = fixture_files()
+        record = json.loads(bad_detail[attempt_path])
+        record["metrics"]["per_example"][0]["joint_exact_match"] = 1.0
+        bad_detail[attempt_path] = json_bytes(record)
+        cases.append(bad_detail)
+
+        bad_aggregate = fixture_files()
+        record = json.loads(bad_aggregate[attempt_path])
+        record["metrics"]["joint_accuracy"] = 0.5
+        bad_aggregate[attempt_path] = json_bytes(record)
+        cases.append(bad_aggregate)
+
+        for files in cases:
+            report = verify_snapshot(self.load(FakeHub(files)))
+            self.assertFalse(report.valid)
+            self.assertIn("attempt_invalid", report.issue_codes)
 
     def test_adjudications_recompute_eligibility_and_best_attempt_in_shared_order(self):
         """Catches the organizer view disagreeing with finalization decisions."""

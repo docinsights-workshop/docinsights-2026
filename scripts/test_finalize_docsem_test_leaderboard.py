@@ -92,10 +92,27 @@ def predictions(*, first="yes", second="2", first_evidence=None, second_evidence
     ]
 
 
-def score(rows):
+def score(rows, labels=None):
     # Fixtures call the frozen scorer directly, independently of the
     # finalizer's injected scorer dispatch.
-    return fixture_score_predictions(rows, list(LABELS))
+    metrics = fixture_score_predictions(
+        rows, list(LABELS if labels is None else labels)
+    )
+    if "joint_accuracy" in metrics:
+        return metrics
+    joint = []
+    per_example = []
+    for item in metrics["per_example"]:
+        exact = float(
+            item["answer_exact_match"] == 1.0 and item["evidence_exact_match"] == 1.0
+        )
+        joint.append(exact)
+        per_example.append({**item, "joint_exact_match": exact})
+    return {
+        **metrics,
+        "joint_accuracy": round(sum(joint) / metrics["examples"], 6),
+        "per_example": per_example,
+    }
 
 
 def attempt(
@@ -116,7 +133,7 @@ def attempt(
     )
     account = hashlib.sha256(subject.encode()).hexdigest()
     value = {
-        "schema_version": 2,
+        "schema_version": 3,
         "split": "test",
         "release_id": "docsem-test-2026",
         "task_manifest_sha256": TASK_SHA,
@@ -161,10 +178,50 @@ def snapshot(records, *, release_value=None, exclusions=(), adjudications=()):
         projection_issue_codes=(),
         scorer_revision=SCORER_REVISION,
         scorer_code_sha256=SCORER_SHA,
+        scorer=score,
     )
 
 
 class FinalizationPlanTests(unittest.TestCase):
+    def test_joint_accuracy_is_primary_for_selection_and_public_ranking(self):
+        answer_only = attempt(
+            "account-a",
+            1,
+            "11111111-1111-4111-8111-111111111111",
+            "2026-09-02T12:00:00Z",
+            predictions(first_evidence=["wrong"], second_evidence=["wrong"]),
+            username="user-a",
+            submission_name="answer-only",
+        )
+        joint_half = attempt(
+            "account-a",
+            2,
+            "22222222-2222-4222-8222-222222222222",
+            "2026-09-03T12:00:00Z",
+            predictions(second="wrong"),
+            username="user-a",
+            submission_name="joint-half",
+        )
+        other_answer_only = attempt(
+            "account-b",
+            1,
+            "33333333-3333-4333-8333-333333333333",
+            "2026-09-01T12:00:00Z",
+            predictions(first_evidence=["wrong"], second_evidence=["wrong"]),
+            username="user-b",
+        )
+
+        plan = build_finalization(
+            snapshot((answer_only, joint_half, other_answer_only)), NOW
+        )
+
+        self.assertEqual(
+            [row["hf_username"] for row in plan.public_projection["rows"]],
+            ["user-a", "user-b"],
+        )
+        self.assertEqual(plan.public_projection["rows"][0]["selected_attempt"], 2)
+        self.assertEqual(plan.public_projection["rows"][0]["joint_accuracy"], 0.5)
+
     def test_selects_best_of_three_and_ranks_by_metrics_time_then_id(self):
         a1 = attempt(
             "account-a",
@@ -373,7 +430,7 @@ class FinalizationPlanTests(unittest.TestCase):
         exclusion = SnapshotRecord.from_value(
             "exclusions/test/smoke.json",
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "split": "test",
                 "release_id": "docsem-test-2026",
                 "task_manifest_sha256": TASK_SHA,
@@ -387,7 +444,7 @@ class FinalizationPlanTests(unittest.TestCase):
         reinstate = SnapshotRecord.from_value(
             "adjudications/test/reinstate.json",
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "split": "test",
                 "release_id": "docsem-test-2026",
                 "task_manifest_sha256": TASK_SHA,
@@ -402,7 +459,7 @@ class FinalizationPlanTests(unittest.TestCase):
         exclude_attempt = SnapshotRecord.from_value(
             "adjudications/test/exclude-b.json",
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "split": "test",
                 "release_id": "docsem-test-2026",
                 "task_manifest_sha256": TASK_SHA,
@@ -450,7 +507,7 @@ class FinalizationPlanTests(unittest.TestCase):
         note = SnapshotRecord.from_value(
             "adjudications/test/review-note.json",
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "split": "test",
                 "release_id": "docsem-test-2026",
                 "task_manifest_sha256": TASK_SHA,
@@ -496,7 +553,7 @@ class FinalizationPlanTests(unittest.TestCase):
             submission_name="excluded-best",
         )
         common = {
-            "schema_version": 2,
+            "schema_version": 3,
             "split": "test",
             "release_id": "docsem-test-2026",
             "task_manifest_sha256": TASK_SHA,
@@ -591,7 +648,7 @@ class FinalizationPlanTests(unittest.TestCase):
         invalid = SnapshotRecord.from_value(
             "adjudications/test/missing-target.json",
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "split": "test",
                 "release_id": "docsem-test-2026",
                 "task_manifest_sha256": TASK_SHA,
@@ -654,6 +711,10 @@ class FinalizationPlanTests(unittest.TestCase):
         clean = build_finalization(snapshot((record,)), NOW).public_projection
         self.assertTrue(audit_public_projection(clean))
         self.assertEqual(
+            clean["schema_version"],
+            2,
+        )
+        self.assertEqual(
             set(clean["rows"][0]),
             {
                 "rank",
@@ -661,10 +722,12 @@ class FinalizationPlanTests(unittest.TestCase):
                 "team",
                 "submission_name",
                 "selected_attempt",
+                "joint_accuracy",
                 "answer_accuracy",
                 "evidence_f1",
             },
         )
+        self.assertEqual(clean["rows"][0]["joint_accuracy"], 1.0)
         injections = (
             ("verified_email", "private@example.org"),
             ("hf_subject", "oauth-private-sub"),
@@ -696,6 +759,44 @@ class FinalizationPlanTests(unittest.TestCase):
                     audit_public_projection(mutated)
                 with self.assertRaises(participant_app.FinalLeaderboardError):
                     participant_app.final_test_leaderboard_html(mutated)
+
+    def test_v3_joint_metrics_are_exact_and_audited(self):
+        record = attempt(
+            "account-a",
+            1,
+            "11111111-1111-4111-8111-111111111111",
+            "2026-09-02T12:00:00Z",
+            predictions(),
+        )
+        plan = build_finalization(snapshot((record,)), NOW)
+        eligible = plan.audit_manifest["eligible_attempts"][0]
+        self.assertEqual(eligible["joint_accuracy"], 1.0)
+
+        legacy = SnapshotRecord.from_value(
+            record.path,
+            {**record.value, "schema_version": 2},
+            committed=True,
+        )
+        legacy_plan = build_finalization(snapshot((legacy,)), NOW)
+        self.assertEqual(legacy_plan.eligible_attempt_count, 0)
+        self.assertEqual(
+            legacy_plan.audit_manifest["excluded_attempts"][0]["reason_code"],
+            "malformed",
+        )
+
+        inconsistent = copy.deepcopy(record.value)
+        inconsistent["metrics"]["per_example"][0]["joint_exact_match"] = 0.0
+        inconsistent_record = SnapshotRecord.from_value(
+            record.path,
+            inconsistent,
+            committed=True,
+        )
+        inconsistent_plan = build_finalization(snapshot((inconsistent_record,)), NOW)
+        self.assertEqual(inconsistent_plan.eligible_attempt_count, 0)
+        self.assertEqual(
+            inconsistent_plan.audit_manifest["excluded_attempts"][0]["reason_code"],
+            "malformed",
+        )
 
     def test_dry_run_summary_contains_only_counts_hashes_and_revisions(self):
         record = attempt(
@@ -794,7 +895,7 @@ def hub_files(record):
     attempt_bytes = canonical_json(record.value)
     account = record.value["account_key"]
     account_projection = {
-        "schema_version": 2,
+        "schema_version": 3,
         "split": "test",
         "release_id": "docsem-test-2026",
         "task_manifest_sha256": TASK_SHA,
@@ -802,7 +903,7 @@ def hub_files(record):
         "account_key": account,
         "attempts": [
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "split": "test",
                 "release_id": "docsem-test-2026",
                 "task_manifest_sha256": TASK_SHA,
@@ -815,14 +916,14 @@ def hub_files(record):
         "best_submission_id": record.value["submission_id"],
     }
     organizer_projection = {
-        "schema_version": 2,
+        "schema_version": 3,
         "split": "test",
         "release_id": "docsem-test-2026",
         "task_manifest_sha256": TASK_SHA,
         "gold_sha256": GOLD_SHA,
         "accounts": [
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "split": "test",
                 "release_id": "docsem-test-2026",
                 "task_manifest_sha256": TASK_SHA,
@@ -987,7 +1088,7 @@ class LoadAndCommitTests(unittest.TestCase):
         account_projection = json.loads(wrong_best[account_path])
         account_projection["attempts"].append(
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "split": "test",
                 "release_id": "docsem-test-2026",
                 "task_manifest_sha256": TASK_SHA,

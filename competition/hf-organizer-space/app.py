@@ -62,6 +62,7 @@ TABLE_FIELDS = (
     "gold_sha256",
     "scoring_private_revision",
     "scoring_public_revision",
+    "joint_accuracy",
     "answer_accuracy",
     "evidence_f1",
     "evidence_exact_match",
@@ -90,6 +91,7 @@ TABLE_HEADERS = (
     "Gold SHA-256",
     "Evaluator/private revision",
     "Public scoring revision",
+    "Joint Accuracy",
     "Answer accuracy",
     "Evidence F1",
     "Evidence exact match",
@@ -268,6 +270,7 @@ def attempt_detail(state: OrganizerViewState, submission_id: object) -> dict:
         details.append(
             {
                 "instance_id": item["instance_id"],
+                "joint_exact_match": item["joint_exact_match"],
                 "answer_exact_match": item["answer_exact_match"],
                 "evidence_exact_match": item["evidence_exact_match"],
                 "evidence_f1": item["evidence_f1"],
@@ -309,6 +312,7 @@ def attempt_detail(state: OrganizerViewState, submission_id: object) -> dict:
         "attempt_number": match["attempt_number"],
         "selected_best": match["selected_best"],
         "excluded": match["excluded"],
+        "joint_accuracy": match["joint_accuracy"],
         "per_example": details,
         "exclusions": exclusions,
         "adjudications": adjudications,

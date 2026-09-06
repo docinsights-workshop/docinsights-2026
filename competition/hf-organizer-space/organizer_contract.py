@@ -387,6 +387,7 @@ def select_best_attempt(attempts):
     return min(
         attempts,
         key=lambda attempt: (
+            -_metric(attempt, "joint_accuracy"),
             -_metric(attempt, "answer_accuracy"),
             -_metric(attempt, "evidence_f1"),
             _accepted_timestamp(attempt),

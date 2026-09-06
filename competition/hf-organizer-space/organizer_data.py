@@ -55,7 +55,7 @@ MAX_SNAPSHOT_COMMITS = 10_000
 MAX_ATTEMPTS = 3
 MAX_ROWS_PER_ATTEMPT = MAX_TEST_ROWS
 RELEASE_SCHEMA_VERSION = 1
-LEDGER_SCHEMA_VERSION = 2
+LEDGER_SCHEMA_VERSION = 3
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _REVISION = re.compile(r"[0-9a-f]{40}")
@@ -491,6 +491,7 @@ def organizer_rows(snapshot) -> list[dict]:
             per_example = [
                 {
                     "instance_id": row["instance_id"],
+                    "joint_exact_match": row["joint_exact_match"],
                     "answer_exact_match": row["answer_exact_match"],
                     "evidence_exact_match": row["evidence_exact_match"],
                     "evidence_f1": row["evidence_f1"],
@@ -527,6 +528,7 @@ def organizer_rows(snapshot) -> list[dict]:
                     "gold_sha256": attempt["gold_sha256"],
                     "scoring_private_revision": attempt["scoring_private_revision"],
                     "scoring_public_revision": attempt["scoring_public_revision"],
+                    "joint_accuracy": metrics["joint_accuracy"],
                     "answer_accuracy": metrics["answer_accuracy"],
                     "evidence_f1": metrics["evidence_f1"],
                     "evidence_exact_match": metrics.get("evidence_exact_match"),
@@ -771,6 +773,7 @@ def _valid_attempt(
 
 def _valid_metrics(metrics) -> bool:
     aggregate_fields = {
+        "joint_accuracy",
         "answer_accuracy",
         "evidence_exact_match",
         "evidence_f1",
@@ -779,7 +782,12 @@ def _valid_metrics(metrics) -> bool:
     }
     if not isinstance(metrics, Mapping) or set(metrics) != aggregate_fields:
         return False
-    for name in ("answer_accuracy", "evidence_exact_match", "evidence_f1"):
+    for name in (
+        "joint_accuracy",
+        "answer_accuracy",
+        "evidence_exact_match",
+        "evidence_f1",
+    ):
         value = metrics.get(name)
         if type(value) is not float:
             return False
@@ -798,6 +806,7 @@ def _valid_metrics(metrics) -> bool:
         return False
     identifiers = set()
     sums = {
+        "joint_accuracy": 0.0,
         "answer_accuracy": 0.0,
         "evidence_exact_match": 0.0,
         "evidence_f1": 0.0,
@@ -805,6 +814,7 @@ def _valid_metrics(metrics) -> bool:
     for row in per_example:
         detail_fields = {
             "instance_id",
+            "joint_exact_match",
             "answer_exact_match",
             "evidence_exact_match",
             "evidence_f1",
@@ -818,7 +828,12 @@ def _valid_metrics(metrics) -> bool:
         ):
             return False
         identifiers.add(identifier)
-        for name in ("answer_exact_match", "evidence_exact_match", "evidence_f1"):
+        for name in (
+            "joint_exact_match",
+            "answer_exact_match",
+            "evidence_exact_match",
+            "evidence_f1",
+        ):
             value = row.get(name)
             if (
                 type(value) is not float
@@ -828,8 +843,16 @@ def _valid_metrics(metrics) -> bool:
                 return False
             if name != "evidence_f1" and value not in (0.0, 1.0):
                 return False
-            aggregate_name = "answer_accuracy" if name == "answer_exact_match" else name
+            aggregate_name = {
+                "joint_exact_match": "joint_accuracy",
+                "answer_exact_match": "answer_accuracy",
+            }.get(name, name)
             sums[aggregate_name] += float(value)
+        expected_joint = float(
+            row["answer_exact_match"] == 1.0 and row["evidence_exact_match"] == 1.0
+        )
+        if row["joint_exact_match"] != expected_joint:
+            return False
     for name, total in sums.items():
         if round(total / examples, 6) != float(metrics[name]):
             return False

@@ -278,22 +278,43 @@ class OrganizerContractParityTests(unittest.TestCase):
             {
                 "submission_id": "b",
                 "submitted_at": "2026-09-05T13:00:00+01:00",
-                "metrics": {"answer_accuracy": 0.9, "evidence_f1": 0.8},
+                "metrics": {
+                    "joint_accuracy": 0.7,
+                    "answer_accuracy": 0.9,
+                    "evidence_f1": 0.8,
+                },
             },
             {
                 "submission_id": "a",
                 "submitted_at": "2026-09-05T12:00:00Z",
-                "metrics": {"answer_accuracy": 0.9, "evidence_f1": 0.8},
+                "metrics": {
+                    "joint_accuracy": 0.7,
+                    "answer_accuracy": 0.9,
+                    "evidence_f1": 0.8,
+                },
             },
             {
                 "submission_id": "later-better-evidence",
                 "submitted_at": "2026-09-07T12:00:00Z",
-                "metrics": {"answer_accuracy": 0.9, "evidence_f1": 0.9},
+                "metrics": {
+                    "joint_accuracy": 0.7,
+                    "answer_accuracy": 0.9,
+                    "evidence_f1": 0.9,
+                },
+            },
+            {
+                "submission_id": "joint-first",
+                "submitted_at": "2026-09-08T12:00:00Z",
+                "metrics": {
+                    "joint_accuracy": 0.8,
+                    "answer_accuracy": 0.1,
+                    "evidence_f1": 0.1,
+                },
             },
         ]
         self.assertEqual(
             organizer.select_best_attempt(attempts)["submission_id"],
-            "later-better-evidence",
+            "joint-first",
         )
         self.assertEqual(
             organizer.select_best_attempt(attempts)["submission_id"],
@@ -313,21 +334,44 @@ class OrganizerContractParityTests(unittest.TestCase):
             [
                 {
                     "submission_id": "missing-time",
-                    "metrics": {"answer_accuracy": 1.0, "evidence_f1": 1.0},
+                    "metrics": {
+                        "joint_accuracy": 1.0,
+                        "answer_accuracy": 1.0,
+                        "evidence_f1": 1.0,
+                    },
                 }
             ],
             [
                 {
                     "submission_id": "naive-time",
                     "submitted_at": "2026-09-05T12:00:00",
-                    "metrics": {"answer_accuracy": 1.0, "evidence_f1": 1.0},
+                    "metrics": {
+                        "joint_accuracy": 1.0,
+                        "answer_accuracy": 1.0,
+                        "evidence_f1": 1.0,
+                    },
                 }
             ],
             [
                 {
                     "submission_id": "nan-score",
                     "submitted_at": "2026-09-05T12:00:00Z",
-                    "metrics": {"answer_accuracy": math.nan, "evidence_f1": 1.0},
+                    "metrics": {
+                        "joint_accuracy": 1.0,
+                        "answer_accuracy": math.nan,
+                        "evidence_f1": 1.0,
+                    },
+                }
+            ],
+            [
+                {
+                    "submission_id": "nan-joint",
+                    "submitted_at": "2026-09-05T12:00:00Z",
+                    "metrics": {
+                        "joint_accuracy": math.nan,
+                        "answer_accuracy": 1.0,
+                        "evidence_f1": 1.0,
+                    },
                 }
             ],
         )

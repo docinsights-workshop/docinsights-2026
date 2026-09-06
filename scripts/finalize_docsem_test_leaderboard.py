@@ -3,7 +3,7 @@
 
 The command is a dry-run by default.  It reads one exact private Hugging Face
 dataset revision, independently re-scores committed attempts with the pinned
-repository scorer, and builds a seven-field public projection.  A write needs
+repository scorer, and builds an allowlisted public projection.  A write needs
 both explicit confirmations and uses one exact-parent commit.
 """
 
@@ -76,6 +76,7 @@ PUBLIC_ROW_FIELDS = frozenset(
         "team",
         "submission_name",
         "selected_attempt",
+        "joint_accuracy",
         "answer_accuracy",
         "evidence_f1",
     }
@@ -546,6 +547,7 @@ def build_finalization(snapshot, now) -> FinalizationPlan:
                 "record_sha256": item.sha256,
                 "selected": item.value["submission_id"]
                 in {chosen.value["submission_id"] for chosen, _ in selected},
+                "joint_accuracy": metrics["joint_accuracy"],
                 "answer_accuracy": metrics["answer_accuracy"],
                 "evidence_f1": metrics["evidence_f1"],
                 "rescored_metrics_sha256": _sha256(_canonical_json(metrics)),
@@ -612,7 +614,7 @@ def audit_public_projection(value) -> bool:
         raise FinalizationError("The public final projection failed its privacy audit.")
     if (
         type(value.get("schema_version")) is not int
-        or value.get("schema_version") != 1
+        or value.get("schema_version") != 2
         or value.get("split") != "test"
         or not isinstance(value.get("release_id"), str)
         or not value["release_id"].strip()
@@ -640,7 +642,7 @@ def audit_public_projection(value) -> bool:
                 raise FinalizationError(
                     "The public final projection failed its privacy audit."
                 )
-        for field_name in ("answer_accuracy", "evidence_f1"):
+        for field_name in ("joint_accuracy", "answer_accuracy", "evidence_f1"):
             metric = row.get(field_name)
             if (
                 type(metric) is not float
@@ -889,7 +891,7 @@ def _attempt_reasons(item, snapshot, release, close_at, ids, hashes, account_num
         return {"malformed"}
     reasons = set()
     state = {
-        "schema_version": 2,
+        "schema_version": 3,
         "split": "test",
         "release_id": release["release_id"],
         "task_manifest_sha256": release["task_manifest_sha256"],
@@ -905,7 +907,7 @@ def _attempt_reasons(item, snapshot, release, close_at, ids, hashes, account_num
     ):
         reasons.add("wrong_gold")
     if (
-        record.get("schema_version") != 2
+        record.get("schema_version") != 3
         or type(record.get("schema_version")) is not int
     ):
         reasons.add("malformed")
@@ -980,6 +982,7 @@ def _attempt_reasons(item, snapshot, release, close_at, ids, hashes, account_num
 
 def _valid_metrics_shape(metrics, expected_examples):
     expected = {
+        "joint_accuracy",
         "answer_accuracy",
         "evidence_exact_match",
         "evidence_f1",
@@ -993,7 +996,12 @@ def _valid_metrics_shape(metrics, expected_examples):
         or metrics["examples"] != expected_examples
     ):
         return False
-    for name in ("answer_accuracy", "evidence_exact_match", "evidence_f1"):
+    for name in (
+        "joint_accuracy",
+        "answer_accuracy",
+        "evidence_exact_match",
+        "evidence_f1",
+    ):
         value = metrics.get(name)
         if type(value) is not float or not math.isfinite(value) or not 0 <= value <= 1:
             return False
@@ -1003,12 +1011,18 @@ def _valid_metrics_shape(metrics, expected_examples):
     for row in per_example:
         if not isinstance(row, Mapping) or set(row) != {
             "instance_id",
+            "joint_exact_match",
             "answer_exact_match",
             "evidence_exact_match",
             "evidence_f1",
         }:
             return False
-        for name in ("answer_exact_match", "evidence_exact_match", "evidence_f1"):
+        for name in (
+            "joint_exact_match",
+            "answer_exact_match",
+            "evidence_exact_match",
+            "evidence_f1",
+        ):
             value = row.get(name)
             if (
                 type(value) is not float
@@ -1016,6 +1030,18 @@ def _valid_metrics_shape(metrics, expected_examples):
                 or not 0 <= value <= 1
             ):
                 return False
+        if row["joint_exact_match"] != float(
+            row["answer_exact_match"] == 1.0 and row["evidence_exact_match"] == 1.0
+        ):
+            return False
+    if (
+        round(
+            sum(row["joint_exact_match"] for row in per_example) / expected_examples,
+            6,
+        )
+        != metrics["joint_accuracy"]
+    ):
+        return False
     return True
 
 
@@ -1102,7 +1128,7 @@ def _validate_audit_record(item, release, now, kind):
     if (
         record_id != match.group("record")
         or _IDENTIFIER.fullmatch(str(record_id or "")) is None
-        or value.get("schema_version") != 2
+        or value.get("schema_version") != 3
         or type(value.get("schema_version")) is not int
         or value.get("split") != "test"
         or value.get("release_id") != release["release_id"]
@@ -1145,6 +1171,7 @@ def _select_accounts(rescored):
 def _attempt_rank_key(entry):
     item, metrics = entry
     return (
+        -float(metrics["joint_accuracy"]),
         -float(metrics["answer_accuracy"]),
         -float(metrics["evidence_f1"]),
         _parse_utc(item.value["submitted_at"]),
@@ -1163,12 +1190,13 @@ def _public_projection(release, selected):
                 "team": str(record["team"]),
                 "submission_name": str(record["submission_name"]),
                 "selected_attempt": int(record["attempt_number"]),
+                "joint_accuracy": float(metrics["joint_accuracy"]),
                 "answer_accuracy": float(metrics["answer_accuracy"]),
                 "evidence_f1": float(metrics["evidence_f1"]),
             }
         )
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "split": "test",
         "release_id": release["release_id"],
         "task_manifest_sha256": release["task_manifest_sha256"],
@@ -1282,7 +1310,7 @@ def _projection_references(raw_files, release):
     references = {}
     issues = set()
     expected_state = {
-        "schema_version": 2,
+        "schema_version": 3,
         "split": "test",
         "release_id": release.get("release_id"),
         "task_manifest_sha256": release.get("task_manifest_sha256"),

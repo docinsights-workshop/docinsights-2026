@@ -15,6 +15,8 @@ from fastapi.testclient import TestClient
 
 from app import (
     MAX_EXPORT_BYTES,
+    TABLE_FIELDS,
+    TABLE_HEADERS,
     OrganizerAppError,
     attempt_detail,
     build_app,
@@ -349,9 +351,13 @@ assert client.get("/config").status_code == 200
 
         self.assertEqual(detail["submission_id"], ID_A2)
         self.assertEqual(detail["attempt_number"], 2)
+        self.assertEqual(detail["joint_accuracy"], 1.0)
         self.assertEqual(
             [item["instance_id"] for item in detail["per_example"]],
             ["task-1", "task-2"],
+        )
+        self.assertTrue(
+            all("joint_exact_match" in item for item in detail["per_example"])
         )
         self.assertEqual(
             detail["exclusions"],
@@ -405,6 +411,7 @@ assert client.get("/config").status_code == 200
         self.assertIn("release_id,docsem-test-2026", text)
         self.assertIn("evaluator_revisions,", text)
         self.assertIn("submission_id,attempt_number,selected_best,excluded", text)
+        self.assertIn("joint_accuracy", text)
         self.assertIn(ID_B1, text)
         self.assertNotIn(ID_A1, text)
         self.assertNotIn(ID_A2, text)
@@ -418,6 +425,14 @@ assert client.get("/config").status_code == 200
             "access_token",
         ):
             self.assertNotIn(forbidden.casefold(), text.casefold())
+
+    def test_table_and_export_surface_joint_accuracy(self):
+        """Catches the organizer hiding the primary final-ranking metric."""
+
+        self.assertIn("joint_accuracy", TABLE_FIELDS)
+        self.assertIn("Joint Accuracy", TABLE_HEADERS)
+        state, _ = self.refresh()
+        self.assertTrue(all("joint_accuracy" in row for row in state.rows))
 
     def test_csv_export_fails_closed_before_leaving_an_oversized_file(self):
         state, _ = self.refresh()
