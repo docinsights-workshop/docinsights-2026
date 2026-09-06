@@ -70,6 +70,10 @@ class FakeHub:
         self.public_visibility_flip_on_second_identity = False
         self.history_events_override = None
         self.history_reachable_override = None
+        self.public_history_audit_override = None
+        self.public_history_audit_calls = 0
+        self.public_history_audit_flip_on_call = None
+        self.include_legacy_public_metadata = False
 
     def identity(self, token):
         self.identity_calls += 1
@@ -109,10 +113,16 @@ class FakeHub:
             metadata_paths = tuple(
                 path
                 for path in paths
-                if path.endswith((".json", ".jsonl"))
-                and any(
-                    part in {"val", "validation", "test"}
-                    for part in path.split("/")[:-1]
+                if (
+                    path.endswith((".json", ".jsonl"))
+                    and any(
+                        part in {"val", "validation", "test"}
+                        for part in path.split("/")[:-1]
+                    )
+                )
+                or (
+                    self.include_legacy_public_metadata
+                    and path == "data/dev_labels.jsonl"
                 )
             )
             snapshots.append(
@@ -123,6 +133,25 @@ class FakeHub:
                 )
             )
         return tuple(snapshots)
+
+    def public_history_audit(self, repository, expected_head, token):
+        self.public_history_audit_calls += 1
+        if expected_head != self.public_revision:
+            raise publisher.ReleaseError("public history head mismatch")
+        audit = self.public_history_audit_override
+        if audit is None:
+            return publisher.PublicHistoryAudit(
+                head=expected_head,
+                graph=((expected_head, ()),),
+                events=(),
+                presence=((expected_head, False),),
+                shallow=False,
+                blob_objects_fetched=False,
+            )
+        if self.public_history_audit_flip_on_call == self.public_history_audit_calls:
+            graph = tuple(audit.graph)
+            return replace(audit, graph=tuple(reversed(graph)))
+        return audit
 
     def history_path_names(self, repository, expected_head, token):
         if expected_head != self.private_revision:
@@ -254,6 +283,14 @@ class PinnedDefaultTests(unittest.TestCase):
         self.assertEqual(
             publisher.LEGACY_HISTORY_POLICY, "legacy-private-label-cycle-v1"
         )
+        self.assertEqual(
+            publisher.LEGACY_PUBLIC_HISTORY_POLICY,
+            "legacy-public-development-label-cycle-v1",
+        )
+        self.assertEqual(
+            publisher.LEGACY_PUBLIC_HISTORY_METADATA_SHA256,
+            "d14363ea4836a87af514ee3658314a588d407d015313bb237602caf40fafc20c",
+        )
 
 
 class PrivateContinuationTests(unittest.TestCase):
@@ -261,6 +298,11 @@ class PrivateContinuationTests(unittest.TestCase):
     LEGACY_CONFIRM = "ACKNOWLEDGE_RETAINED_LEGACY_PRIVATE_LABEL_HISTORY"
     LEGACY_ADD = "1" * 40
     LEGACY_DELETE = "2" * 40
+    PUBLIC_HISTORY_POLICY = "legacy-public-development-label-cycle-v1"
+    PUBLIC_HISTORY_CONFIRM = "ACKNOWLEDGE_RETAINED_PUBLIC_DEVELOPMENT_LABEL_HISTORY"
+    PUBLIC_ADD = "4" * 40
+    PUBLIC_PRESENT = "5" * 40
+    PUBLIC_DELETE = "6" * 40
 
     def setUp(self):
         if publisher is None:
@@ -349,6 +391,48 @@ class PrivateContinuationTests(unittest.TestCase):
                 ]
             )
         )
+        self.public_history_metadata_digest = digest(
+            canonical(
+                {
+                    "schema_version": 1,
+                    "head": "a" * 40,
+                    "graph": [
+                        {"revision": self.PUBLIC_ADD, "parents": []},
+                        {
+                            "revision": self.PUBLIC_PRESENT,
+                            "parents": [self.PUBLIC_ADD],
+                        },
+                        {
+                            "revision": self.PUBLIC_DELETE,
+                            "parents": [self.PUBLIC_PRESENT],
+                        },
+                        {"revision": "a" * 40, "parents": [self.PUBLIC_DELETE]},
+                    ],
+                    "events": [
+                        {
+                            "revision": self.PUBLIC_ADD,
+                            "parents": [],
+                            "timestamp": "2020-01-01T00:00:00Z",
+                            "status": "A",
+                            "path": "data/dev_labels.jsonl",
+                        },
+                        {
+                            "revision": self.PUBLIC_DELETE,
+                            "parents": [self.PUBLIC_PRESENT],
+                            "timestamp": "2020-01-01T00:02:00Z",
+                            "status": "D",
+                            "path": "data/dev_labels.jsonl",
+                        },
+                    ],
+                    "presence": [
+                        {"revision": self.PUBLIC_ADD, "present": True},
+                        {"revision": self.PUBLIC_PRESENT, "present": True},
+                        {"revision": self.PUBLIC_DELETE, "present": False},
+                        {"revision": "a" * 40, "present": False},
+                    ],
+                }
+            )
+        )
 
         self.patches = [
             mock.patch.object(publisher, "PUBLIC_STAGE", self.public_stage),
@@ -368,6 +452,12 @@ class PrivateContinuationTests(unittest.TestCase):
                 publisher,
                 "LEGACY_HISTORY_METADATA_SHA256",
                 self.legacy_metadata_digest,
+            ),
+            mock.patch.object(
+                publisher,
+                "LEGACY_PUBLIC_HISTORY_METADATA_SHA256",
+                self.public_history_metadata_digest,
+                create=True,
             ),
         ]
         for patcher in self.patches:
@@ -443,6 +533,93 @@ class PrivateContinuationTests(unittest.TestCase):
             self.LEGACY_DELETE,
             self.hub.private_revision,
         }
+
+    def exact_public_history_audit(self):
+        return publisher.PublicHistoryAudit(
+            head=self.hub.public_revision,
+            graph=(
+                (self.PUBLIC_ADD, ()),
+                (self.PUBLIC_PRESENT, (self.PUBLIC_ADD,)),
+                (self.PUBLIC_DELETE, (self.PUBLIC_PRESENT,)),
+                (self.hub.public_revision, (self.PUBLIC_DELETE,)),
+            ),
+            events=(
+                publisher.PublicHistoryEvent(
+                    revision=self.PUBLIC_ADD,
+                    parents=(),
+                    timestamp="2020-01-01T00:00:00Z",
+                    status="A",
+                    path="data/dev_labels.jsonl",
+                ),
+                publisher.PublicHistoryEvent(
+                    revision=self.PUBLIC_DELETE,
+                    parents=(self.PUBLIC_PRESENT,),
+                    timestamp="2020-01-01T00:02:00Z",
+                    status="D",
+                    path="data/dev_labels.jsonl",
+                ),
+            ),
+            presence=(
+                (self.PUBLIC_ADD, True),
+                (self.PUBLIC_PRESENT, True),
+                (self.PUBLIC_DELETE, False),
+                (self.hub.public_revision, False),
+            ),
+            shallow=False,
+            blob_objects_fetched=False,
+        )
+
+    def configure_exact_public_legacy_history(self):
+        retired_path = "data/dev_labels.jsonl"
+        base_tree = dict(
+            self.hub.trees[(publisher.PUBLIC_HF_REPOSITORY, self.hub.public_revision)]
+        )
+        sentinel = b"LEGACY-PUBLIC-CONTENT-MUST-NOT-BE-READ\n"
+        for revision, present in (
+            (self.PUBLIC_ADD, True),
+            (self.PUBLIC_PRESENT, True),
+            (self.PUBLIC_DELETE, False),
+        ):
+            tree = dict(base_tree)
+            if present:
+                tree[retired_path] = sentinel
+            self.hub.trees[(publisher.PUBLIC_HF_REPOSITORY, revision)] = tree
+        self.hub.public_history = [
+            self.hub.public_revision,
+            self.PUBLIC_DELETE,
+            self.PUBLIC_PRESENT,
+            self.PUBLIC_ADD,
+        ]
+        self.hub.public_history_audit_override = self.exact_public_history_audit()
+
+    @staticmethod
+    def public_audit_digest(audit):
+        return digest(
+            canonical(
+                {
+                    "schema_version": 1,
+                    "head": audit.head,
+                    "graph": [
+                        {"revision": revision, "parents": list(parents)}
+                        for revision, parents in audit.graph
+                    ],
+                    "events": [
+                        {
+                            "revision": event.revision,
+                            "parents": list(event.parents),
+                            "timestamp": event.timestamp,
+                            "status": event.status,
+                            "path": event.path,
+                        }
+                        for event in audit.events
+                    ],
+                    "presence": [
+                        {"revision": revision, "present": present}
+                        for revision, present in audit.presence
+                    ],
+                }
+            )
+        )
 
     def test_prepare_stage_installs_only_exact_private_files_with_safe_modes(self):
         before = {
@@ -899,6 +1076,265 @@ class PrivateContinuationTests(unittest.TestCase):
         self.hub.public_history.append(old_revision)
         with self.assertRaises(publisher.ReleaseError):
             self.release_call()
+
+    def test_legacy_public_history_defaults_to_reject_and_closed_profile_is_read_only(
+        self,
+    ):
+        self.prepare()
+        self.configure_exact_public_legacy_history()
+        with self.assertRaises(publisher.ReleaseError):
+            self.release_call()
+
+        result = self.release_call(
+            legacy_public_history_policy=self.PUBLIC_HISTORY_POLICY
+        )
+
+        self.assertEqual(result["status"], "pending")
+        self.assertEqual(
+            result["public_history"],
+            {
+                "policy_id": self.PUBLIC_HISTORY_POLICY,
+                "metadata_sha256": publisher.LEGACY_PUBLIC_HISTORY_METADATA_SHA256,
+                "event_count": 2,
+                "presence_count": 2,
+                "history_retained": True,
+                "remediation": False,
+                "content_read": False,
+            },
+        )
+        self.assertEqual(self.hub.writes, [])
+        self.assertFalse(
+            any(
+                "data/dev_labels.jsonl" in paths
+                for _repository, _revision, paths in self.hub.reads
+            )
+        )
+        self.assertNotIn("LEGACY-PUBLIC-CONTENT-MUST-NOT-BE-READ", json.dumps(result))
+
+    def test_legacy_public_profile_rejects_each_field_graph_event_and_presence_mutation(
+        self,
+    ):
+        self.prepare()
+        self.configure_exact_public_legacy_history()
+        base = self.exact_public_history_audit()
+        extra_event = publisher.PublicHistoryEvent(
+            revision=self.hub.public_revision,
+            parents=(self.PUBLIC_DELETE,),
+            timestamp="2020-01-01T00:03:00Z",
+            status="A",
+            path="data/dev_labels.jsonl",
+        )
+        mutations = (
+            replace(base, head="f" * 40),
+            replace(base, shallow=True),
+            replace(base, blob_objects_fetched=True),
+            replace(base, graph=base.graph[:-1]),
+            replace(base, graph=tuple(reversed(base.graph))),
+            replace(
+                base,
+                graph=(*base.graph[:-1], (self.hub.public_revision, ("f" * 40,))),
+            ),
+            replace(base, graph=(base.graph[0], base.graph[0], *base.graph[2:])),
+            replace(base, events=tuple(reversed(base.events))),
+            replace(base, events=base.events[:1]),
+            replace(base, events=(*base.events, extra_event)),
+            replace(base, events=(replace(base.events[0], status="D"), base.events[1])),
+            replace(
+                base,
+                events=(
+                    replace(base.events[0], path="data/other_labels.jsonl"),
+                    base.events[1],
+                ),
+            ),
+            replace(
+                base,
+                events=(
+                    replace(base.events[0], timestamp="2020-02-31T00:00:00Z"),
+                    base.events[1],
+                ),
+            ),
+            replace(
+                base,
+                events=(
+                    base.events[0],
+                    replace(base.events[1], revision="f" * 40),
+                ),
+            ),
+            replace(
+                base,
+                events=(
+                    base.events[0],
+                    replace(base.events[1], parents=(self.PUBLIC_ADD,)),
+                ),
+            ),
+            replace(base, presence=base.presence[:-1]),
+            replace(base, presence=tuple(reversed(base.presence))),
+            replace(
+                base,
+                presence=(
+                    (self.PUBLIC_ADD, False),
+                    *base.presence[1:],
+                ),
+            ),
+            replace(
+                base,
+                presence=(
+                    *base.presence[:-1],
+                    ("f" * 40, False),
+                ),
+            ),
+            replace(
+                base,
+                presence=(*base.presence, ("f" * 40, False)),
+            ),
+        )
+        for audit in mutations:
+            with self.subTest(audit=audit):
+                self.hub.public_history_audit_override = audit
+                with mock.patch.object(
+                    publisher,
+                    "LEGACY_PUBLIC_HISTORY_METADATA_SHA256",
+                    self.public_audit_digest(audit),
+                ):
+                    with self.assertRaises(publisher.ReleaseError):
+                        self.release_call(
+                            legacy_public_history_policy=self.PUBLIC_HISTORY_POLICY
+                        )
+        self.assertEqual(self.hub.writes, [])
+
+    def test_legacy_public_profile_checks_snapshot_presence_and_other_forbidden_paths(
+        self,
+    ):
+        self.prepare()
+        self.configure_exact_public_legacy_history()
+        tree = self.hub.trees[(publisher.PUBLIC_HF_REPOSITORY, self.PUBLIC_PRESENT)]
+        tree.pop("data/dev_labels.jsonl")
+        with self.assertRaises(publisher.ReleaseError):
+            self.release_call(legacy_public_history_policy=self.PUBLIC_HISTORY_POLICY)
+
+        self.configure_exact_public_legacy_history()
+        self.hub.trees[(publisher.PUBLIC_HF_REPOSITORY, self.PUBLIC_PRESENT)][
+            "data/other_labels.jsonl"
+        ] = b"OTHER-FORBIDDEN-PUBLIC-LABEL-PATH\n"
+        with self.assertRaises(publisher.ReleaseError):
+            self.release_call(legacy_public_history_policy=self.PUBLIC_HISTORY_POLICY)
+
+        self.configure_exact_public_legacy_history()
+        self.hub.include_legacy_public_metadata = True
+        with self.assertRaises(publisher.ReleaseError):
+            self.release_call(legacy_public_history_policy=self.PUBLIC_HISTORY_POLICY)
+        self.assertEqual(self.hub.writes, [])
+
+    def test_public_history_policy_and_confirmation_are_independent_and_closed(self):
+        self.prepare()
+        self.configure_exact_public_legacy_history()
+        with self.assertRaises(publisher.ReleaseError):
+            self.release_call(legacy_public_history_policy="allow")
+        with self.assertRaises(publisher.ReleaseError):
+            self.release_call(
+                legacy_public_history_confirmation=self.PUBLIC_HISTORY_CONFIRM
+            )
+        with self.assertRaises(publisher.ReleaseError):
+            self.release_call(
+                publish=True,
+                confirmation="PUBLISH_DISABLED_PRIVATE_TEST_RELEASE",
+                legacy_public_history_policy=self.PUBLIC_HISTORY_POLICY,
+            )
+        with self.assertRaises(publisher.ReleaseError):
+            self.release_call(
+                publish=True,
+                confirmation="PUBLISH_DISABLED_PRIVATE_TEST_RELEASE",
+                legacy_public_history_policy=self.PUBLIC_HISTORY_POLICY,
+                legacy_public_history_confirmation="wrong",
+            )
+        self.assertEqual(self.hub.writes, [])
+
+    def test_both_legacy_profiles_require_both_confirmations_and_only_private_cas(self):
+        self.prepare()
+        self.configure_exact_legacy_history()
+        self.configure_exact_public_legacy_history()
+        before_public = {
+            key: dict(value)
+            for key, value in self.hub.trees.items()
+            if key[0] == publisher.PUBLIC_HF_REPOSITORY
+        }
+        common = {
+            "publish": True,
+            "confirmation": "PUBLISH_DISABLED_PRIVATE_TEST_RELEASE",
+            "legacy_history_policy": self.LEGACY_POLICY,
+            "legacy_public_history_policy": self.PUBLIC_HISTORY_POLICY,
+        }
+        with self.assertRaises(publisher.ReleaseError):
+            self.release_call(
+                **common,
+                legacy_history_confirmation=self.LEGACY_CONFIRM,
+            )
+        with self.assertRaises(publisher.ReleaseError):
+            self.release_call(
+                **common,
+                legacy_public_history_confirmation=self.PUBLIC_HISTORY_CONFIRM,
+            )
+        result = self.release_call(
+            **common,
+            legacy_history_confirmation=self.LEGACY_CONFIRM,
+            legacy_public_history_confirmation=self.PUBLIC_HISTORY_CONFIRM,
+        )
+        self.assertEqual(result["status"], "published")
+        self.assertEqual(len(self.hub.writes), 1)
+        self.assertEqual(
+            self.hub.writes[0]["paths"],
+            ("private/test_labels.jsonl", "private/test_release.json"),
+        )
+        after_public = {
+            key: dict(value)
+            for key, value in self.hub.trees.items()
+            if key[0] == publisher.PUBLIC_HF_REPOSITORY
+        }
+        self.assertEqual(after_public, before_public)
+        self.assertEqual(result["public_history"]["content_read"], False)
+
+    def test_public_history_post_cas_drift_is_uncertain_and_never_retried(self):
+        self.prepare()
+        self.configure_exact_public_legacy_history()
+        self.hub.public_history_audit_flip_on_call = 3
+        with self.assertRaises(publisher.PublicationUncertainError):
+            self.release_call(
+                publish=True,
+                confirmation="PUBLISH_DISABLED_PRIVATE_TEST_RELEASE",
+                legacy_public_history_policy=self.PUBLIC_HISTORY_POLICY,
+                legacy_public_history_confirmation=self.PUBLIC_HISTORY_CONFIRM,
+            )
+        self.assertEqual(len(self.hub.writes), 1)
+        self.assertGreaterEqual(self.hub.public_history_audit_calls, 3)
+
+    def test_cli_accepts_closed_public_history_options_without_printing_legacy_body(
+        self,
+    ):
+        self.prepare()
+        self.configure_exact_public_legacy_history()
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = publisher.main(
+                [
+                    "--public-stage",
+                    str(self.public_stage),
+                    "--private-label-source",
+                    str(self.private_source),
+                    "--private-stage",
+                    str(self.private_stage),
+                    "--private-hf-base",
+                    "b" * 40,
+                    "--legacy-public-history-policy",
+                    self.PUBLIC_HISTORY_POLICY,
+                ],
+                hf_backend=self.hub,
+                token="TOKEN-SENTINEL",
+            )
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["public_history"]["presence_count"], 2)
+        visible = stdout.getvalue() + stderr.getvalue()
+        self.assertNotIn("LEGACY-PUBLIC-CONTENT-MUST-NOT-BE-READ", visible)
 
     def test_private_partial_different_and_deleted_historical_namespace_refuse(self):
         self.prepare()
@@ -1592,6 +2028,105 @@ class PrivateContinuationTests(unittest.TestCase):
             backend._history_path_names_from_remote(
                 remote.as_uri(), new_head, "TOKEN-SENTINEL-V6q2"
             )
+
+    def test_public_history_audit_uses_only_no_blob_path_and_tree_metadata(self):
+        remote = self.root / "public-history.git"
+        work = self.root / "public-history-work"
+        subprocess.run(
+            ["git", "init", "--bare", str(remote)], check=True, capture_output=True
+        )
+        subprocess.run(["git", "init", str(work)], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(work), "config", "user.name", "Synthetic"],
+            check=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(work),
+                "config",
+                "user.email",
+                "synthetic@example.invalid",
+            ],
+            check=True,
+        )
+        (work / "data").mkdir()
+        (work / "data/dev_labels.jsonl").write_bytes(
+            b"SYNTHETIC-PUBLIC-LABEL-BODY-MUST-NOT-BE-READ\n"
+        )
+        subprocess.run(["git", "-C", str(work), "add", "."], check=True)
+        subprocess.run(
+            ["git", "-C", str(work), "commit", "-m", "synthetic add"],
+            check=True,
+            capture_output=True,
+        )
+        (work / "README.md").write_bytes(b"present snapshot\n")
+        subprocess.run(["git", "-C", str(work), "add", "."], check=True)
+        subprocess.run(
+            ["git", "-C", str(work), "commit", "-m", "synthetic present"],
+            check=True,
+            capture_output=True,
+        )
+        (work / "data/dev_labels.jsonl").unlink()
+        subprocess.run(["git", "-C", str(work), "add", "-A"], check=True)
+        subprocess.run(
+            ["git", "-C", str(work), "commit", "-m", "synthetic delete"],
+            check=True,
+            capture_output=True,
+        )
+        (work / "README.md").write_bytes(b"current snapshot\n")
+        subprocess.run(["git", "-C", str(work), "add", "."], check=True)
+        subprocess.run(
+            ["git", "-C", str(work), "commit", "-m", "synthetic current"],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(["git", "-C", str(work), "branch", "-M", "main"], check=True)
+        subprocess.run(
+            ["git", "-C", str(work), "push", str(remote), "main"],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(remote), "config", "uploadpack.allowFilter", "true"],
+            check=True,
+        )
+        head = subprocess.run(
+            ["git", "-C", str(work), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        backend = publisher.HuggingFaceBackend()
+        commands = []
+        original = backend._run_history_git
+
+        def observed(arguments, **kwargs):
+            commands.append(tuple(arguments))
+            return original(arguments, **kwargs)
+
+        with mock.patch.object(backend, "_run_history_git", side_effect=observed):
+            audit = backend._public_history_audit_from_remote(
+                remote.as_uri(), head, "TOKEN-SENTINEL-PUBLIC-V6q2"
+            )
+        self.assertEqual(audit.head, head)
+        self.assertEqual(len(audit.graph), 4)
+        self.assertEqual(
+            [(event.status, event.path) for event in audit.events],
+            [
+                ("A", "data/dev_labels.jsonl"),
+                ("D", "data/dev_labels.jsonl"),
+            ],
+        )
+        self.assertEqual(
+            [present for _revision, present in audit.presence],
+            [True, True, False, False],
+        )
+        self.assertFalse(audit.shallow)
+        self.assertFalse(audit.blob_objects_fetched)
+        self.assertFalse(any(command and command[0] == "show" for command in commands))
+        self.assertNotIn("SYNTHETIC-PUBLIC-LABEL-BODY", repr(audit))
 
 
 if __name__ == "__main__":

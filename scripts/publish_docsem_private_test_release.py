@@ -85,6 +85,14 @@ LEGACY_HISTORY_CONFIRMATION = "ACKNOWLEDGE_RETAINED_LEGACY_PRIVATE_LABEL_HISTORY
 LEGACY_HISTORY_METADATA_SHA256 = (
     "17107b3da2db03b98356ba11ead006be38d85dad06f8f9b9e20a3bd02a5d1215"
 )
+LEGACY_PUBLIC_HISTORY_POLICY = "legacy-public-development-label-cycle-v1"
+LEGACY_PUBLIC_HISTORY_CONFIRMATION = (
+    "ACKNOWLEDGE_RETAINED_PUBLIC_DEVELOPMENT_LABEL_HISTORY"
+)
+LEGACY_PUBLIC_HISTORY_METADATA_SHA256 = (
+    "d14363ea4836a87af514ee3658314a588d407d015313bb237602caf40fafc20c"
+)
+LEGACY_PUBLIC_HISTORY_PATH = "data/dev_labels.jsonl"
 EXPECTED_OWNER = "amitbcp"
 EXPECTED_ROLE = "write"
 MAX_PRIVATE_LABEL_BYTES = 64 * 1024 * 1024
@@ -129,6 +137,10 @@ __all__ = [
     "ReleaseConfig",
     "HfIdentity",
     "RemoteFile",
+    "PrivateHistoryEvent",
+    "PrivateHistoryAudit",
+    "PublicHistoryEvent",
+    "PublicHistoryAudit",
     "HuggingFaceBackend",
     "prepare_stage",
     "run_private_continuation",
@@ -187,6 +199,38 @@ class PrivateHistoryAudit:
 
     def __repr__(self) -> str:
         return f"PrivateHistoryAudit(event_count={len(self.events)}, sanitized=True)"
+
+
+@dataclass(frozen=True, repr=False)
+class PublicHistoryEvent:
+    revision: str
+    parents: tuple[str, ...]
+    timestamp: str
+    status: str
+    path: str
+
+    def __repr__(self) -> str:
+        return (
+            "PublicHistoryEvent(revision=<sanitized>, status="
+            f"{self.status!r}, path=<sanitized>)"
+        )
+
+
+@dataclass(frozen=True, repr=False)
+class PublicHistoryAudit:
+    head: str
+    graph: tuple[tuple[str, tuple[str, ...]], ...]
+    events: tuple[PublicHistoryEvent, ...]
+    presence: tuple[tuple[str, bool], ...]
+    shallow: bool
+    blob_objects_fetched: bool
+
+    def __repr__(self) -> str:
+        return (
+            "PublicHistoryAudit(event_count="
+            f"{len(self.events)}, presence_entries={len(self.presence)}, "
+            "sanitized=True)"
+        )
 
 
 def _event_metadata(event: PrivateHistoryEvent) -> dict[str, object]:
@@ -547,6 +591,7 @@ def _receipt(
     private_base: str | None = None,
     private_revision: str | None = None,
     legacy_result: str | None = None,
+    public_history_matched: bool = False,
 ) -> dict[str, object]:
     revisions = {"public": PUBLIC_REVISION}
     if private_base is not None:
@@ -582,6 +627,16 @@ def _receipt(
             "legacy_history_retained": True,
         }
         result["operation"] = {"overwrites": 0, "deletes": 0, "retries": 0}
+    if public_history_matched:
+        result["public_history"] = {
+            "policy_id": LEGACY_PUBLIC_HISTORY_POLICY,
+            "metadata_sha256": LEGACY_PUBLIC_HISTORY_METADATA_SHA256,
+            "event_count": 2,
+            "presence_count": 2,
+            "history_retained": True,
+            "remediation": False,
+            "content_read": False,
+        }
     return result
 
 
@@ -902,11 +957,204 @@ def _validate_private_history(
     return "matched-postpublish"
 
 
+def _public_history_metadata(audit: PublicHistoryAudit) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "head": audit.head,
+        "graph": [
+            {"revision": revision, "parents": list(parents)}
+            for revision, parents in audit.graph
+        ],
+        "events": [
+            {
+                "revision": event.revision,
+                "parents": list(event.parents),
+                "timestamp": event.timestamp,
+                "status": event.status,
+                "path": event.path,
+            }
+            for event in audit.events
+        ],
+        "presence": [
+            {"revision": revision, "present": present}
+            for revision, present in audit.presence
+        ],
+    }
+
+
+def _validate_legacy_public_history(
+    audit: PublicHistoryAudit,
+    snapshots: Sequence[HistorySnapshot],
+    *,
+    expected_head: str,
+) -> None:
+    if (
+        not isinstance(audit, PublicHistoryAudit)
+        or audit.head != expected_head
+        or audit.shallow is not False
+        or audit.blob_objects_fetched is not False
+        or not 1 <= len(audit.graph) <= MAX_HISTORY_COMMITS
+    ):
+        raise ReleaseError("Public history audit is incomplete or unsafe.")
+
+    graph = tuple(audit.graph)
+    revisions: list[str] = []
+    parent_map: dict[str, tuple[str, ...]] = {}
+    for item in graph:
+        if not isinstance(item, tuple) or len(item) != 2:
+            raise ReleaseError("Public history graph is malformed.")
+        revision, parents = item
+        if (
+            not isinstance(revision, str)
+            or not re.fullmatch(r"[0-9a-f]{40}", revision)
+            or not isinstance(parents, tuple)
+            or any(
+                not isinstance(parent, str) or not re.fullmatch(r"[0-9a-f]{40}", parent)
+                for parent in parents
+            )
+            or len(set(parents)) != len(parents)
+            or revision in parent_map
+            or any(parent not in parent_map for parent in parents)
+        ):
+            raise ReleaseError("Public history graph is malformed.")
+        revisions.append(revision)
+        parent_map[revision] = parents
+    if revisions[-1] != expected_head:
+        raise ReleaseError("Public history graph does not end at its exact head.")
+
+    events = tuple(audit.events)
+    if len(events) != 2:
+        raise ReleaseError("Public history event stream is not exact.")
+    for event in events:
+        if not isinstance(event, PublicHistoryEvent):
+            raise ReleaseError("Public history event metadata is malformed.")
+        try:
+            parsed_time = datetime.strptime(
+                event.timestamp, "%Y-%m-%dT%H:%M:%SZ"
+            ).replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError) as exc:
+            raise ReleaseError("Public history event metadata is malformed.") from exc
+        if (
+            not re.fullmatch(r"[0-9a-f]{40}", event.revision)
+            or not isinstance(event.parents, tuple)
+            or any(
+                not isinstance(parent, str) or not re.fullmatch(r"[0-9a-f]{40}", parent)
+                for parent in event.parents
+            )
+            or event.revision not in parent_map
+            or parent_map[event.revision] != event.parents
+            or parsed_time.strftime("%Y-%m-%dT%H:%M:%SZ") != event.timestamp
+            or event.path != LEGACY_PUBLIC_HISTORY_PATH
+        ):
+            raise ReleaseError("Public history event metadata is malformed.")
+    added, deleted = events
+    graph_index = {revision: index for index, revision in enumerate(revisions)}
+    if (
+        added.status != "A"
+        or deleted.status != "D"
+        or added.revision == deleted.revision
+        or graph_index[added.revision] >= graph_index[deleted.revision]
+    ):
+        raise ReleaseError(
+            "Public history does not contain one exact add/delete cycle."
+        )
+
+    ancestors = set(parent_map[deleted.revision])
+    pending = list(ancestors)
+    while pending:
+        revision = pending.pop()
+        for parent in parent_map[revision]:
+            if parent not in ancestors:
+                ancestors.add(parent)
+                pending.append(parent)
+    if added.revision not in ancestors:
+        raise ReleaseError("Public history add/delete ancestry is invalid.")
+
+    presence = tuple(audit.presence)
+    if len(presence) != len(graph):
+        raise ReleaseError("Public history presence inventory is incomplete.")
+    presence_map: dict[str, bool] = {}
+    for index, item in enumerate(presence):
+        if (
+            not isinstance(item, tuple)
+            or len(item) != 2
+            or item[0] != revisions[index]
+            or type(item[1]) is not bool
+        ):
+            raise ReleaseError("Public history presence inventory is malformed.")
+        presence_map[item[0]] = item[1]
+    if (
+        sum(1 for present in presence_map.values() if present) != 2
+        or presence_map[expected_head]
+    ):
+        raise ReleaseError(
+            "Public history presence count or current absence is invalid."
+        )
+
+    event_by_revision = {event.revision: event.status for event in events}
+    for revision, parents in graph:
+        parent_values = {presence_map[parent] for parent in parents}
+        if len(parent_values) > 1:
+            raise ReleaseError("Public history presence ancestry is ambiguous.")
+        inherited = next(iter(parent_values)) if parent_values else False
+        status = event_by_revision.get(revision)
+        present = presence_map[revision]
+        if status == "A":
+            valid = not inherited and present
+        elif status == "D":
+            valid = inherited and not present
+        else:
+            valid = present is inherited
+        if not valid:
+            raise ReleaseError("Public history presence transitions are inconsistent.")
+
+    if (
+        _sha256(_canonical_json(_public_history_metadata(audit)))
+        != LEGACY_PUBLIC_HISTORY_METADATA_SHA256
+    ):
+        raise ReleaseError("The retained public history profile does not match.")
+
+    if len(snapshots) != len(graph):
+        raise ReleaseError("Public history snapshots do not cover the full graph.")
+    snapshot_revisions: set[str] = set()
+    sanitized: list[HistorySnapshot] = []
+    for snapshot in snapshots:
+        if (
+            not isinstance(snapshot, HistorySnapshot)
+            or snapshot.revision not in parent_map
+            or snapshot.revision in snapshot_revisions
+        ):
+            raise ReleaseError("Public history snapshot inventory is malformed.")
+        snapshot_revisions.add(snapshot.revision)
+        paths = tuple(snapshot.paths)
+        if LEGACY_PUBLIC_HISTORY_PATH in snapshot.metadata:
+            raise ReleaseError("Public legacy label contents were unexpectedly read.")
+        actual_presence = LEGACY_PUBLIC_HISTORY_PATH in paths
+        if actual_presence is not presence_map[snapshot.revision]:
+            raise ReleaseError(
+                "Public history snapshot presence differs from its audit."
+            )
+        sanitized.append(
+            HistorySnapshot(
+                revision=snapshot.revision,
+                paths=tuple(
+                    path for path in paths if path != LEGACY_PUBLIC_HISTORY_PATH
+                ),
+                metadata=dict(snapshot.metadata),
+            )
+        )
+    if snapshot_revisions != set(revisions):
+        raise ReleaseError("Public history snapshots do not match the reachable graph.")
+    _scan_public_history(tuple(sanitized), "hf")
+
+
 def _audit_public_remote(
     hub,
     token: str,
     public: _PublicSnapshot,
-) -> None:
+    *,
+    legacy_public_history_policy: str | None,
+) -> bool:
     if _tree_fingerprint(Path(PUBLIC_STAGE)) != public.fingerprint:
         raise ReleaseError("The public stage changed after its audit.")
     try:
@@ -946,7 +1194,20 @@ def _audit_public_remote(
                 raise ReleaseError(
                     "A public file digest differs from the approved anchor."
                 )
-        _scan_public_history(hub.history_snapshots(PUBLIC_HF_REPOSITORY, token), "hf")
+        snapshots = hub.history_snapshots(PUBLIC_HF_REPOSITORY, token)
+        if legacy_public_history_policy is None:
+            _scan_public_history(snapshots, "hf")
+            return False
+        _validate_legacy_public_history(
+            hub.public_history_audit(
+                PUBLIC_HF_REPOSITORY,
+                state.revision,
+                token,
+            ),
+            snapshots,
+            expected_head=state.revision,
+        )
+        return True
     except (ReleaseError, RemoteMovedError):
         raise
     except Exception as exc:
@@ -1056,6 +1317,8 @@ def run_private_continuation(
     public_auditor: Callable[[Path], Mapping[str, object]] | None = None,
     legacy_history_policy: str | None = None,
     legacy_history_confirmation: str | None = None,
+    legacy_public_history_policy: str | None = None,
+    legacy_public_history_confirmation: str | None = None,
 ) -> dict[str, object]:
     """Dry-run or exact-parent publish the two-file disabled private release."""
     _validate_remote_config(config)
@@ -1082,12 +1345,39 @@ def run_private_continuation(
         raise ReleaseError(
             "Legacy-history publication requires its exact confirmation."
         )
+    if legacy_public_history_policy not in {None, LEGACY_PUBLIC_HISTORY_POLICY}:
+        raise ReleaseError("The retained public history policy is invalid.")
+    if (
+        legacy_public_history_policy is None
+        and legacy_public_history_confirmation is not None
+    ):
+        raise ReleaseError(
+            "A public-history confirmation requires the exact closed policy."
+        )
+    if (
+        legacy_public_history_confirmation is not None
+        and legacy_public_history_confirmation != LEGACY_PUBLIC_HISTORY_CONFIRMATION
+    ):
+        raise ReleaseError("The retained public history confirmation is invalid.")
+    if (
+        publish
+        and legacy_public_history_policy == LEGACY_PUBLIC_HISTORY_POLICY
+        and legacy_public_history_confirmation != LEGACY_PUBLIC_HISTORY_CONFIRMATION
+    ):
+        raise ReleaseError(
+            "Public-history publication requires its exact confirmation."
+        )
     # Preparation already ran the full PDF auditor.  Dry-run/publication recheck
     # the immutable metadata, path/stat inventory, and remote PDF digests without
     # creating another local PDF-audit workspace.
     public = _audit_local_public(Path(config.public_stage), None)
     private = _load_private_stage(config, public)
-    _audit_public_remote(hf_backend, token, public)
+    public_history_matched = _audit_public_remote(
+        hf_backend,
+        token,
+        public,
+        legacy_public_history_policy=legacy_public_history_policy,
+    )
     status, non_test, history_result = _inspect_private(
         config,
         hf_backend,
@@ -1104,12 +1394,18 @@ def run_private_continuation(
                 if legacy_history_policy == LEGACY_HISTORY_POLICY
                 else None
             ),
+            public_history_matched=public_history_matched,
         )
     if status == "already-published":
         returned = config.private_hf_base
     else:
         # Recheck both immutable anchors immediately before the only write.
-        _audit_public_remote(hf_backend, token, public)
+        boundary_public_history = _audit_public_remote(
+            hf_backend,
+            token,
+            public,
+            legacy_public_history_policy=legacy_public_history_policy,
+        )
         boundary_status, boundary_non_test, boundary_history = _inspect_private(
             config,
             hf_backend,
@@ -1121,6 +1417,7 @@ def run_private_continuation(
             boundary_status != "pending"
             or boundary_non_test != non_test
             or boundary_history != history_result
+            or boundary_public_history is not public_history_matched
         ):
             raise ReleaseError("Private state changed at the publication boundary.")
         try:
@@ -1170,7 +1467,16 @@ def run_private_continuation(
             raise ReleaseError(
                 "Private state changed during post-publication history audit."
             )
-        _audit_public_remote(hf_backend, token, public)
+        post_public_history = _audit_public_remote(
+            hf_backend,
+            token,
+            public,
+            legacy_public_history_policy=legacy_public_history_policy,
+        )
+        if post_public_history is not public_history_matched:
+            raise ReleaseError(
+                "Public history changed during post-publication reconciliation."
+            )
     except Exception as exc:
         if status == "pending":
             raise PublicationUncertainError(
@@ -1186,6 +1492,7 @@ def run_private_continuation(
         legacy_result=(
             post_history if legacy_history_policy == LEGACY_HISTORY_POLICY else None
         ),
+        public_history_matched=public_history_matched,
     )
 
 
@@ -1769,6 +2076,195 @@ class HuggingFaceBackend(_GuardedHuggingFaceBackend):
             )
             return paths, audit
 
+    def _public_history_audit_from_remote(
+        self, remote: str, expected_head: str, token: str
+    ) -> PublicHistoryAudit:
+        _validate_revision(expected_head, "Public history head")
+        environment = self._git_environment(token)
+        try:
+            temporary = tempfile.TemporaryDirectory(prefix="docsem-public-history-")
+        except OSError as exc:
+            raise ReleaseError(
+                "A public history workspace could not be created safely."
+            ) from exc
+        with temporary as name:
+            root = Path(name)
+            root.chmod(0o700)
+            self._verify_filter_capability(root, remote, expected_head, environment)
+            repository = root / "repository.git"
+            repository.mkdir(mode=0o700)
+            self._run_history_git(
+                ("init", "--bare", "."), cwd=repository, environment=environment
+            )
+            self._run_history_git(
+                (
+                    "fetch",
+                    "--filter=blob:none",
+                    "--no-tags",
+                    "--force",
+                    remote,
+                    "refs/heads/main",
+                ),
+                cwd=repository,
+                environment=environment,
+            )
+            fetched = (
+                self._run_history_git(
+                    ("rev-parse", "FETCH_HEAD"), cwd=repository, environment=environment
+                )
+                .decode("ascii")
+                .strip()
+            )
+            if fetched != expected_head:
+                raise RemoteMovedError("Public history moved from its expected head.")
+            self._verify_no_blob_objects(repository, environment)
+            shallow_value = self._run_history_git(
+                ("rev-parse", "--is-shallow-repository"),
+                cwd=repository,
+                environment=environment,
+            ).strip()
+            if shallow_value not in {b"true", b"false"}:
+                raise ReleaseError("Public history depth could not be verified.")
+            count_text = (
+                self._run_history_git(
+                    ("rev-list", "--count", "FETCH_HEAD"),
+                    cwd=repository,
+                    environment=environment,
+                )
+                .decode("ascii")
+                .strip()
+            )
+            if (
+                not count_text.isdigit()
+                or not 1 <= int(count_text) <= MAX_HISTORY_COMMITS
+            ):
+                raise ReleaseError(
+                    "Public history exceeds the bounded reconciliation limit."
+                )
+            graph_output = self._run_history_git(
+                ("rev-list", "--parents", "--reverse", "--topo-order", "FETCH_HEAD"),
+                cwd=repository,
+                environment=environment,
+                max_output=MAX_GIT_PATH_OUTPUT_BYTES,
+            )
+            try:
+                graph_rows = tuple(
+                    tuple(line.decode("ascii").split())
+                    for line in graph_output.splitlines()
+                    if line
+                )
+            except UnicodeDecodeError as exc:
+                raise ReleaseError("Public history graph is malformed.") from exc
+            if len(graph_rows) != int(count_text):
+                raise ReleaseError("Public history graph is incomplete.")
+            graph: list[tuple[str, tuple[str, ...]]] = []
+            reachable: set[str] = set()
+            for row in graph_rows:
+                if not row or any(
+                    not re.fullmatch(r"[0-9a-f]{40}", item) for item in row
+                ):
+                    raise ReleaseError("Public history graph is malformed.")
+                revision, parents = row[0], tuple(row[1:])
+                if revision in reachable or any(
+                    parent not in reachable for parent in parents
+                ):
+                    raise ReleaseError("Public history graph is malformed.")
+                reachable.add(revision)
+                graph.append((revision, parents))
+            if not graph or graph[-1][0] != fetched:
+                raise ReleaseError("Public history graph does not end at its head.")
+
+            events: list[PublicHistoryEvent] = []
+            presence: list[tuple[str, bool]] = []
+            for revision, parents in graph:
+                listing = self._run_history_git(
+                    (
+                        "ls-tree",
+                        "--name-only",
+                        revision,
+                        "--",
+                        LEGACY_PUBLIC_HISTORY_PATH,
+                    ),
+                    cwd=repository,
+                    environment=environment,
+                )
+                if listing == b"":
+                    present = False
+                elif listing == f"{LEGACY_PUBLIC_HISTORY_PATH}\n".encode("utf-8"):
+                    present = True
+                else:
+                    raise ReleaseError(
+                        "Public history path presence metadata is malformed."
+                    )
+                presence.append((revision, present))
+
+                changes = self._run_history_git(
+                    (
+                        "diff-tree",
+                        "-m",
+                        "--root",
+                        "--no-commit-id",
+                        "--name-status",
+                        "-r",
+                        "--no-renames",
+                        "--no-ext-diff",
+                        "-z",
+                        revision,
+                        "--",
+                        LEGACY_PUBLIC_HISTORY_PATH,
+                    ),
+                    cwd=repository,
+                    environment=environment,
+                )
+                parts = tuple(item for item in changes.split(b"\0") if item)
+                if not parts:
+                    continue
+                if len(parts) != 2:
+                    raise ReleaseError("Public history change metadata is malformed.")
+                try:
+                    status = parts[0].decode("ascii")
+                    changed_path = parts[1].decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    raise ReleaseError(
+                        "Public history change metadata is malformed."
+                    ) from exc
+                if changed_path != LEGACY_PUBLIC_HISTORY_PATH:
+                    raise ReleaseError("Public history change path is inconsistent.")
+                seconds = self._run_history_git(
+                    ("log", "-1", "--format=%ct", revision),
+                    cwd=repository,
+                    environment=environment,
+                ).strip()
+                if not seconds.isdigit():
+                    raise ReleaseError("Public history commit metadata is malformed.")
+                try:
+                    timestamp = datetime.fromtimestamp(
+                        int(seconds), tz=timezone.utc
+                    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+                except (OverflowError, OSError, ValueError) as exc:
+                    raise ReleaseError(
+                        "Public history commit metadata is malformed."
+                    ) from exc
+                events.append(
+                    PublicHistoryEvent(
+                        revision=revision,
+                        parents=parents,
+                        timestamp=timestamp,
+                        status=status,
+                        path=changed_path,
+                    )
+                )
+            self._verify_no_blob_objects(repository, environment)
+            self._verify_filter_capability(root, remote, expected_head, environment)
+            return PublicHistoryAudit(
+                head=fetched,
+                graph=tuple(graph),
+                events=tuple(events),
+                presence=tuple(presence),
+                shallow=shallow_value == b"true",
+                blob_objects_fetched=False,
+            )
+
     def _history_path_names_from_remote(
         self, remote: str, expected_head: str, token: str
     ) -> frozenset[str]:
@@ -1799,6 +2295,15 @@ class HuggingFaceBackend(_GuardedHuggingFaceBackend):
             f"https://huggingface.co/datasets/{repository}", expected_head, token
         )
 
+    def public_history_audit(
+        self, repository: str, expected_head: str, token: str
+    ) -> PublicHistoryAudit:
+        if repository != PUBLIC_HF_REPOSITORY:
+            raise ReleaseError("The public history repository is invalid.")
+        return self._public_history_audit_from_remote(
+            f"https://huggingface.co/datasets/{repository}", expected_head, token
+        )
+
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -1816,6 +2321,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--confirm")
     parser.add_argument("--legacy-history-policy")
     parser.add_argument("--confirm-legacy-history")
+    parser.add_argument("--legacy-public-history-policy")
+    parser.add_argument("--confirm-legacy-public-history")
     return parser.parse_args(argv)
 
 
@@ -1838,6 +2345,8 @@ def main(
             if (
                 args.legacy_history_policy is not None
                 or args.confirm_legacy_history is not None
+                or args.legacy_public_history_policy is not None
+                or args.confirm_legacy_public_history is not None
             ):
                 raise ReleaseError("Legacy history options are invalid for staging.")
             result = prepare_stage(config, public_auditor=public_auditor)
@@ -1863,6 +2372,8 @@ def main(
                 public_auditor=public_auditor,
                 legacy_history_policy=args.legacy_history_policy,
                 legacy_history_confirmation=args.confirm_legacy_history,
+                legacy_public_history_policy=args.legacy_public_history_policy,
+                legacy_public_history_confirmation=(args.confirm_legacy_public_history),
             )
     except PublicationUncertainError as exc:
         print(json.dumps({"status": "uncertain", "error": str(exc)}), file=sys.stderr)
