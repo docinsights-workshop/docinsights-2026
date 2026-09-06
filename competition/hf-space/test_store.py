@@ -132,10 +132,21 @@ class HubTestStore:
                     )
 
                 attempt_number = len(snapshot.attempts) + 1
+                first_attempts = None
+                if attempt_number == 1:
+                    # Cross-account reconstruction may require many pinned Hub
+                    # reads. Complete it before the final admission timestamp so
+                    # that slow I/O cannot carry an old decision past the close.
+                    first_attempts = self._load_attempt_one_records(snapshot)
+                    if snapshot.provisional != _provisional_projection(
+                        snapshot.policy, first_attempts
+                    ):
+                        raise _Unavailable()
 
                 # Resample the authoritative Space-server clock immediately before
-                # every exact-parent CAS. Conflict retries therefore cannot carry a
-                # stale pre-deadline admission decision across the hard close.
+                # constructing and issuing every exact-parent CAS. No network I/O
+                # occurs between this check and create_commit(). Conflict retries
+                # therefore cannot carry a stale decision across the hard close.
                 commit_now = self.now_provider()
                 _require_open(snapshot.policy, commit_now)
                 accepted_at = _accepted_at(commit_now)
@@ -175,12 +186,7 @@ class HubTestStore:
                 account_projection_bytes = _bounded_json_bytes(account_projection)
                 organizer_projection_bytes = _bounded_json_bytes(organizer_projection)
                 provisional_projection_bytes = None
-                if attempt_number == 1:
-                    first_attempts = self._load_attempt_one_records(snapshot)
-                    if snapshot.provisional != _provisional_projection(
-                        snapshot.policy, first_attempts
-                    ):
-                        raise _Unavailable()
+                if first_attempts is not None:
                     provisional_projection_bytes = _bounded_json_bytes(
                         _provisional_projection(
                             snapshot.policy,

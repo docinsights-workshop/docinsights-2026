@@ -136,6 +136,7 @@ class InMemoryHub:
         self.repo_info_calls = 0
         self.repo_error = None
         self.download_error = None
+        self.download_hook = None
         self.create_error = None
         self.create_error_after_apply = None
         self.mutate_after_apply = None
@@ -176,6 +177,8 @@ class InMemoryHub:
             if self.download_error is not None:
                 raise self.download_error
             self.download_calls.append((revision, filename))
+            if self.download_hook is not None:
+                self.download_hook(revision, filename)
             snapshot = self._snapshots.get(revision)
             if snapshot is None or filename not in snapshot:
                 raise EntryNotFoundError("not found")
@@ -732,6 +735,48 @@ class HubTestStoreTests(unittest.TestCase):
 
         self.assertEqual(len(hub.create_calls), 1)
         self.assertFalse(any(path.startswith("attempts/test/") for path in hub.files))
+
+    def test_first_attempt_resamples_after_cross_account_projection_reads(self):
+        hub = InMemoryHub()
+        first_store = HubTestStore(
+            hub,
+            repo_id="private/repo",
+            release_config_path="sealed/release.json",
+            gold_config_path="sealed/gold.jsonl",
+            now_provider=lambda: NOW,
+        )
+        first_store.submit(IDENTITY, META, PREDICTIONS, METRICS)
+        committed_before = len(hub.create_calls)
+        clock = [TEST_CLOSE - dt.timedelta(microseconds=1)]
+        existing_key = account_key(IDENTITY)
+
+        def cross_close_during_reconstruction(revision, filename):
+            if filename == f"projections/test/accounts/{existing_key}.json":
+                clock[0] = TEST_CLOSE
+
+        hub.download_hook = cross_close_during_reconstruction
+        other = OAuthIdentity(
+            sub="oauth-subject-other",
+            username="other-user",
+            email="other@example.org",
+        )
+        second_store = HubTestStore(
+            hub,
+            repo_id="private/repo",
+            release_config_path="sealed/release.json",
+            gold_config_path="sealed/gold.jsonl",
+            now_provider=lambda: clock[0],
+        )
+
+        with self.assertRaisesRegex(TestStoreError, "not open"):
+            second_store.submit(
+                other,
+                {**META, "team": "Other Team"},
+                PREDICTIONS,
+                METRICS,
+            )
+
+        self.assertEqual(len(hub.create_calls), committed_before)
 
     def test_accepted_at_uses_the_fresh_precommit_clock_instant(self):
         accepted_at = NOW + dt.timedelta(seconds=7)
