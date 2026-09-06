@@ -53,7 +53,7 @@ permalink: /shared-task/
         <h2>DocSem</h2>
         <p class="challenge-tagline">Document-grounded quantitative reasoning with evidence attribution</p>
       </div>
-      <span class="challenge-status challenge-status-ready">Training data updated Aug 31</span>
+      <span class="challenge-status challenge-status-ready">Test data released Sep 5</span>
     </header>
 
     <div class="challenge-feature-body">
@@ -68,8 +68,8 @@ permalink: /shared-task/
             <h3 id="docsem-validation-update">Validation ground truth refreshed Sep 3</h3>
             <p>Three organizer-only validation ground-truth labels have now been corrected, most recently on <strong>September 3, 2026</strong>, following additional data review. All existing submissions were rescored, and the leaderboard now reflects the updated results. Public validation inputs, task definition, and data format are unchanged.</p>
           </aside>
-          <p><strong>Final evaluation:</strong> The held-out test release is not available yet, and test submissions remain closed while the organizers complete the official release and integrity checks. Participants will be notified when it becomes available and asked to submit their test-set results. Performance on the held-out test set will determine the final leaderboard.</p>
-          <p>When the official test window opens, the portal will accept up to three accepted test submissions per signed-in Hugging Face account. The first accepted test attempt returns answer accuracy and evidence F1; scores for attempts two and three are withheld until organizer finalization. The best eligible attempt from each account determines the final ranking. The public portal will keep separate Validation leaderboard and Final test leaderboard views, with no test ranks published during the submission window.</p>
+          <p><strong>Test data released September 5:</strong> The held-out test set is now available in the <a href="https://huggingface.co/datasets/amitbcp/docinsights-2026-shared-task-data" target="_blank" rel="noopener">public dataset</a>: 1,730 tasks and PDFs without labels. The test submission window will be announced separately after portal activation.</p>
+          <p><strong>Test leaderboard policy:</strong> Once test submissions open, each signed-in Hugging Face account may make at most three accepted test submissions. During the submission window, the public board will show ranks only; no test scores or per-example feedback will be shown. A submitter may view their own score and receipt in their authenticated portal history. The portal will keep separate Validation leaderboard and Final test leaderboard views. After the competition closes, organizers will reveal the scores and publish the final leaderboard. The best eligible attempt from each account determines the final rank, ordered by answer accuracy and then evidence F1.</p>
           <p>The quota is enforced per Hugging Face account, not per team or person. Team members may submit from their own authenticated accounts, and each qualifying account is ranked independently under the same best-of-three rule.</p>
         </aside>
         <div class="challenge-actions">

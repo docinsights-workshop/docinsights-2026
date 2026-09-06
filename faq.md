@@ -63,9 +63,9 @@ permalink: /faq/
   </article>
   <article>
     <h2>How will DocSem held-out test submissions work?</h2>
-    <p>The held-out test release is not available yet, and test submissions remain closed while organizers complete the official release and integrity checks. Validation submission and the provisional validation leaderboard remain available.</p>
-    <p>After the official test window opens, the portal will accept up to three accepted submissions per signed-in Hugging Face account. The first accepted attempt returns answer accuracy and evidence F1 and can be retrieved later after signing in with the same account. The scores for attempts two and three remain withheld until organizer finalization. The best eligible attempt per account determines the final ranking.</p>
-    <p>The public portal has separate Validation leaderboard and Final test leaderboard views. It publishes no test ranks during the submission window. The quota is enforced per Hugging Face account rather than per team or person; team members using separate authenticated accounts are treated as separate accounts for quota and ranking.</p>
+    <p>The public test data is released: 1,730 held-out tasks and PDFs are available without labels. Test submissions will open when the portal activation is announced; validation submission and the provisional validation leaderboard remain available.</p>
+    <p>Once open, the portal will accept up to three accepted submissions per signed-in Hugging Face account. The public test board shows ranks only during the submission window; no test scores or per-example feedback are displayed. A submitter can view their own score and receipt in their authenticated portal history. Scores are revealed after the competition closes, and the best eligible attempt per account determines the final ranking by answer accuracy, then evidence F1.</p>
+    <p>The public portal has separate Validation leaderboard and Final test leaderboard views. The quota is enforced per Hugging Face account rather than per team or person; team members using separate authenticated accounts are treated as separate accounts for quota and ranking.</p>
   </article>
   <article>
     <h2>Is Dr.DocBench open for submissions?</h2>

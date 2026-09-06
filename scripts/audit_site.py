@@ -96,8 +96,9 @@ def main():
         "Dr.DocBench is live on EvalAI",
         "up to USD 3,000 in prizes",
         "Latest update",
-        "DocSem validation GT refreshed",
-        "Sep 3",
+        "DocSem test data released",
+        "Sep 5",
+        "DocSem held-out test data released",
     ]:
         assert_true(text in home.text, f"home page missing text: {text}")
     home_links = [link.get("href", "") for link in home.links]
@@ -191,7 +192,7 @@ def main():
         "USD 5,000+",
         "DocSem",
         "Dr.DocBench",
-        "Training data updated Aug 31",
+        "Test data released Sep 5",
         "Use the August 31 release",
         "seven annotation inconsistencies",
         "task definition and data format are unchanged",
@@ -199,14 +200,21 @@ def main():
         "Three organizer-only validation ground-truth labels",
         "All existing submissions were rescored",
         "leaderboard now reflects the updated results",
-        "The held-out test release is not available yet",
-        "up to three accepted test submissions per signed-in Hugging Face account",
-        "The first accepted test attempt returns answer accuracy and evidence F1",
-        "attempts two and three are withheld until organizer finalization",
+        "Test data released September 5",
+        "1,730 held-out test tasks and PDFs",
+        "Test leaderboard policy",
+        "public board will show ranks only",
+        "no test scores or per-example feedback",
+        "submitter may view their own score",
+        "best eligible attempt from each account",
+        "at most three accepted test submissions",
+        "During the submission window",
+        "A submitter may view their own score",
+        "After the competition closes",
+        "publish the final leaderboard",
         "best eligible attempt from each account",
         "Validation leaderboard and Final test leaderboard",
         "per Hugging Face account, not per team or person",
-        "Performance on the held-out test set will determine the final leaderboard",
         "Submissions open",
         "Submit through EvalAI by October 10",
         "October 10 at 12:59 PM UTC",
@@ -257,6 +265,9 @@ def main():
         "DocSem Validation GT Refresh",
         "September 3, 2026",
         "Three organizer-only validation ground-truth labels",
+        "DocSem Test Data Release",
+        "September 5, 2026",
+        "1,730 held-out test tasks and PDFs",
     ]:
         assert_true(text in dates.text, f"dates page missing required detail: {text}")
 
@@ -270,10 +281,13 @@ def main():
         "September 3, 2026",
         "All existing submissions were rescored",
         "How will DocSem held-out test submissions work?",
-        "held-out test release is not available yet",
+        "public test data is released",
+        "Test submissions will open when the portal activation is announced",
         "up to three accepted submissions per signed-in Hugging Face account",
-        "first accepted attempt returns answer accuracy and evidence F1",
-        "scores for attempts two and three remain withheld",
+        "public test board shows ranks only",
+        "no test scores or per-example feedback are displayed",
+        "submitter can view their own score",
+        "Scores are revealed after the competition closes",
         "best eligible attempt per account",
         "Validation leaderboard and Final test leaderboard",
         "per Hugging Face account rather than per team or person",
@@ -307,13 +321,20 @@ def main():
         "challenges page must not retain the stale shared-task placeholder",
     )
     assert_true(
-        "Participants will be notified when it becomes available" in shared_task.text
-        and "asked to submit their test-set results" in shared_task.text,
-        "DocSem test workflow must remain described as a future organizer release",
+        "The test submission window will be announced separately" in shared_task.text,
+        "DocSem test workflow must distinguish data release from portal activation",
     )
+    for stale_test_copy in (
+        "The held-out test release is not available yet",
+        "no test ranks published during the submission window",
+    ):
+        assert_true(
+            stale_test_copy not in shared_task.text,
+            f"challenges page must not retain stale test policy copy: {stale_test_copy}",
+        )
     assert_true(
         "Test submissions are open." not in shared_task.text,
-        "public workshop content must not claim the disabled DocSem test workflow is open",
+        "public workshop content must not claim the not-yet-activated DocSem test workflow is open",
     )
     for private_test_detail in (
         "TEST_GOLD_SHA256",

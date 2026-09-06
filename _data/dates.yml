@@ -18,6 +18,12 @@ challenge_items:
     date: September 3, 2026
     type: challenge
     note: Three organizer-only validation ground-truth labels have now been corrected following additional data review. All existing submissions were rescored and the leaderboard updated.
+  - label: DocSem Test Data Release
+    date: September 5, 2026
+    type: challenge
+    action_label: Download test data
+    action_url: https://huggingface.co/datasets/amitbcp/docinsights-2026-shared-task-data
+    note: 1,730 held-out test tasks and PDFs are available without labels. The submission window and portal activation will be announced separately.
   - label: Shared-task Paper Submission Deadline
     date: September 15, 2026
     time: 11:59 PM UTC

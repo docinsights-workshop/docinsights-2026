@@ -1,6 +1,6 @@
 enabled: true
 label: Latest update
-text: DocSem validation GT refreshed · Sep 3
-aria_text: Three organizer-only DocSem validation ground-truth labels have now been corrected, most recently on September 3, 2026, and all existing submissions were rescored.
+text: DocSem test data released · Sep 5
+aria_text: The held-out DocSem test data is now available. Once submissions open, each Hugging Face account may submit up to three times; public test ranks are shown without scores until the competition closes.
 action: Details
 url: https://docinsights-workshop.github.io/docinsights-2026/shared-task/
