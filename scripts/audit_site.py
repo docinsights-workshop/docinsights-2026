@@ -192,6 +192,9 @@ def main():
         "USD 5,000+",
         "DocSem",
         "Dr.DocBench",
+        "Training data",
+        "Validation data",
+        "Test data",
         "Test data released Sep 5",
         "Use the August 31 release",
         "seven annotation inconsistencies",
@@ -214,7 +217,8 @@ def main():
         "publish the final leaderboard",
         "best eligible attempt from each account",
         "Validation leaderboard and Final test leaderboard",
-        "per Hugging Face account, not per team or person",
+        "one designated Hugging Face account and one contact email",
+        "Do not use additional accounts or email addresses to bypass the three-submission quota",
         "Submissions open",
         "Submit through EvalAI by October 10",
         "October 10 at 12:59 PM UTC",
@@ -243,6 +247,15 @@ def main():
     assert_true(
         "Use the August 5 dataset release" not in shared_task.text,
         "challenges page must not retain the superseded dataset notice",
+    )
+    assert_true(
+        "<dt>Development data</dt>" not in shared_task_html
+        and "<dt>Evaluation data</dt>" not in shared_task_html,
+        "DocSem facts rail must use current split names",
+    )
+    assert_true(
+        "per Hugging Face account, not per team or person" not in shared_task.text,
+        "challenges page must not allow multi-account team submissions",
     )
     shared_task_links = [link.get("href", "") for link in shared_task.links]
     for href in [
@@ -290,7 +303,8 @@ def main():
         "Scores are revealed after the competition closes",
         "best eligible attempt per account",
         "Validation leaderboard and Final test leaderboard",
-        "per Hugging Face account rather than per team or person",
+        "one designated Hugging Face account and one contact email",
+        "Do not use additional accounts or email addresses to bypass the three-submission quota",
     ]:
         assert_true(text in faq.text, f"FAQ missing required detail: {text}")
     assert_true(
@@ -298,6 +312,10 @@ def main():
         and "Two organizer-only validation" not in dates.text
         and "Two organizer-only validation" not in faq.text,
         "public correction notices must not retain the stale two-label count",
+    )
+    assert_true(
+        "per Hugging Face account rather than per team or person" not in faq.text,
+        "FAQ must not allow multi-account team submissions",
     )
     shared_task_nav_html = shared_task_html.split('<nav class="navbar"', 1)[-1].split("</nav>", 1)[0]
     assert_true(

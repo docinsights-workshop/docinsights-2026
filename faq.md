@@ -64,8 +64,8 @@ permalink: /faq/
   <article>
     <h2>How will DocSem held-out test submissions work?</h2>
     <p>The public test data is released: 1,730 held-out tasks and PDFs are available without labels. Test submissions will open when the portal activation is announced; validation submission and the provisional validation leaderboard remain available.</p>
-    <p>Once open, the portal will accept up to three accepted submissions per signed-in Hugging Face account. The public test board shows ranks only during the submission window; no test scores or per-example feedback are displayed. A submitter can view their own score and receipt in their authenticated portal history. Scores are revealed after the competition closes, and the best eligible attempt per account determines the final ranking by answer accuracy, then evidence F1.</p>
-    <p>The public portal has separate Validation leaderboard and Final test leaderboard views. The quota is enforced per Hugging Face account rather than per team or person; team members using separate authenticated accounts are treated as separate accounts for quota and ranking.</p>
+    <p>Once open, the portal will accept up to three accepted submissions per signed-in Hugging Face account. A team competing together must use one designated Hugging Face account and one contact email for all test submissions. Do not use additional accounts or email addresses to bypass the three-submission quota; all attempts must represent the same team and follow the spirit of the evaluation.</p>
+    <p>The public test board shows ranks only during the submission window; no test scores or per-example feedback are displayed. A submitter can view their own score and receipt in their authenticated portal history. Scores are revealed after the competition closes, and the best eligible attempt per account determines the final ranking by answer accuracy, then evidence F1. The public portal has separate Validation leaderboard and Final test leaderboard views.</p>
   </article>
   <article>
     <h2>Is Dr.DocBench open for submissions?</h2>

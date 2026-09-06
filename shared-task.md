@@ -70,7 +70,7 @@ permalink: /shared-task/
           </aside>
           <p><strong>Test data released September 5:</strong> The held-out test set is now available in the <a href="https://huggingface.co/datasets/amitbcp/docinsights-2026-shared-task-data" target="_blank" rel="noopener">public dataset</a>: 1,730 tasks and PDFs without labels. The test submission window will be announced separately after portal activation.</p>
           <p><strong>Test leaderboard policy:</strong> Once test submissions open, each signed-in Hugging Face account may make at most three accepted test submissions. During the submission window, the public board will show ranks only; no test scores or per-example feedback will be shown. A submitter may view their own score and receipt in their authenticated portal history. The portal will keep separate Validation leaderboard and Final test leaderboard views. After the competition closes, organizers will reveal the scores and publish the final leaderboard. The best eligible attempt from each account determines the final rank, ordered by answer accuracy and then evidence F1.</p>
-          <p>The quota is enforced per Hugging Face account, not per team or person. Team members may submit from their own authenticated accounts, and each qualifying account is ranked independently under the same best-of-three rule.</p>
+          <p>A team competing together must use one designated Hugging Face account and one contact email for all test submissions. Do not use additional accounts or email addresses to bypass the three-submission quota; all attempts must represent the same team and follow the spirit of the evaluation.</p>
         </aside>
         <div class="challenge-actions">
           <a class="challenge-action challenge-action-primary" href="https://huggingface.co/datasets/amitbcp/docinsights-2026-shared-task-data" target="_blank" rel="noopener">Dataset and guide</a>
@@ -80,16 +80,16 @@ permalink: /shared-task/
       </div>
       <dl class="challenge-facts">
         <div>
-          <dt>Development data</dt>
+          <dt>Training data</dt>
           <dd>908 labelled training tasks with PDFs, answers, and evidence block IDs.</dd>
         </div>
         <div>
-          <dt>Evaluation data</dt>
+          <dt>Validation data</dt>
           <dd>217 validation tasks with organizer-held labels and a provisional public validation leaderboard. Final rankings use a separate held-out test set.</dd>
         </div>
         <div>
-          <dt>Submission</dt>
-          <dd>Submit one complete validation JSONL now. Test submission is currently closed; after the official release opens, sign in with Hugging Face and submit up to three complete test files.</dd>
+          <dt>Test data</dt>
+          <dd>1,730 held-out test tasks and PDFs without labels. After portal activation, teams use one designated Hugging Face account and one contact email for up to three attempts; public ranks appear during the window and scores after it closes.</dd>
         </div>
       </dl>
     </div>
