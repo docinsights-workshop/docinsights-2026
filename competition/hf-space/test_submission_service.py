@@ -423,6 +423,32 @@ class SplitAwareServiceTests(unittest.TestCase):
         scorer.assert_not_called()
         self.assertEqual(store.submissions, [])
 
+    def test_post_score_cas_cooldown_surfaces_next_eligible_message(self):
+        class RacingCooldownStore(RecordingStore):
+            def find_exact_attempt(self, identity, metadata, predictions):
+                return None
+
+            def submit(self, identity, metadata, predictions, metrics):
+                self.submissions.append(metrics)
+                raise TestCooldownError("2026-09-05T18:00:00Z")
+
+        upload = test_file()
+        self.addCleanup(Path(upload.name).unlink, missing_ok=True)
+        store = RacingCooldownStore()
+
+        with self.assertRaises(SubmissionError) as caught:
+            configured_service(store=store).submit_for_split(
+                "test", upload, TEST_META, PROFILE
+            )
+
+        self.assertEqual(
+            str(caught.exception),
+            "A distinct test attempt may be submitted at or after "
+            "2026-09-05T18:00:00Z. Exact retries remain available.",
+        )
+        self.assertEqual(len(store.submissions), 1)
+        self.assertEqual(store.submissions[0]["joint_accuracy"], 1.0)
+
     def test_validation_maintenance_gate_rejects_before_file_or_submitter_access(self):
         unreadable = FileProbe()
         submitter_calls = []

@@ -285,6 +285,8 @@ class SubmissionService:
             )
             response["accepted_at"] = receipt.accepted_at
             return response
+        except TestCooldownError as exc:
+            raise SubmissionError(str(exc)) from None
         except Exception:
             raise SubmissionError(TEST_UNAVAILABLE) from None
 
