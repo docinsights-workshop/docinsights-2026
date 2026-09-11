@@ -1122,7 +1122,7 @@ main li {
 
 .news-item {
   display: grid;
-  grid-template-columns: 150px 1fr;
+  grid-template-columns: 150px minmax(0, 1fr);
   gap: 1rem;
   align-items: start;
 }
@@ -1130,6 +1130,19 @@ main li {
 .news-item time {
   color: var(--color-rust);
   font-weight: 800;
+}
+
+.news-content {
+  min-width: 0;
+}
+
+.news-content h3 {
+  margin: 0 0 0.45rem;
+}
+
+.news-content p {
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 
 .contact-band {
