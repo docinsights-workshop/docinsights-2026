@@ -1,8 +1,11 @@
 import json
+import os
 from pathlib import Path
 import re
+import runpy
 import unittest
 import datetime as dt
+from unittest.mock import patch
 
 import gradio as gr
 from fastapi.testclient import TestClient
@@ -10,6 +13,8 @@ from fastapi.testclient import TestClient
 import app
 from app import DATASET_BIBTEX, PORTAL_CSS, PORTAL_HEAD, demo
 from submission_service import TrustedTestConfig
+from test_deployment_config import VALID_RELEASE
+from test_portal_behavior import finalized_artifacts
 
 
 def trusted_layout_config(policy):
@@ -99,6 +104,51 @@ class PortalLayoutTests(unittest.TestCase):
         ):
             with self.subTest(required=required):
                 self.assertIn(required, serialized)
+
+    def test_final_activation_defaults_to_final_and_page_load_preserves_selection(self):
+        with patch.dict(
+            os.environ,
+            {**VALID_RELEASE, "TEST_SUBMISSIONS_ENABLED": "false"},
+        ):
+            namespace = runpy.run_path(str(Path(app.__file__)))
+        portal = namespace["demo"]
+        config = portal.get_config_file()
+        selector = next(
+            component
+            for component in config["components"]
+            if component["props"].get("label") == "Leaderboard view"
+        )
+        heading = namespace["leaderboard_heading"]
+        table = namespace["leaderboard"]
+        refresh = namespace["refresh"]
+        self.assertEqual(selector["props"]["value"], "Final test leaderboard")
+        self.assertIn("Final test leaderboard", heading.value)
+        self.assertNotIn("DocSem validation leaderboard", table.value)
+        load_dependencies = [
+            dependency
+            for dependency in config["dependencies"]
+            if any(event == "load" for _, event in dependency["targets"])
+            and set(dependency["outputs"]) & {heading._id, table._id, refresh._id}
+        ]
+        self.assertEqual(len(load_dependencies), 1)
+        dependency = load_dependencies[0]
+        self.assertEqual(dependency["inputs"], [selector["id"]])
+        self.assertEqual(
+            dependency["outputs"], [heading._id, table._id, refresh._id]
+        )
+        self.assertIs(dependency["api_name"], False)
+        projection = json.loads(
+            finalized_artifacts()["projections/test/public_final.json"]
+        )
+        callback = portal.fns[dependency["id"]].fn
+        with patch.dict(
+            callback.__globals__,
+            {"_load_final_test_projection": lambda: projection},
+        ):
+            loaded_heading, loaded_table, _ = callback(selector["props"]["value"])
+        self.assertIn("Final test leaderboard", loaded_heading["value"])
+        self.assertIn("DocSem final test leaderboard", loaded_table["value"])
+        self.assertNotIn("DocSem validation leaderboard", loaded_table["value"])
 
     def test_initial_public_config_does_not_serialize_private_test_state(self):
         serialized = json.dumps(demo.get_config_file()).casefold()

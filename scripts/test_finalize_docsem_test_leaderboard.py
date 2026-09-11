@@ -113,11 +113,12 @@ def attempt(
     *,
     username=None,
     contact_email=None,
-    team="Team",
+    team=None,
     submission_name=None,
     overrides=None,
 ):
     hf_username = username or subject
+    team = hf_username if team is None else team
     email = contact_email or f"{subject}@example.org"
     identity = TestIdentity("huggingface", subject, hf_username, email, True)
     participant_names = f"Participant {subject}"
@@ -184,6 +185,34 @@ def snapshot(records, *, release_value=None, exclusions=(), adjudications=()):
 
 
 class FinalizationPlanTests(unittest.TestCase):
+    def test_final_rows_show_best_attempt_total_count_and_joint_only(self):
+        records = [
+            attempt('qa-independent', number, submission_id,
+                    f'2026-09-0{number + 1}T12:00:00Z', rows,
+                    submission_name=f'candidate-{number}', team='Public Team')
+            for number, submission_id, rows in (
+                (1, '11111111-1111-4111-8111-111111111111', predictions(second='wrong')),
+                (2, '22222222-2222-4222-8222-222222222222', predictions()),
+                (3, '33333333-3333-4333-8333-333333333333', predictions(first='wrong', second='wrong')),
+            )
+        ]
+        plan = build_finalization(snapshot(records), NOW)
+        self.assertEqual(plan.public_projection['schema_version'], 3)
+        self.assertEqual(plan.public_projection['rows'], [{
+            'rank': 1, 'team': 'Public Team', 'submission_name': 'candidate-2',
+            'selected_attempt': 2, 'total_attempts': 3, 'joint_accuracy': 1.0,
+        }])
+        for field in ('hf_username', 'answer_accuracy', 'evidence_f1'):
+            mutated = copy.deepcopy(plan.public_projection)
+            mutated['rows'][0][field] = 0.5
+            with self.assertRaises(FinalizationError):
+                audit_public_projection(mutated)
+        for count in (True, 0, 1, 4):
+            mutated = copy.deepcopy(plan.public_projection)
+            mutated['rows'][0]['total_attempts'] = count
+            with self.assertRaises(FinalizationError):
+                audit_public_projection(mutated)
+
     def test_finalizer_refuses_attempts_inside_six_hours_but_allows_boundary(self):
         self.assertEqual(TEST_ATTEMPT_COOLDOWN_SECONDS, POLICY_COOLDOWN_SECONDS)
         self.assertEqual(TEST_ATTEMPT_COOLDOWN_SECONDS, 21_600)
@@ -288,13 +317,9 @@ class FinalizationPlanTests(unittest.TestCase):
         plan = build_finalization(snapshot((record,)), NOW)
 
         self.assertEqual(plan.eligible_attempt_count, 1)
-        self.assertEqual(
-            {
-                name: plan.public_projection["rows"][0][name]
-                for name in ("joint_accuracy", "answer_accuracy", "evidence_f1")
-            },
-            {"joint_accuracy": 0.0, "answer_accuracy": 0.0, "evidence_f1": 0.0},
-        )
+        self.assertEqual(plan.public_projection["rows"][0]["joint_accuracy"], 0.0)
+        self.assertNotIn("answer_accuracy", plan.public_projection["rows"][0])
+        self.assertNotIn("evidence_f1", plan.public_projection["rows"][0])
 
     def test_joint_accuracy_is_primary_for_selection_and_public_ranking(self):
         answer_only = attempt(
@@ -329,7 +354,7 @@ class FinalizationPlanTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            [row["hf_username"] for row in plan.public_projection["rows"]],
+            [row["team"] for row in plan.public_projection["rows"]],
             ["user-a", "user-b"],
         )
         self.assertEqual(plan.public_projection["rows"][0]["selected_attempt"], 2)
@@ -374,11 +399,15 @@ class FinalizationPlanTests(unittest.TestCase):
         plan = build_finalization(snapshot((a1, a2, a3, b1)), NOW)
 
         self.assertEqual(
-            [row["hf_username"] for row in plan.public_projection["rows"]],
+            [row["team"] for row in plan.public_projection["rows"]],
             ["user-b", "user-a"],
         )
         self.assertEqual(
             [row["selected_attempt"] for row in plan.public_projection["rows"]],
+            [1, 3],
+        )
+        self.assertEqual(
+            [row["total_attempts"] for row in plan.public_projection["rows"]],
             [1, 3],
         )
         self.assertEqual(
@@ -596,7 +625,7 @@ class FinalizationPlanTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            [row["hf_username"] for row in plan.public_projection["rows"]],
+            [row["team"] for row in plan.public_projection["rows"]],
             ["account-a"],
         )
         self.assertEqual(
@@ -780,6 +809,7 @@ class FinalizationPlanTests(unittest.TestCase):
         )
 
         self.assertEqual(plan.public_projection["rows"][0]["selected_attempt"], 1)
+        self.assertEqual(plan.public_projection["rows"][0]["total_attempts"], 2)
         self.assertEqual(
             plan.public_projection["rows"][0]["submission_name"], "fallback"
         )
@@ -869,19 +899,17 @@ class FinalizationPlanTests(unittest.TestCase):
         self.assertTrue(audit_public_projection(clean))
         self.assertEqual(
             clean["schema_version"],
-            2,
+            3,
         )
         self.assertEqual(
             set(clean["rows"][0]),
             {
                 "rank",
-                "hf_username",
                 "team",
                 "submission_name",
                 "selected_attempt",
+                "total_attempts",
                 "joint_accuracy",
-                "answer_accuracy",
-                "evidence_f1",
             },
         )
         self.assertEqual(clean["rows"][0]["joint_accuracy"], 1.0)
@@ -933,7 +961,8 @@ class FinalizationPlanTests(unittest.TestCase):
 
         projection = build_finalization(snapshot((record,)), NOW).public_projection
 
-        self.assertEqual(projection["rows"][0]["hf_username"], "public-hf-user")
+        self.assertEqual(projection["rows"][0]["team"], "Public Team")
+        self.assertNotIn("hf_username", projection["rows"][0])
         rendered = json.dumps(projection, sort_keys=True)
         self.assertNotIn("private-hf-subject", rendered)
         self.assertNotIn("private-contact@example.org", rendered)
@@ -1517,7 +1546,7 @@ class LoadAndCommitTests(unittest.TestCase):
         self.assertEqual(len(self.hub.create_calls), 1)
 
         changed = copy.deepcopy(finalized.existing_public_final)
-        changed["rows"][0]["answer_accuracy"] = 0.0
+        changed["rows"][0]["joint_accuracy"] = 0.0
         corrupt = FinalizationSnapshot(
             **{
                 **finalized.constructor_fields(),

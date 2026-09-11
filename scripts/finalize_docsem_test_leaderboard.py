@@ -75,13 +75,11 @@ TEST_ATTEMPT_COOLDOWN_SECONDS = 21_600
 PUBLIC_ROW_FIELDS = frozenset(
     {
         "rank",
-        "hf_username",
         "team",
         "submission_name",
         "selected_attempt",
+        "total_attempts",
         "joint_accuracy",
-        "answer_accuracy",
-        "evidence_f1",
     }
 )
 PUBLIC_PROJECTION_FIELDS = frozenset(
@@ -503,6 +501,9 @@ def build_finalization(snapshot, now) -> FinalizationPlan:
 
     _validate_attempt_spacing(snapshot.attempts)
     candidates, excluded = _eligible_attempts(snapshot, base_release, close_at)
+    # Accepted attempts count toward quota even if organizer adjudication later
+    # excludes an attempt from selection. Invalid/uncommitted rows do not count.
+    total_attempts = Counter(item.value["account_key"] for item in candidates)
     decisions, applied_records = _audit_decisions(snapshot, base_release, current)
     candidates, audit_excluded = _apply_audit_decisions(candidates, decisions)
     excluded.extend(audit_excluded)
@@ -531,7 +532,7 @@ def build_finalization(snapshot, now) -> FinalizationPlan:
         )
 
     selected = _select_accounts(rescored)
-    public_projection = _public_projection(base_release, selected)
+    public_projection = _public_projection(base_release, selected, total_attempts)
     audit_public_projection(public_projection)
     public_bytes = _bounded_json(public_projection)
     projection_sha = _sha256(public_bytes)
@@ -630,7 +631,7 @@ def audit_public_projection(value) -> bool:
         raise FinalizationError("The public final projection failed its privacy audit.")
     if (
         type(value.get("schema_version")) is not int
-        or value.get("schema_version") != 2
+        or value.get("schema_version") != 3
         or value.get("split") != "test"
         or not isinstance(value.get("release_id"), str)
         or not value["release_id"].strip()
@@ -647,18 +648,19 @@ def audit_public_projection(value) -> bool:
             type(row.get("rank")) is not int
             or row["rank"] != expected_rank
             or type(row.get("selected_attempt")) is not int
-            or not 1 <= row["selected_attempt"] <= 3
+            or type(row.get("total_attempts")) is not int
+            or not 1 <= row["selected_attempt"] <= row["total_attempts"] <= 3
         ):
             raise FinalizationError(
                 "The public final projection failed its privacy audit."
             )
-        for field_name in ("hf_username", "team", "submission_name"):
+        for field_name in ("team", "submission_name"):
             text = row.get(field_name)
             if not is_valid_public_text(text):
                 raise FinalizationError(
                     "The public final projection failed its privacy audit."
                 )
-        for field_name in ("joint_accuracy", "answer_accuracy", "evidence_f1"):
+        for field_name in ("joint_accuracy",):
             metric = row.get(field_name)
             if (
                 type(metric) is not float
@@ -1240,24 +1242,22 @@ def _attempt_rank_key(entry):
     )
 
 
-def _public_projection(release, selected):
+def _public_projection(release, selected, total_attempts):
     rows = []
     for rank, (item, metrics) in enumerate(selected, start=1):
         record = item.value
         rows.append(
             {
                 "rank": rank,
-                "hf_username": str(record["hf_username"]),
                 "team": str(record["team"]),
                 "submission_name": str(record["submission_name"]),
                 "selected_attempt": int(record["attempt_number"]),
+                "total_attempts": total_attempts[record["account_key"]],
                 "joint_accuracy": float(metrics["joint_accuracy"]),
-                "answer_accuracy": float(metrics["answer_accuracy"]),
-                "evidence_f1": float(metrics["evidence_f1"]),
             }
         )
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "split": "test",
         "release_id": release["release_id"],
         "task_manifest_sha256": release["task_manifest_sha256"],

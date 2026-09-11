@@ -1,6 +1,7 @@
 import datetime as dt
 import hashlib
 import json
+import re
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -50,21 +51,20 @@ def canonical_json(value):
 
 def finalized_artifacts(*, rows=None):
     projection = {
-        "schema_version": 2,
+        "schema_version": 3,
         "split": "test",
         "release_id": "docsem-test-2026",
         "task_manifest_sha256": TASK_DIGEST,
         "rows": rows
-        or [
+        if rows is not None
+        else [
             {
                 "rank": 1,
-                "hf_username": "alice<script>",
                 "team": "Team <Alpha>",
                 "submission_name": "best & final",
                 "selected_attempt": 2,
+                "total_attempts": 3,
                 "joint_accuracy": 0.625,
-                "answer_accuracy": 0.75,
-                "evidence_f1": 0.5,
             }
         ],
     }
@@ -935,6 +935,19 @@ class PortalBehaviorTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(projection["rows"][0]["selected_attempt"], 2)
+        self.assertEqual(projection["rows"][0]["total_attempts"], 3)
+        self.assertEqual(projection["schema_version"], 3)
+        self.assertEqual(
+            set(projection["rows"][0]),
+            {
+                "rank",
+                "team",
+                "submission_name",
+                "selected_attempt",
+                "total_attempts",
+                "joint_accuracy",
+            },
+        )
         self.assertEqual(
             reads,
             [
@@ -1022,14 +1035,32 @@ class PortalBehaviorTests(unittest.IsolatedAsyncioTestCase):
         rendered = app.final_test_leaderboard_html(projection)
 
         self.assertIn("DocSem final test leaderboard", rendered)
-        self.assertIn("alice&lt;script&gt;", rendered)
         self.assertIn("Team &lt;Alpha&gt;", rendered)
         self.assertIn("best &amp; final", rendered)
         self.assertIn("62.50%", rendered)
-        self.assertIn("75.00%", rendered)
-        self.assertIn("50.00%", rendered)
+        self.assertEqual(
+            re.findall(r'<th\b[^>]*>(.*?)</th>', rendered),
+            [
+                "Rank",
+                "Team",
+                "Submission name",
+                "Selected attempt",
+                "Total attempts",
+                "Joint Exact Accuracy",
+            ],
+        )
+        self.assertEqual(
+            re.findall(r'<td\b[^>]*>(.*?)</td>', rendered),
+            ["1", "Team &lt;Alpha&gt;", "best &amp; final", "2", "3", "62.50%"],
+        )
         self.assertNotIn("<script>", rendered)
         for private_name in (
+            "hf_username",
+            "Hugging Face account",
+            "answer_accuracy",
+            "evidence_f1",
+            "Answer Exact Accuracy",
+            "Evidence F1",
             "email",
             "identity_subject",
             "contact_email",
@@ -1038,6 +1069,37 @@ class PortalBehaviorTests(unittest.IsolatedAsyncioTestCase):
             "per_example",
         ):
             self.assertNotIn(private_name, rendered)
+
+    def test_empty_final_test_table_spans_the_six_public_columns(self):
+        projection = json.loads(
+            finalized_artifacts(rows=[])["projections/test/public_final.json"]
+        )
+
+        rendered = app.final_test_leaderboard_html(projection)
+
+        self.assertIn('colspan="6"', rendered)
+        self.assertIn("No eligible final test submissions.", rendered)
+
+    def test_final_loader_accepts_each_selected_attempt_within_total_attempts(self):
+        row = json.loads(finalized_artifacts()["projections/test/public_final.json"])[
+            "rows"
+        ][0]
+        for total in (1, 2, 3):
+            for selected in range(1, total + 1):
+                with self.subTest(total=total, selected=selected):
+                    artifacts = finalized_artifacts(
+                        rows=[{**row, "total_attempts": total, "selected_attempt": selected}]
+                    )
+                    projection = app._load_final_test_projection(
+                        api=FinalLeaderboardHub(),
+                        artifact_reader=lambda path, revision: artifacts[path],
+                        deployment=final_deployment(),
+                        repo_id="private/docsem",
+                        token="private-token-sentinel",
+                    )
+
+                    self.assertEqual(projection["rows"][0]["total_attempts"], total)
+                    self.assertEqual(projection["rows"][0]["selected_attempt"], selected)
 
     def test_enabled_final_view_renders_only_after_verified_finalization(self):
         projection = json.loads(
@@ -1072,7 +1134,7 @@ class PortalBehaviorTests(unittest.IsolatedAsyncioTestCase):
 
         wrong_digest = dict(base)
         projection = json.loads(wrong_digest["projections/test/public_final.json"])
-        projection["rows"][0]["answer_accuracy"] = 0.5
+        projection["rows"][0]["joint_accuracy"] = 0.5
         wrong_digest["projections/test/public_final.json"] = canonical_json(projection)
         cases.append(("projection digest", FinalLeaderboardHub(), wrong_digest))
 
@@ -1104,6 +1166,31 @@ class PortalBehaviorTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+        missing_total = dict(base)
+        projection = json.loads(missing_total["projections/test/public_final.json"])
+        projection["rows"][0].pop("total_attempts")
+        missing_total["projections/test/public_final.json"] = canonical_json(projection)
+        cases.append(
+            (
+                "missing total attempts",
+                FinalLeaderboardHub(),
+                resign_final_artifacts(missing_total),
+            )
+        )
+
+        for label, field, value in (
+            ("old final schema", "schema_version", 2),
+            ("non-integer final schema", "schema_version", 3.0),
+            ("unknown projection field", "extra", "unexpected"),
+        ):
+            mutated = dict(base)
+            projection = json.loads(mutated["projections/test/public_final.json"])
+            projection[field] = value
+            mutated["projections/test/public_final.json"] = canonical_json(projection)
+            cases.append(
+                (label, FinalLeaderboardHub(), resign_final_artifacts(mutated))
+            )
+
         invalid_audit_attempt = dict(base)
         audit = json.loads(
             invalid_audit_attempt["private/test_finalization_audit.json"]
@@ -1123,8 +1210,19 @@ class PortalBehaviorTests(unittest.IsolatedAsyncioTestCase):
         for label, field, value in (
             ("non-contiguous rank", "rank", 2),
             ("attempt outside quota", "selected_attempt", 4),
-            ("metric outside bounds", "answer_accuracy", 1.01),
-            ("non-float metric", "evidence_f1", 1),
+            ("zero selected attempt", "selected_attempt", 0),
+            ("boolean selected attempt", "selected_attempt", True),
+            ("selected attempt exceeds total", "total_attempts", 1),
+            ("zero total attempts", "total_attempts", 0),
+            ("total attempts exceeds quota", "total_attempts", 4),
+            ("non-integer total attempts", "total_attempts", 3.0),
+            ("boolean total attempts", "total_attempts", True),
+            ("metric outside bounds", "joint_accuracy", 1.01),
+            ("non-float metric", "joint_accuracy", 1),
+            ("unexpected account field", "hf_username", "alice"),
+            ("unexpected answer score", "answer_accuracy", 0.75),
+            ("unexpected evidence score", "evidence_f1", 0.5),
+            ("unknown public row field", "extra", "unexpected"),
             ("unbounded public text", "team", "x" * 4097),
             ("control character", "submission_name", "bad\nname"),
         ):

@@ -96,13 +96,11 @@ FINAL_TEST_MAX_ROWS = 30_000
 FINAL_TEST_PUBLIC_ROW_FIELDS = frozenset(
     {
         "rank",
-        "hf_username",
         "team",
         "submission_name",
         "selected_attempt",
+        "total_attempts",
         "joint_accuracy",
-        "answer_accuracy",
-        "evidence_f1",
     }
 )
 FINAL_TEST_PROJECTION_FIELDS = frozenset(
@@ -1097,7 +1095,7 @@ def _validate_final_projection(projection, release):
         not isinstance(projection, Mapping)
         or set(projection) != FINAL_TEST_PROJECTION_FIELDS
         or type(projection.get("schema_version")) is not int
-        or projection.get("schema_version") != 2
+        or projection.get("schema_version") != 3
         or projection.get("split") != "test"
         or projection.get("release_id") != release.get("release_id")
         or projection.get("task_manifest_sha256") != release.get("task_manifest_sha256")
@@ -1111,24 +1109,23 @@ def _validate_final_projection(projection, release):
             or set(row) != FINAL_TEST_PUBLIC_ROW_FIELDS
             or type(row.get("rank")) is not int
             or row["rank"] != expected_rank
+            or type(row.get("total_attempts")) is not int
+            or not 1 <= row["total_attempts"] <= 3
             or type(row.get("selected_attempt")) is not int
-            or not 1 <= row["selected_attempt"] <= 3
+            or not 1 <= row["selected_attempt"] <= row["total_attempts"]
             or any(
                 not _valid_public_text(row.get(field))
-                for field in ("hf_username", "team", "submission_name")
+                for field in ("team", "submission_name")
             )
         ):
             raise FinalLeaderboardError("The final test leaderboard is not available.")
-        for field in ("joint_accuracy", "answer_accuracy", "evidence_f1"):
-            metric = row.get(field)
-            if (
-                type(metric) is not float
-                or not math.isfinite(metric)
-                or not 0.0 <= metric <= 1.0
-            ):
-                raise FinalLeaderboardError(
-                    "The final test leaderboard is not available."
-                )
+        metric = row.get("joint_accuracy")
+        if (
+            type(metric) is not float
+            or not math.isfinite(metric)
+            or not 0.0 <= metric <= 1.0
+        ):
+            raise FinalLeaderboardError("The final test leaderboard is not available.")
 
 
 def _validate_provisional_projection(projection, release):
@@ -1567,32 +1564,36 @@ def final_test_leaderboard_html(projection):
         body_rows.append(
             "<tr>"
             f'<td class="leaderboard-rank">{row["rank"]}</td>'
-            f"<td>{html.escape(row['hf_username'])}</td>"
             f"<td>{html.escape(row['team'])}</td>"
             f"<td>{html.escape(row['submission_name'])}</td>"
             f'<td class="leaderboard-attempts">{row["selected_attempt"]}</td>'
+            f'<td class="leaderboard-attempts">{row["total_attempts"]}</td>'
             f'<td class="leaderboard-metric">{_format_metric(row["joint_accuracy"])}</td>'
-            f'<td class="leaderboard-metric">{_format_metric(row["answer_accuracy"])}</td>'
-            f'<td class="leaderboard-metric">{_format_metric(row["evidence_f1"])}</td>'
             "</tr>"
         )
     if not body_rows:
         body_rows.append(
-            '<tr><td class="leaderboard-empty" colspan="8">No eligible final test submissions.</td></tr>'
+            '<tr><td class="leaderboard-empty" colspan="6">No eligible final test submissions.</td></tr>'
         )
     return f"""
     <div class="leaderboard-table-wrap">
         <table aria-label="DocSem final test leaderboard">
+            <colgroup>
+                <col style="width: 7%;">
+                <col style="width: 22%;">
+                <col style="width: 24%;">
+                <col style="width: 12%;">
+                <col style="width: 12%;">
+                <col style="width: 23%;">
+            </colgroup>
             <thead>
                 <tr>
                     <th class="leaderboard-rank" scope="col">Rank</th>
-                    <th scope="col">Hugging Face account</th>
                     <th scope="col">Team</th>
-                    <th scope="col">Selected submission</th>
+                    <th scope="col">Submission name</th>
                     <th class="leaderboard-attempts" scope="col">Selected attempt</th>
+                    <th class="leaderboard-attempts" scope="col">Total attempts</th>
                     <th class="leaderboard-metric" scope="col">Joint Exact Accuracy</th>
-                    <th class="leaderboard-metric" scope="col">Answer Exact Accuracy</th>
-                    <th class="leaderboard-metric" scope="col">Evidence F1 (macro)</th>
                 </tr>
             </thead>
             <tbody>{"".join(body_rows)}</tbody>
@@ -1656,7 +1657,7 @@ def _final_test_leaderboard_heading():
     return """
     <div>
         <h2>Final test leaderboard</h2>
-        <p>Final standings use each Hugging Face account's best eligible attempt from at most three accepted test submissions.</p>
+        <p>Final standings use each account's best eligible attempt from at most three accepted test submissions. Joint Exact Accuracy is the public score. Total attempts counts all accepted submissions, including any attempt excluded from final selection.</p>
     </div>
     """
 
@@ -2381,18 +2382,27 @@ with PortalBlocks(**blocks_options) as demo:
         api_name="select_split",
     )
     with gr.Column(elem_id="leaderboard-section"):
+        initial_leaderboard_selection = (
+            FINAL_TEST_LEADERBOARD_LABEL
+            if TEST_PUBLIC_LEADERBOARD_ENABLED
+            else VALIDATION_LEADERBOARD_LABEL
+        )
         leaderboard_selector = gr.Dropdown(
             choices=[
                 VALIDATION_LEADERBOARD_LABEL,
                 FINAL_TEST_LEADERBOARD_LABEL,
             ],
-            value=VALIDATION_LEADERBOARD_LABEL,
+            value=initial_leaderboard_selection,
             label="Leaderboard view",
             interactive=True,
         )
         with gr.Row(elem_id="leaderboard-heading"):
             leaderboard_heading = gr.HTML(
-                value=_validation_leaderboard_heading,
+                value=(
+                    _final_test_leaderboard_heading()
+                    if TEST_PUBLIC_LEADERBOARD_ENABLED
+                    else _validation_leaderboard_heading()
+                ),
             )
             refresh = gr.Button(
                 "Refresh results",
@@ -2402,8 +2412,19 @@ with PortalBlocks(**blocks_options) as demo:
                 elem_id="refresh-button",
             )
         leaderboard = gr.HTML(
-            value=leaderboard_html,
+            value=(
+                '<div class="leaderboard-empty">Loading final test results...</div>'
+                if TEST_PUBLIC_LEADERBOARD_ENABLED
+                else leaderboard_html()
+            ),
             elem_id="leaderboard-table",
+        )
+        demo.load(
+            leaderboard_view,
+            inputs=leaderboard_selector,
+            outputs=[leaderboard_heading, leaderboard, refresh],
+            api_name=False,
+            show_api=False,
         )
         leaderboard_selector.change(
             leaderboard_view,
