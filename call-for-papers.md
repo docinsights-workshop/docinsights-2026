@@ -28,6 +28,12 @@ permalink: /call-for-papers/
   </article>
 </div>
 
+## Shared-task System Papers
+
+DocSem and Dr.DocBench participants can still submit system papers through the [shared-task OpenReview venue](https://openreview.net/group?id=EMNLP/2026/Workshop/DocInsights_Shared_Task) by **September 15, 2026 at 11:59 PM UTC**. Describe your system, data, models, prompts, tools, evaluation choices, and lessons learned from challenge participation.
+
+Authors may indicate an archival or non-archival preference; the review committee will make the final archival/non-archival decision. Selected contributions will be invited to present at DocInsights 2026. See the [challenges page]({{ '/shared-task/' | relative_url }}) for the final DocSem test leaderboard and current track information.
+
 ## Topics of Interest
 
 We welcome submissions on a broad range of topics related to document intelligence and understanding, including but not limited to:

@@ -35,7 +35,7 @@ permalink: /faq/
   </article>
   <article>
     <h2>When does the competition run?</h2>
-    <p>DocSem runs from August 3 through September 10, 2026. Dr.DocBench runs from August 10 through October 10, 2026, with submissions closing at 12:59 PM UTC. Each official portal is the system of record for exact submission status.</p>
+    <p>DocSem ran from August 3 through September 10, 2026, and its final test leaderboard is now public. Dr.DocBench runs from August 10 through October 10, 2026, with submissions closing at 12:59 PM UTC. Each official portal is the system of record for exact submission status.</p>
   </article>
   <article>
     <h2>What is the challenge prize pool?</h2>
@@ -43,15 +43,15 @@ permalink: /faq/
   </article>
   <article>
     <h2>Can challenge participants present their work?</h2>
-    <p>Yes. Participants can submit concise system papers for workshop consideration. Selected contributions, including winning solutions, will be invited to present at DocInsights 2026.</p>
+    <p>Yes. Participants can still submit concise system papers for workshop consideration. Selected contributions will be invited to present at DocInsights 2026.</p>
   </article>
   <article>
     <h2>How do I submit a shared-task system paper?</h2>
-    <p>Submit an <strong>archival or non-archival</strong> system paper for <strong>DocSem or Dr.DocBench</strong> through the <a href="https://openreview.net/group?id=EMNLP/2026/Workshop/DocInsights_Shared_Task" target="_blank" rel="noopener">shared-task OpenReview venue</a>. The deadline is September 15, 2026 at 11:59 PM UTC.</p>
+    <p>Participants in <strong>DocSem or Dr.DocBench</strong> can still submit a system paper through the <a href="https://openreview.net/group?id=EMNLP/2026/Workshop/DocInsights_Shared_Task" target="_blank" rel="noopener">shared-task OpenReview venue</a>. The deadline is September 15, 2026 at 11:59 PM UTC. Authors may indicate an <strong>archival or non-archival preference</strong>; the review committee will make the final archival/non-archival decision.</p>
   </article>
   <article>
-    <h2>How do I participate in DocSem?</h2>
-    <p>Use the <a href="https://huggingface.co/datasets/amitbcp/docinsights-2026-shared-task-data" target="_blank" rel="noopener">public dataset and participant guide</a>, then submit a complete validation JSONL file through the <a href="https://amitbcp-docsem-docinsights.hf.space/" target="_blank" rel="noopener">DocSem portal</a>.</p>
+    <h2>Has DocSem concluded?</h2>
+    <p>Yes. DocSem test submissions are closed, and the <a href="https://amitbcp-docsem-docinsights.hf.space/" target="_blank" rel="noopener">final test leaderboard</a> is now public. The <a href="https://huggingface.co/datasets/amitbcp/docinsights-2026-shared-task-data" target="_blank" rel="noopener">public dataset and participant guide</a> remain available. Participants can still submit system papers by September 15, 2026 at 11:59 PM UTC.</p>
   </article>
   <article>
     <h2>Was the DocSem dataset updated?</h2>
@@ -62,10 +62,9 @@ permalink: /faq/
     <p>Yes. Three organizer-only validation ground-truth labels have now been corrected, most recently on <strong>September 3, 2026</strong>, following additional data review. All existing submissions were rescored, and the leaderboard now reflects the updated results. Public validation inputs, task definition, and data format are unchanged.</p>
   </article>
   <article>
-    <h2>How will DocSem held-out test submissions work?</h2>
-    <p>The public test data is released: 1,730 held-out tasks and PDFs are available without labels. Test submissions are open through September 10 Anywhere on Earth; validation submission and the provisional validation leaderboard remain available. A file may contain any non-empty subset of task IDs. Omitted tasks count as incorrect against the full split, and <code>"answer": null</code> with <code>"evidence": []</code> is a valid abstention.</p>
-    <p>Hugging Face login is required for test submissions and history; validation remains available without login. Each immutable Hugging Face account may make up to three accepted test submissions, with at least six hours between distinct accepted attempts. Invalid submissions and exact retries do not consume an attempt or reset the cooldown.</p>
-    <p>Attempt 1 shows the submitter's aggregate Joint Exact Accuracy, Answer Exact Accuracy, and Evidence F1 (macro); attempts 2–3 are accepted with scores withheld. The public test board shows rank only during the submission window. After close, the best eligible attempt determines the final ranking by Joint Exact Accuracy, then Answer Exact Accuracy, then Evidence F1. The public portal has separate Validation leaderboard and Final test leaderboard views.</p>
+    <h2>Where are the final DocSem test results?</h2>
+    <p>The <a href="https://amitbcp-docsem-docinsights.hf.space/" target="_blank" rel="noopener">DocSem portal</a> now opens on the Final test leaderboard. It publishes each Hugging Face account's best eligible attempt from up to three accepted test submissions, with the public columns Rank, Team, Submission name, Selected attempt, Total attempts, and Joint Exact Accuracy. The portal has separate Validation leaderboard and Final test leaderboard views.</p>
+    <p>The public test dataset contains 1,730 held-out tasks and PDFs without labels. Submissions could contain any non-empty subset of task IDs. Omitted tasks count as incorrect against the full split, and <code>"answer": null</code> with <code>"evidence": []</code> represents an abstention.</p>
   </article>
   <article>
     <h2>Is Dr.DocBench open for submissions?</h2>

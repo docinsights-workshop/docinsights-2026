@@ -1,10 +1,12 @@
 timezone_note: All submission deadlines are 11:59 PM UTC-12:00 ("Anywhere on Earth") unless otherwise noted. OpenReview is the submission system of record for exact system timestamps.
-challenge_timezone_note: DocSem closes September 10. Dr.DocBench closes October 10 at 12:59 PM UTC. The official challenge portals are the system of record for exact submission status.
+challenge_timezone_note: DocSem concluded on September 10 and its final test leaderboard is public. Dr.DocBench closes October 10 at 12:59 PM UTC. The official challenge portals are the system of record for exact submission status.
 challenge_items:
   - label: DocSem Competition
     date: August 3–September 10, 2026
     type: challenge
-    note: The training split was updated on August 31 to correct seven annotation inconsistencies. The held-out test set was released on September 5, five days before the September 10 final submission deadline.
+    action_label: View final test leaderboard
+    action_url: https://amitbcp-docsem-docinsights.hf.space/
+    note: The competition concluded on September 10. The final test leaderboard was released on September 11, using each Hugging Face account's best eligible attempt.
   - label: Dr.DocBench Competition
     date: August 10–October 10, 2026
     time: 12:59 PM UTC deadline
@@ -23,14 +25,20 @@ challenge_items:
     type: challenge
     action_label: Download test data
     action_url: https://huggingface.co/datasets/amitbcp/docinsights-2026-shared-task-data
-    note: 1,730 held-out test tasks and PDFs are available without labels. The test portal is open through September 10 Anywhere on Earth, with Hugging Face login required, up to three accepted attempts per account, and a six-hour gap between attempts.
+    note: 1,730 held-out test tasks and PDFs were released without labels. The test submission window ran September 5–10 Anywhere on Earth and is now closed.
+  - label: DocSem Final Test Leaderboard Release
+    date: September 11, 2026
+    type: results
+    action_label: View final test leaderboard
+    action_url: https://amitbcp-docsem-docinsights.hf.space/
+    note: The final test leaderboard is public, showing each Hugging Face account's best eligible attempt and Joint Exact Accuracy.
   - label: Shared-task Paper Submission Deadline
     date: September 15, 2026
     time: 11:59 PM UTC
     type: system paper
     action_label: Submit on OpenReview
     action_url: https://openreview.net/group?id=EMNLP/2026/Workshop/DocInsights_Shared_Task
-    note: Submit an archival or non-archival system paper for DocSem or Dr.DocBench.
+    note: Submit a system paper for DocSem or Dr.DocBench. Authors may indicate an archival or non-archival preference; the review committee will make the final archival/non-archival decision.
 items:
   - label: Direct Submission Deadline
     previous_date: August 2, 2026

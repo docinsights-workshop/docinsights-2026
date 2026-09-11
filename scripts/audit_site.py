@@ -90,15 +90,18 @@ def main():
         "Challenges",
         "DocSem",
         "Dr.DocBench",
-        "DocSem runs August 3–September 10",
+        "DocSem has concluded and its final test leaderboard is public",
         "Dr.DocBench runs August 10–October 10, 2026",
         "USD 5,000+",
         "Dr.DocBench is live on EvalAI",
         "up to USD 3,000 in prizes",
         "Latest update",
-        "DocSem test submissions open",
-        "Sep 5",
-        "DocSem held-out test submissions are open",
+        "DocSem concluded · Final test leaderboard released",
+        "DocSem concluded — final test leaderboard released",
+        "DocSem held-out test submissions opened September 5",
+        "September 11, 2026",
+        "archival or non-archival preference",
+        "the review committee will make the final archival/non-archival decision",
     ]:
         assert_true(text in home.text, f"home page missing text: {text}")
     home_links = [link.get("href", "") for link in home.links]
@@ -106,8 +109,8 @@ def main():
         "https://openreview.net/group?id=EMNLP/2026/Workshop/DocInsights_Shared_Task"
     )
     assert_true(
-        "https://docinsights-workshop.github.io/docinsights-2026/shared-task/" in home_links,
-        "home announcement must link to the DocSem correction details",
+        "https://amitbcp-docsem-docinsights.hf.space/" in home_links,
+        "home announcement must link to the final DocSem test leaderboard",
     )
     assert_true("site-announcement" in home.classes, "home must expose the latest-update announcement")
     assert_true("marquee" not in home_html.lower(), "announcement must not use a moving marquee")
@@ -165,6 +168,10 @@ def main():
         "direct non-archival",
         "ARR Commitment",
         "at least 3 reviews",
+        "Shared-task System Papers",
+        "September 15, 2026 at 11:59 PM UTC",
+        "archival or non-archival preference",
+        "the review committee will make the final archival/non-archival decision",
     ]:
         assert_true(text in cfp.text, f"CFP missing required detail: {text}")
 
@@ -195,7 +202,10 @@ def main():
         "Training data",
         "Validation data",
         "Test data",
-        "Test submissions open",
+        "Concluded · Final results released",
+        "DocSem test submissions are closed",
+        "Final test leaderboard released",
+        "default leaderboard view",
         "Use the August 31 release",
         "seven annotation inconsistencies",
         "task definition and data format are unchanged",
@@ -203,27 +213,16 @@ def main():
         "Three organizer-only validation ground-truth labels",
         "All existing submissions were rescored",
         "leaderboard now reflects the updated results",
-        "Test submissions open",
         "1,730 held-out test tasks and PDFs",
-        "Test leaderboard policy",
-        "public board shows rank only",
-        "Attempt 1 shows the submitter's aggregate",
         "best eligible attempt",
-        "at most three accepted test submissions",
-        "Hugging Face login is required for test submissions and history",
-        "at least six hours between distinct accepted attempts",
-        "During the submission window",
-        "attempts 2–3 are score-withheld",
-        "After close",
-        "publish the final leaderboard",
+        "up to three accepted test submissions",
+        "Rank, Team, Submission name, Selected attempt, Total attempts, and Joint Exact Accuracy",
         "Joint Exact Accuracy",
-        "Evidence F1 (macro)",
         "Validation leaderboard and Final test leaderboard",
         "any non-empty subset of test task IDs",
         "Omitted tasks count as incorrect against the full 1,730-task denominator",
         '"answer": null',
         '"evidence": []',
-        "exact retries do not consume an attempt or reset the six-hour cooldown",
         "Submissions open",
         "Submit through EvalAI by October 10",
         "October 10 at 12:59 PM UTC",
@@ -240,7 +239,8 @@ def main():
         "Selected contributions",
         "Shared-task paper submissions are open",
         "September 15, 2026 at 11:59 PM UTC",
-        "Archival or non-archival",
+        "archival or non-archival preference",
+        "the review committee will make the final archival/non-archival decision",
         "DocSem or Dr.DocBench",
         "Submit on OpenReview",
     ]:
@@ -286,6 +286,11 @@ def main():
         "DocSem Test Data Release",
         "September 5, 2026",
         "1,730 held-out test tasks and PDFs",
+        "DocSem Final Test Leaderboard Release",
+        "September 11, 2026",
+        "The final test leaderboard is public",
+        "archival or non-archival preference",
+        "the review committee will make the final archival/non-archival decision",
     ]:
         assert_true(text in dates.text, f"dates page missing required detail: {text}")
 
@@ -298,25 +303,19 @@ def main():
         "Three organizer-only validation ground-truth labels",
         "September 3, 2026",
         "All existing submissions were rescored",
-        "How will DocSem held-out test submissions work?",
-        "public test data is released",
-        "Test submissions are open through September 10 Anywhere on Earth",
+        "Has DocSem concluded?",
+        "DocSem test submissions are closed",
+        "Where are the final DocSem test results?",
+        "now opens on the Final test leaderboard",
         "up to three accepted test submissions",
-        "Hugging Face login is required for test submissions and history",
-        "validation remains available without login",
-        "at least six hours between distinct accepted attempts",
-        "public test board shows rank only",
-        "Attempt 1 shows the submitter's aggregate",
-        "attempts 2–3 are accepted with scores withheld",
         "best eligible attempt",
+        "Rank, Team, Submission name, Selected attempt, Total attempts, and Joint Exact Accuracy",
         "Joint Exact Accuracy",
-        "Evidence F1 (macro)",
         "Validation leaderboard and Final test leaderboard",
         "any non-empty subset of task IDs",
         "Omitted tasks count as incorrect against the full split",
         '"answer": null',
         '"evidence": []',
-        "exact retries do not consume an attempt or reset the cooldown",
     ]:
         assert_true(text in faq.text, f"FAQ missing required detail: {text}")
     assert_true(
@@ -351,23 +350,32 @@ def main():
         "challenges page must not retain the stale shared-task placeholder",
     )
     assert_true(
-        "Test submissions open" in shared_task.text
-        and "https://huggingface.co/spaces/amitbcp/docsem-docinsights"
-        in shared_task_links,
-        "DocSem test workflow must publish the activated submission portal",
+        "DocSem test submissions are closed" in shared_task.text
+        and "https://amitbcp-docsem-docinsights.hf.space/" in shared_task_links,
+        "DocSem conclusion must link to the public final test leaderboard",
     )
     for stale_test_copy in (
         "The held-out test release is not available yet",
         "no test ranks published during the submission window",
+        "Test submissions open",
+        "Test submissions are open",
+        "After close, organizers reveal",
     ):
         assert_true(
             stale_test_copy not in shared_task.text,
             f"challenges page must not retain stale test policy copy: {stale_test_copy}",
         )
-    assert_true(
-        "Test submissions are open." not in shared_task.text,
-        "public workshop content must not claim the not-yet-activated DocSem test workflow is open",
-    )
+    for label, parser in [("home", home), ("dates", dates), ("FAQ", faq)]:
+        for stale_test_copy in (
+            "DocSem test submissions open",
+            "DocSem held-out test submissions are open",
+            "Test submissions are open through September 10",
+            "The test portal is open through September 10",
+        ):
+            assert_true(
+                stale_test_copy not in parser.text,
+                f"{label} must not retain the closed DocSem submission window as current",
+            )
     for private_test_detail in (
         "TEST_GOLD_SHA256",
         "TEST_TASK_MANIFEST_SHA256",
@@ -426,7 +434,8 @@ def main():
         "Dr.DocBench EvalAI challenge",
         "up to 3 times per day",
         "How do I submit a shared-task system paper?",
-        "archival or non-archival",
+        "archival or non-archival preference",
+        "the review committee will make the final archival/non-archival decision",
         "DocSem or Dr.DocBench",
         "September 15, 2026 at 11:59 PM UTC",
     ]:

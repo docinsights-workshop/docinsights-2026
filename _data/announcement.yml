@@ -1,6 +1,6 @@
 enabled: true
 label: Latest update
-text: DocSem test submissions open · Sep 5
-aria_text: DocSem held-out test submissions are open. Hugging Face login is required; each account may submit up to three times with six hours between accepted attempts. Public test ranks are shown without scores until the competition closes.
-action: Details
-url: https://docinsights-workshop.github.io/docinsights-2026/shared-task/
+text: DocSem concluded · Final test leaderboard released
+aria_text: The DocSem competition has concluded and the final test leaderboard is now public. Participants can still submit system papers by September 15, 2026 at 11:59 PM UTC.
+action: View leaderboard
+url: https://amitbcp-docsem-docinsights.hf.space/

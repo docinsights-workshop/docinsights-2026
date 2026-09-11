@@ -14,7 +14,7 @@ permalink: /shared-task/
   <div class="challenge-season-copy">
     <p class="section-kicker">Competition Season</p>
     <h2 id="challenge-season-title">August 3–October 10, 2026</h2>
-    <p>Teams may participate in either or both challenges. DocSem closes on September 10; Dr.DocBench closes on October 10 at 12:59 PM UTC. Each official challenge portal is the system of record for submissions and final rules.</p>
+    <p>DocSem concluded on September 10 and its <a href="https://amitbcp-docsem-docinsights.hf.space/" target="_blank" rel="noopener">final test leaderboard is now public</a>. Dr.DocBench remains open until October 10 at 12:59 PM UTC. Each official challenge portal is the system of record for submissions and final rules.</p>
   </div>
   <div class="challenge-season-stats">
     <div class="challenge-stat">
@@ -36,8 +36,8 @@ permalink: /shared-task/
   <div>
     <p class="section-kicker">System Paper Submissions</p>
     <h2 id="shared-task-paper-title">Shared-task paper submissions are open</h2>
-    <p><strong>Archival or non-archival</strong> system papers are welcome for <strong>DocSem or Dr.DocBench</strong>. Describe the system, data, models, prompts, tools, evaluation choices, and lessons learned from your challenge participation.</p>
-    <p>Selected contributions, including winning solutions, will be invited to present at DocInsights 2026.</p>
+    <p>Participants in <strong>DocSem or Dr.DocBench</strong> can still submit system papers. Describe the system, data, models, prompts, tools, evaluation choices, and lessons learned from your challenge participation.</p>
+    <p>Authors may indicate an <strong>archival or non-archival preference</strong>; the review committee will make the final archival/non-archival decision. Selected contributions will be invited to present at DocInsights 2026.</p>
   </div>
   <div class="paper-submission-action">
     <span class="paper-submission-deadline">September 15, 2026 at 11:59 PM UTC</span>
@@ -53,12 +53,18 @@ permalink: /shared-task/
         <h2>DocSem</h2>
         <p class="challenge-tagline">Document-grounded quantitative reasoning with evidence attribution</p>
       </div>
-      <span class="challenge-status challenge-status-ready">Test submissions open</span>
+      <span class="challenge-status challenge-status-ready">Concluded · Final results released</span>
     </header>
 
     <div class="challenge-feature-body">
       <div class="challenge-description">
         <p>Participants receive a PDF document and a paraphrased query. Systems must identify the relevant quantitative passage, derive the requested answer from the supplied document, and return the visible PDF block IDs that support the prediction.</p>
+        <aside class="challenge-update" aria-labelledby="docsem-final-results">
+          <p class="challenge-update-kicker">Competition concluded</p>
+          <h3 id="docsem-final-results">Final test leaderboard released</h3>
+          <p>DocSem test submissions are closed. The <a href="https://amitbcp-docsem-docinsights.hf.space/" target="_blank" rel="noopener">final test leaderboard</a> is now public and is the default leaderboard view in the portal. Thank you to everyone who participated.</p>
+          <p>The final leaderboard uses each Hugging Face account's <strong>best eligible attempt</strong> from up to three accepted test submissions. Its public columns are Rank, Team, Submission name, Selected attempt, Total attempts, and Joint Exact Accuracy. The portal retains separate Validation leaderboard and Final test leaderboard views.</p>
+        </aside>
         <aside class="challenge-update" aria-labelledby="docsem-evaluation-update">
           <p class="challenge-update-kicker">Participant notice</p>
           <h3 id="docsem-evaluation-update">Use the August 31 release</h3>
@@ -68,13 +74,12 @@ permalink: /shared-task/
             <h3 id="docsem-validation-update">Validation ground truth refreshed Sep 3</h3>
             <p>Three organizer-only validation ground-truth labels have now been corrected, most recently on <strong>September 3, 2026</strong>, following additional data review. All existing submissions were rescored, and the leaderboard now reflects the updated results. Public validation inputs, task definition, and data format are unchanged.</p>
           </aside>
-          <p><strong>Test submissions open:</strong> The held-out test set is available in the <a href="https://huggingface.co/datasets/amitbcp/docinsights-2026-shared-task-data" target="_blank" rel="noopener">public dataset</a>: 1,730 tasks and PDFs without labels. Submit predictions through the <a href="https://huggingface.co/spaces/amitbcp/docsem-docinsights" target="_blank" rel="noopener">DocSem submission portal</a> through September 10 Anywhere on Earth.</p>
-          <p><strong>Test leaderboard policy:</strong> Hugging Face login is required for test submissions and history; validation remains available without login. Each immutable Hugging Face account may make at most three accepted test submissions, with at least six hours between distinct accepted attempts. Attempt 1 shows the submitter's aggregate Joint Exact Accuracy, Answer Exact Accuracy, and Evidence F1 (macro); attempts 2–3 are score-withheld. During the submission window, the public board shows rank only. The portal keeps separate Validation leaderboard and Final test leaderboard views. After close, organizers reveal scores and publish the final leaderboard using each account's best eligible attempt, ordered by Joint Exact Accuracy, then Answer Exact Accuracy, then Evidence F1.</p>
-          <p>A submission may contain any non-empty subset of test task IDs. Omitted tasks count as incorrect against the full 1,730-task denominator; <code>"answer": null</code> and <code>"evidence": []</code> represent an abstention. Invalid submissions and exact retries do not consume an attempt or reset the six-hour cooldown.</p>
+          <p><strong>Test data:</strong> The <a href="https://huggingface.co/datasets/amitbcp/docinsights-2026-shared-task-data" target="_blank" rel="noopener">public dataset</a> contains 1,730 held-out test tasks and PDFs without labels. The test submission window ran September 5–10 Anywhere on Earth and is now closed.</p>
+          <p><strong>Evaluation:</strong> Submissions could contain any non-empty subset of test task IDs. Omitted tasks count as incorrect against the full 1,730-task denominator; <code>"answer": null</code> and <code>"evidence": []</code> represent an abstention.</p>
         </aside>
         <div class="challenge-actions">
           <a class="challenge-action challenge-action-primary" href="https://huggingface.co/datasets/amitbcp/docinsights-2026-shared-task-data" target="_blank" rel="noopener">Dataset and guide</a>
-          <a class="challenge-action" href="https://amitbcp-docsem-docinsights.hf.space/" target="_blank" rel="noopener">Submission portal</a>
+          <a class="challenge-action" href="https://amitbcp-docsem-docinsights.hf.space/" target="_blank" rel="noopener">Final test leaderboard</a>
           <a class="challenge-action" href="https://github.com/oracle-samples/gsm-sem/tree/main/docsem" target="_blank" rel="noopener">Canonical source</a>
         </div>
       </div>
@@ -89,7 +94,7 @@ permalink: /shared-task/
         </div>
         <div>
           <dt>Test data</dt>
-          <dd>1,730 held-out test tasks and PDFs without labels. The portal requires Hugging Face login and allows up to three accepted attempts per account with a six-hour gap; public ranks appear during the window and scores after it closes.</dd>
+          <dd>1,730 held-out test tasks and PDFs without labels. Test submissions are closed; the final test leaderboard is public and uses each account's best eligible attempt.</dd>
         </div>
       </dl>
     </div>
@@ -162,12 +167,12 @@ permalink: /shared-task/
   <div class="section-heading">
     <p class="section-kicker">From Competition to Workshop</p>
     <h2>Share systems, findings, and lessons learned</h2>
-    <p>Challenge participants can submit concise system papers for workshop consideration. Selected contributions, including winning solutions, will be invited to present their approaches and findings at DocInsights 2026.</p>
+    <p>Challenge participants can still submit concise system papers for workshop consideration. Authors may indicate an archival or non-archival preference; the review committee will make the final archival/non-archival decision. Selected contributions will be invited to present their approaches and findings at DocInsights 2026.</p>
   </div>
   <div class="info-grid">
     <article class="info-card">
-      <h3>Compete in either track</h3>
-      <p>Teams may enter DocSem, Dr.DocBench, or both challenges, subject to each track's final participation rules.</p>
+      <h3>Share your challenge work</h3>
+      <p>DocSem has concluded and Dr.DocBench remains open. Participants in either challenge may submit a system paper for workshop consideration.</p>
     </article>
     <article class="info-card">
       <h3>Document the system</h3>
@@ -175,7 +180,7 @@ permalink: /shared-task/
     </article>
     <article class="info-card">
       <h3>Present selected work</h3>
-      <p>Winning teams and selected participant contributions will have a pathway to share their work with the workshop community.</p>
+      <p>Selected participant contributions will have a pathway to share their work with the workshop community.</p>
     </article>
   </div>
 </section>

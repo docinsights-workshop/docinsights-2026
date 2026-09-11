@@ -1,7 +1,11 @@
 items:
+  - date: September 11, 2026
+    title: DocSem concluded — final test leaderboard released
+    body: >-
+      DocSem submissions have closed and the <a href="https://amitbcp-docsem-docinsights.hf.space/" target="_blank" rel="noopener">final test leaderboard</a> is now public. Thank you to everyone who participated. Participants can still <a href="https://openreview.net/group?id=EMNLP/2026/Workshop/DocInsights_Shared_Task" target="_blank" rel="noopener">submit a system paper</a> by September 15, 2026 at 11:59 PM UTC. Authors may indicate an archival or non-archival preference; the review committee will make the final archival/non-archival decision.
   - date: September 5, 2026
-    title: DocSem held-out test submissions are open
-    body: The public test split contains 1,730 held-out tasks and PDFs without labels, and the submission portal is open. Hugging Face login is required. Each account may make up to three accepted submissions with at least six hours between them. Attempt 1 shows the submitter's aggregate metrics; attempts 2–3 are score-withheld, and public ranks are shown without scores until final results are revealed after close. Partial files and null abstentions are accepted, with omitted tasks counted as incorrect against the full test set.
+    title: DocSem held-out test submissions opened September 5
+    body: The public test split was released with 1,730 held-out tasks and PDFs without labels. The submission window ran from September 5 through September 10 Anywhere on Earth, with Hugging Face login required, up to three accepted submissions per account, and at least six hours between attempts. Final results were released after the competition concluded.
   - date: September 3, 2026
     title: Three DocSem validation labels corrected
     body: Three organizer-only validation ground-truth labels have now been corrected, most recently on September 3, following additional data review. All existing submissions were rescored, and the leaderboard now reflects the updated results.
@@ -10,7 +14,7 @@ items:
     body: The training split was updated following community feedback. The task definition and data format are unchanged; participants should use the latest release.
   - date: August 21, 2026
     title: Shared-task paper submissions are open
-    body: Submit an archival or non-archival DocSem or Dr.DocBench system paper through OpenReview by September 15, 2026 at 11:59 PM UTC.
+    body: DocSem and Dr.DocBench system paper submissions opened on OpenReview, with a deadline of September 15, 2026 at 11:59 PM UTC. Authors may indicate an archival or non-archival preference; the review committee will make the final archival/non-archival decision.
   - date: August 10, 2026
     title: Dr.DocBench is live on EvalAI
     body: The expert-level document parsing challenge is open through October 10, 2026 at 12:59 PM UTC, with up to USD 3,000 in prizes.

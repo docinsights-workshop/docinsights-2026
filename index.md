@@ -31,13 +31,13 @@ title: Home
   <div>
     <p class="section-kicker">Challenges</p>
     <h2>DocSem and Dr.DocBench</h2>
-    <p>Two complementary challenge tracks cover evidence-grounded quantitative reasoning and expert-level document parsing. <strong>DocSem runs August 3–September 10</strong>; <strong>Dr.DocBench runs August 10–October 10, 2026</strong>.</p>
+    <p>Two complementary challenge tracks cover evidence-grounded quantitative reasoning and expert-level document parsing. <strong>DocSem has concluded and its <a href="https://amitbcp-docsem-docinsights.hf.space/" target="_blank" rel="noopener">final test leaderboard is public</a></strong>; <strong>Dr.DocBench runs August 10–October 10, 2026</strong>, with submissions closing at 12:59 PM UTC.</p>
     <a class="inline-action" href="{{ '/shared-task/' | relative_url }}">Explore both challenges</a>
   </div>
   <div class="callout-panel">
     <h3>USD 5,000+ total prize pool</h3>
-    <p>Challenge participants can submit system papers for workshop consideration, with winning and selected contributions invited to present at DocInsights 2026.</p>
-    <a class="inline-action" href="{{ '/shared-task/' | relative_url }}">View timeline and resources</a>
+    <p>Challenge participants can still submit system papers by September 15, 2026 at 11:59 PM UTC. Authors may indicate an archival or non-archival preference; the review committee will make the final archival/non-archival decision.</p>
+    <a class="inline-action" href="https://openreview.net/group?id=EMNLP/2026/Workshop/DocInsights_Shared_Task" target="_blank" rel="noopener">Submit a system paper</a>
   </div>
 </section>
 
