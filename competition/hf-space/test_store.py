@@ -16,6 +16,7 @@ from huggingface_hub.errors import EntryNotFoundError, HfHubHTTPError
 
 from test_contract import (
     MAX_LEDGER_FILE_BYTES,
+    MAX_ORGANIZER_PROJECTION_BYTES,
     bounded_private_text,
     is_valid_public_text,
     repository_id,
@@ -259,7 +260,9 @@ class HubTestStore:
                     best,
                 )
                 account_projection_bytes = _bounded_json_bytes(account_projection)
-                organizer_projection_bytes = _bounded_json_bytes(organizer_projection)
+                organizer_projection_bytes = _bounded_json_bytes(
+                    organizer_projection, path=ORGANIZER_PATH
+                )
                 provisional_projection_bytes = None
                 if first_attempts is not None:
                     provisional_projection_bytes = _bounded_json_bytes(
@@ -1112,9 +1115,14 @@ def _json_bytes(value) -> bytes:
     return (serialized + "\n").encode("utf-8")
 
 
-def _bounded_json_bytes(value) -> bytes:
+def _bounded_json_bytes(value, *, path=None) -> bytes:
     raw = _json_bytes(value)
-    if len(raw) > MAX_LEDGER_FILE_BYTES:
+    maximum = (
+        MAX_ORGANIZER_PROJECTION_BYTES
+        if path == ORGANIZER_PATH
+        else MAX_LEDGER_FILE_BYTES
+    )
+    if len(raw) > maximum:
         raise _InvalidSubmission()
     return raw
 

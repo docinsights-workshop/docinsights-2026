@@ -51,6 +51,7 @@ class OrganizerContractParityTests(unittest.TestCase):
             "MAX_PARTICIPANT_NAMES_CHARACTERS",
             "MAX_REPOSITORY_ID_CHARACTERS",
             "MAX_LEDGER_FILE_BYTES",
+            "MAX_ORGANIZER_PROJECTION_BYTES",
             "PRIVATE_TEXT_LIMITS",
             "PUBLIC_TEXT_FIELDS",
             "ADJUDICATION_ACTIONS",

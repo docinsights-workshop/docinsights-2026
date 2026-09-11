@@ -2364,6 +2364,9 @@ with PortalBlocks(**blocks_options) as demo:
         ],
         outputs=result,
         api_name="submit_predictions",
+        # The service already returns JSON-safe receipt data. Gradio 4.42 wraps
+        # JSON update values in JsonData, which its SSE serializer cannot encode.
+        postprocess=False,
     )
     refresh_history.click(
         my_test_submissions,

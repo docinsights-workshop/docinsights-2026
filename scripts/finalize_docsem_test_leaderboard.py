@@ -39,6 +39,7 @@ from scoring import score_predictions  # noqa: E402
 from test_contract import (  # noqa: E402
     ADJUDICATION_ACTIONS,
     MAX_LEDGER_FILE_BYTES,
+    MAX_ORGANIZER_PROJECTION_BYTES,
     TestContractError,
     bounded_private_text,
     is_valid_public_text,
@@ -388,6 +389,8 @@ def load_finalization_snapshot(
                     cache_dir=str(cache),
                 )
                 limit = MAX_LABEL_BYTES if path == GOLD_PATH else MAX_LEDGER_FILE_BYTES
+                if path == ORGANIZER_PROJECTION_PATH:
+                    limit = MAX_ORGANIZER_PROJECTION_BYTES
                 payload = _bounded_regular_file(Path(local), limit)
                 total += len(payload)
                 if total > MAX_TOTAL_BYTES:

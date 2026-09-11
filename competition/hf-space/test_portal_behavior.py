@@ -280,6 +280,22 @@ def final_deployment(**overrides):
 
 
 class PortalBehaviorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_submission_receipt_update_serializes_for_the_live_queue(self):
+        """Gradio SSE must be able to serialize a receipt after acceptance."""
+        service = SimpleNamespace(submit_for_split=lambda *args: {
+            "accepted": True, "attempt": 1, "receipt": "receipt-qa",
+            "joint_accuracy": 0.0, "answer_accuracy": 0.0, "evidence_f1": 0.0,
+        })
+        with patch.object(app, "_SUBMISSION_SERVICE", service):
+            response = await self.invoke(
+                "submit_predictions",
+                [app.TEST_SPLIT_LABEL, None, "QA", "Organizer", "", "smoke"],
+                PROFILE_A,
+            )
+        wire_data = json.loads(json.dumps(response["data"]))
+        self.assertEqual(wire_data[0]["value"]["receipt"], "receipt-qa")
+        self.assertTrue(wire_data[0]["visible"])
+
     def endpoint(self, api_name):
         matches = [
             (index, block_fn)
@@ -643,7 +659,7 @@ class PortalBehaviorTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(captured["contact"], "lead@example.org")
-        self.assertEqual(response["data"][0]["value"].root["split"], "validation")
+        self.assertEqual(response["data"][0]["value"]["split"], "validation")
 
     async def test_signed_out_test_submit_and_history_require_contact_email(self):
         for api_name, inputs in (
@@ -730,7 +746,7 @@ class PortalBehaviorTests(unittest.IsolatedAsyncioTestCase):
                 PROFILE_A,
             )
 
-        serialized = json.dumps(response["data"][0]["value"].root)
+        serialized = json.dumps(response["data"][0]["value"])
         self.assertEqual(service.profile.get("sub"), "subject-a")
         self.assertIn("receipt-a2", serialized)
         self.assertIn('"score": "withheld"', serialized)

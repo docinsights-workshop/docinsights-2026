@@ -7,6 +7,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from huggingface_hub.errors import EntryNotFoundError, HfHubHTTPError
 from requests import Response
@@ -282,6 +283,30 @@ class InMemoryHub:
 
 
 class HubTestStoreTests(unittest.TestCase):
+    def test_new_accounts_are_accepted_when_shared_index_exceeds_attempt_limit(self):
+        """A growing shared index must not prevent new accounts from submitting."""
+        hub = InMemoryHub()
+        store = HubTestStore(
+            hub, repo_id="private/repo",
+            release_config_path="sealed/release.json",
+            gold_config_path="sealed/gold.jsonl", now_provider=lambda: NOW,
+        )
+        with patch("test_store.MAX_LEDGER_FILE_BYTES", 3000):
+            for index in range(4):
+                identity = TestIdentity(
+                    "huggingface", f"capacity-{index}", f"capacity-{index}",
+                    f"capacity-{index}@example.org", True,
+                )
+                receipt = store.submit(identity, META, PREDICTIONS, METRICS)
+                self.assertTrue(receipt.accepted)
+                self.assertEqual(receipt.attempt, 1)
+        projection = hub.files["projections/test/organizer_leaderboard.json"]
+        self.assertGreater(len(projection), 3000)
+        self.assertEqual(len(json.loads(projection)["accounts"]), 4)
+        for path, payload in hub.files.items():
+            if path.startswith("attempts/test/"):
+                self.assertLessEqual(len(payload), 3000)
+
     def test_missing_server_config_paths_fail_before_repository_io(self):
         hub = InMemoryHub()
         store = HubTestStore(hub, repo_id="private/repo")

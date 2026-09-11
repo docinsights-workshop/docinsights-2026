@@ -1185,6 +1185,14 @@ def hub_files(record):
 
 
 class LoadAndCommitTests(unittest.TestCase):
+    def test_shared_index_above_attempt_size_limit_is_readable(self):
+        path = "projections/test/organizer_leaderboard.json"
+        raw = self.hub.files[path]
+        self.hub.files[path] = raw + b" " * (17 * 1024 * 1024 - len(raw))
+        loaded = self.load()
+        self.assertEqual(len(loaded.attempts), 1)
+        self.assertTrue(loaded.private)
+
     def setUp(self):
         self.workspace = tempfile.TemporaryDirectory()
         self.addCleanup(self.workspace.cleanup)

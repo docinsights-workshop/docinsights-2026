@@ -26,6 +26,7 @@ from organizer_contract import (
     ADJUDICATION_ACTIONS,
     MAX_INSTANCE_ID_CHARACTERS,
     MAX_LEDGER_FILE_BYTES,
+    MAX_ORGANIZER_PROJECTION_BYTES,
     MAX_TEST_ROWS,
     TEST_ATTEMPT_COOLDOWN_SECONDS,
     TestIdentity,
@@ -212,7 +213,13 @@ def load_snapshot(repo_id, revision, token, *, api=None) -> OrganizerSnapshot:
                     token=read_token,
                     cache_dir=str(cache),
                 )
-                raw = _bounded_file(Path(local_name))
+                raw = _bounded_file(
+                    Path(local_name),
+                    maximum=(
+                        MAX_ORGANIZER_PROJECTION_BYTES
+                        if path == ORGANIZER_PROJECTION_PATH else MAX_FILE_BYTES
+                    ),
+                )
                 total_bytes += len(raw)
                 if total_bytes > MAX_SNAPSHOT_BYTES:
                     raise OrganizerDataError("Organizer snapshot is unavailable.")
@@ -630,16 +637,16 @@ def _selected_paths(paths) -> set[str]:
     return selected
 
 
-def _bounded_file(path: Path) -> bytes:
+def _bounded_file(path: Path, *, maximum=MAX_FILE_BYTES) -> bytes:
     try:
-        if not path.is_file() or path.stat().st_size > MAX_FILE_BYTES:
+        if not path.is_file() or path.stat().st_size > maximum:
             raise OrganizerDataError("Organizer snapshot is unavailable.")
         raw = path.read_bytes()
     except OrganizerDataError:
         raise
     except OSError:
         raise OrganizerDataError("Organizer snapshot is unavailable.") from None
-    if len(raw) > MAX_FILE_BYTES:
+    if len(raw) > maximum:
         raise OrganizerDataError("Organizer snapshot is unavailable.")
     return raw
 

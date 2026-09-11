@@ -381,6 +381,14 @@ class ProducerHub:
 
 
 class OrganizerSnapshotTests(unittest.TestCase):
+    def test_shared_index_above_attempt_size_limit_is_readable(self):
+        files = fixture_files()
+        path = "projections/test/organizer_leaderboard.json"
+        files[path] += b" " * (17 * 1024 * 1024 - len(files[path]))
+        audit = verify_snapshot(self.load(FakeHub(files)))
+        self.assertTrue(audit.valid)
+        self.assertEqual(audit.account_count, 2)
+
     def load(self, hub=None):
         return load_snapshot(
             "private/docsem",
