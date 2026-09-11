@@ -6,6 +6,7 @@ import datetime as dt
 import hashlib
 import json
 import math
+import os
 import re
 from dataclasses import dataclass
 from collections.abc import Mapping
@@ -18,7 +19,21 @@ class TestPolicyError(ValueError):
     """Raised when a test submission violates a policy invariant."""
 
 
-OFFICIAL_TEST_CLOSE_AT = dt.datetime(2026, 9, 11, 12, 0, tzinfo=dt.timezone.utc)
+def _configured_test_close_at():
+    """Use the operator's UTC deadline, also verified against the private release."""
+    default = dt.datetime(2026, 9, 11, 12, 0, tzinfo=dt.timezone.utc)
+    value = os.getenv("TEST_CLOSE_AT")
+    if not isinstance(value, str) or re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z", value
+    ) is None:
+        return default
+    try:
+        return dt.datetime.fromisoformat(value.removesuffix("Z") + "+00:00")
+    except ValueError:
+        return default
+
+
+OFFICIAL_TEST_CLOSE_AT = _configured_test_close_at()
 TEST_ATTEMPT_COOLDOWN_SECONDS = 21_600
 _EMAIL_LOCAL = re.compile(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}\Z")
 _EMAIL_DOMAIN_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z")

@@ -36,6 +36,12 @@ The portal has separate **Validation leaderboard** and **Final test leaderboard*
 
 The collapsed **How metrics are computed** section in the portal defines the evaluation precisely. Answer Exact Accuracy is the mean exact normalized answer match. Evidence precision and recall are computed from set overlap for each task; their harmonic mean is macro-averaged across tasks as Evidence F1 (macro), so partial evidence receives partial credit. Joint Exact Accuracy is the mean of answer exact **and** evidence-set exact on the same task. It neither combines aggregate percentages nor uses Evidence F1. Rankings use Joint Exact Accuracy, Answer Exact Accuracy, Evidence F1, accepted time, and stable submission ID, in that order. A legacy row with no Joint value is displayed as `Not yet computed`, never as zero.
 
+An organizer-authorized reopening uses the server's `TEST_CLOSE_AT` setting and
+the identical deadline in the private release. The admission check rejects at
+that exact UTC instant. Keep the original opening instant, release identity,
+task/gold digests, quota and cooldown unchanged. For release-manager commands
+after a reopening, supply the same `TEST_CLOSE_AT` environment setting.
+
 ## Disabled test-release configuration
 
 The checked-in deployment is safe to publish with both test controls disabled:

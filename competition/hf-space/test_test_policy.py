@@ -1,4 +1,7 @@
 import datetime as dt
+import os
+import subprocess
+import sys
 import unittest
 
 from test_policy import (
@@ -48,6 +51,37 @@ FIXTURE_ATTEMPTS = [
 
 
 class TestPolicyTests(unittest.TestCase):
+    def test_operator_deadline_applies_to_actual_admission_and_closes_at_boundary(self):
+        code = '''
+import datetime as dt
+from test_policy import TestReleasePolicy, OFFICIAL_TEST_CLOSE_AT
+from test_store import _require_open, _ReleaseClosed
+close = dt.datetime(2026, 9, 11, 15, 5, tzinfo=dt.timezone.utc)
+assert OFFICIAL_TEST_CLOSE_AT == close
+policy = TestReleasePolicy('release', 'a'*64, 'b'*64,
+    dt.datetime(2026, 9, 6, tzinfo=dt.timezone.utc), close)
+_require_open(policy, close - dt.timedelta(microseconds=1))
+try:
+    _require_open(policy, close)
+except _ReleaseClosed:
+    pass
+else:
+    raise AssertionError('deadline did not close admission')
+'''
+        result = subprocess.run(
+            [sys.executable, '-c', code], capture_output=True, text=True,
+            env={**os.environ, 'TEST_CLOSE_AT': '2026-09-11T15:05:00Z'},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_invalid_operator_deadline_cannot_extend_the_original_window(self):
+        import test_policy
+        from unittest.mock import patch
+        for value in ('garbage', '2026-09-11T15:05:00', '2026-99-99T15:05:00Z'):
+            with self.subTest(value=value), patch.dict(os.environ, {'TEST_CLOSE_AT': value}):
+                self.assertEqual(test_policy._configured_test_close_at(),
+                    dt.datetime(2026, 9, 11, 12, 0, tzinfo=dt.timezone.utc))
+
     def test_six_hour_cooldown_constant_and_next_eligible_timestamp_are_exact(self):
         self.assertEqual(TEST_ATTEMPT_COOLDOWN_SECONDS, 21_600)
         self.assertEqual(
