@@ -67,10 +67,10 @@ items:
     time: Final version deadline
     type: camera-ready
     note: Applies to accepted archival papers.
-  - label: Workshop Schedule
-    date: EMNLP 2026, October 24-29, 2026
-    time: Exact workshop schedule pending
+  - label: Workshop Day
+    date: Thursday, October 29, 2026
+    time: Room F3
     type: event
-    action_label: EMNLP 2026 Program
-    action_url: https://2026.emnlp.org/program/
-    note: EMNLP central program details for workshops and tutorials are not final yet.
+    action_label: View Program
+    action_url: /docinsights-2026/program/
+    note: The full schedule, shared-task sessions, and poster session are on the program page.

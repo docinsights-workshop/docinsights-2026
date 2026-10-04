@@ -22,7 +22,7 @@ title: Home
   <div class="section-heading">
     <p class="section-kicker">Workshop Format</p>
     <h2>Program Preview</h2>
-    <p>Exact timing, room, accepted papers, and confirmed speakers will be announced after the EMNLP workshop program and decisions are finalized.</p>
+    <p>DocInsights 2026 takes place on <strong>Thursday, October 29, 2026</strong>, in Room <strong>F3</strong>. See the <a href="{{ '/program/' | relative_url }}">full program</a>.</p>
   </div>
   {% include program-preview.html %}
 </section>
