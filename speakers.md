@@ -6,10 +6,12 @@ permalink: /speakers/
 
 <section class="section-intro">
   <p class="section-kicker">Invited Talks</p>
-  <h2>Confirmed invited speakers</h2>
-  <p>The workshop balances academic and industry perspectives across document AI, multimodal document reasoning, retrieval-grounded systems, tables/forms/charts, evaluation, and real-world deployment.</p>
+  <h2>Invited speakers: TBD</h2>
+  <p>Our invited speakers will be announced soon. Please check back for updates.</p>
 </section>
 
+{% comment %}
+Speaker cards hidden until speakers are announced (restore by removing this comment block):
 <div class="speaker-grid">
   <article class="speaker-card">
     <img src="{{ '/assets/images/speakers/yunyao_li.jpg' | relative_url }}" alt="Yunyao Li" class="speaker-photo" loading="lazy" decoding="async">
@@ -100,3 +102,4 @@ permalink: /speakers/
   <h2>Talk Details Coming Soon</h2>
   <p>Talk titles and abstracts, bios, timing, and participation details will be posted after the final program is public-ready.</p>
 </div>
+{% endcomment %}
